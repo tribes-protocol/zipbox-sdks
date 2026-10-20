@@ -1,0 +1,64 @@
+{
+  "name": "files_read",
+  "description": "read \u2192 GET /files/download?path=.",
+  "call": {
+    "op": "files.read",
+    "args": {
+      "id": "sbx_1",
+      "path": "/etc/hostname"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/files/download?path=%2Fetc%2Fhostname",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/octet-stream"
+        },
+        "bodyText": "demo\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "text": "demo\n"
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "error_rate_limited_retries",
+  "description": "A retryable error is retried after Retry-After (here 0 s), then succeeds.",
+  "call": {
+    "op": "sandboxes.list",
+    "args": {}
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "0"
+        },
+        "body": {
+          "error": {
+            "code": "rate_limited",
+            "message": "Too many requests",
+            "requestId": "req_test",
+            "retryable": true,
+            "retryAfterMs": 0,
+            "docsUrl": "https://zipbox.ai/docs/errors#rate_limited"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": []
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "length": 0
+    }
+  }
+}

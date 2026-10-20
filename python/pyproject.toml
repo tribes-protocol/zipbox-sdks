@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zipbox"
+version = "0.1.0"
+description = "Drive Zipbox boxes from Python: create, exec, files, PTY, previews."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Tribes Protocol" }]
+keywords = ["zipbox", "sandbox", "vm", "agents", "mcp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+  "Operating System :: OS Independent",
+]
+dependencies = ["httpx>=0.27", "websockets>=13.0"]
+
+[project.urls]
+Homepage = "https://zipbox.ai"
+Documentation = "https://zipbox.ai/docs/sdk-python"
+Repository = "https://github.com/tribes-protocol/zipbox-sdks"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zipbox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["zipbox", "mock_server"]
+
+[[tool.mypy.overrides]]
+module = ["langchain_core.*", "langchain_openai.*", "langgraph.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["langchain_tool", "langgraph_agent"]
+disallow_untyped_decorators = false
+disallow_any_unimported = false
+warn_return_any = false

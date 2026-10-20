@@ -1,0 +1,68 @@
+# Release the zipbox CLI. Runs in CI (release-sdks.yml) from the public
+# tribes-protocol/zipbox-go mirror (this directory at the root of the Go module
+# path), never from the private monorepo. Archives are published to the
+# tribes-protocol/zipbox-sdks release that https://zipbox.ai/install.sh and
+# install.ps1 download from.
+#
+# Archive names carry no version so `releases/latest/download/<name>` always
+# resolves: the installers depend on these exact names.
+version: 2
+
+project_name: zipbox
+
+builds:
+  - id: zipbox
+    main: ./cmd/zipbox
+    binary: zipbox
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/tribes-protocol/zipbox-go/internal/cli.Version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: zipbox
+    ids: [zipbox]
+    name_template: 'zipbox_{{ .Os }}_{{ .Arch }}'
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  github:
+    owner: tribes-protocol
+    name: zipbox-sdks
+  name_template: 'zipbox CLI {{ .Version }}'
+
+brews:
+  - name: zipbox
+    ids: [zipbox]
+    repository:
+      owner: tribes-protocol
+      name: homebrew-tap
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    directory: Formula
+    homepage: https://zipbox.ai/docs/cli
+    description: Drive Zipbox boxes from your terminal
+    license: Apache-2.0
+    install: |
+      bin.install "zipbox"
+    test: |
+      system "#{bin}/zipbox", "--version"
+
+changelog:
+  disable: true

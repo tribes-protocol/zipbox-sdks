@@ -1,0 +1,22 @@
+{
+  "name": "account_whoami",
+  "description": "account.whoami → GET /account/whoami: the account and key behind the credential.",
+  "call": { "op": "account.whoami", "args": {} },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/account/whoami",
+        "headers": { "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT" }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "userId": "did:privy:u",
+          "apiKey": { "id": "key-1", "name": "ci", "kind": "manual", "last4": "TTTT" }
+        }
+      }
+    }
+  ],
+  "expect": { "result": { "userId": "did:privy:u", "apiKey": { "id": "key-1" } } }
+}

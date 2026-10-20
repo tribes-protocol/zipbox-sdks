@@ -1,0 +1,30 @@
+[package]
+name = "zipbox"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Drive Zipbox boxes from Rust: create a box, run commands, move files, open a terminal, publish a port."
+repository = "https://github.com/tribes-protocol/zipbox-sdks"
+homepage = "https://zipbox.ai/docs/sdk-rust"
+documentation = "https://docs.rs/zipbox"
+readme = "README.md"
+keywords = ["zipbox", "sandbox", "vm", "agents", "sdk"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+futures = "0.3"
+rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
+tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-webpki-roots"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }

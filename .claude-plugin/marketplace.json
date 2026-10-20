@@ -1,0 +1,15 @@
+{
+  "name": "zipbox-sdks",
+  "owner": {
+    "name": "Zipbox",
+    "email": "support@tribes.xyz"
+  },
+  "plugins": [
+    {
+      "name": "zipbox",
+      "source": "./",
+      "description": "Drive Zipbox boxes from code: the zipbox-sdk skill for the TypeScript, Python, Go and Rust SDKs and the zipbox CLI.",
+      "strict": false
+    }
+  ]
+}

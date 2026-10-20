@@ -1,0 +1,65 @@
+{
+  "name": "files_mkdir",
+  "description": "files.mkdir \u2192 POST /files/mutate.",
+  "call": {
+    "op": "files.mkdir",
+    "args": {
+      "id": "sbx_1",
+      "path": "/root/workspace/new"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/files/mutate",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        },
+        "body": {
+          "action": "mkdir",
+          "path": "/root/workspace/new"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "path": "/root/workspace/new"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "zipbox-example-long-running-dev-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx long-running-dev-server-preview.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@zipbox/sdk": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "tsx": "4.23.15",
+    "typescript": "5.8.3"
+  }
+}

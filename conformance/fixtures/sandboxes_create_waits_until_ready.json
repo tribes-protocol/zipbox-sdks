@@ -1,0 +1,109 @@
+{
+  "name": "sandboxes_create_waits_until_ready",
+  "description": "create claims with an Idempotency-Key, then re-reads GET /sandbox/:id (backoff) until ready.",
+  "call": {
+    "op": "sandboxes.create",
+    "args": {
+      "name": "demo",
+      "tier": "s"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo",
+          "tier": "s"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "sandboxId": "sbx_1",
+          "userId": "did:privy:u",
+          "hostId": "h1",
+          "name": "demo",
+          "region": "eu",
+          "status": "provisioning",
+          "created": true,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true,
+      "baseUrl": "{{BASE}}"
+    }
+  }
+}

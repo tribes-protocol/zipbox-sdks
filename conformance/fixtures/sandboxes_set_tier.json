@@ -1,0 +1,35 @@
+{
+  "name": "sandboxes_set_tier",
+  "description": "setTier \u2192 POST /sandbox/:id/tier.",
+  "call": {
+    "op": "sandboxes.setTier",
+    "args": {
+      "id": "sbx_1",
+      "tier": "m"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/tier",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        },
+        "body": {
+          "tier": "m"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "tier": "m"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

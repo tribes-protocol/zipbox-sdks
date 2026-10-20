@@ -1,0 +1,30 @@
+{
+  "name": "sandboxes_start",
+  "description": "sandboxes.start \u2192 POST /sandbox/sbx_1/restore.",
+  "call": {
+    "op": "sandboxes.start",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/restore",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "success": true
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

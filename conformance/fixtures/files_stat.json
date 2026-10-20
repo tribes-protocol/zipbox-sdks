@@ -1,0 +1,80 @@
+{
+  "name": "files_stat",
+  "description": "stat lists the parent directory and returns the matching entry.",
+  "call": {
+    "op": "files.stat",
+    "args": {
+      "id": "sbx_1",
+      "path": "/root/workspace/a.txt"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/files?path=%2Froot%2Fworkspace",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "path": "/root/workspace",
+          "entries": [
+            {
+              "name": "a.txt",
+              "kind": "file",
+              "sizeBytes": 2,
+              "modifiedAtMs": 1760000000000
+            },
+            {
+              "name": "src",
+              "kind": "directory",
+              "sizeBytes": 4096,
+              "modifiedAtMs": 1760000000000
+            }
+          ],
+          "truncated": false
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "name": "a.txt",
+      "kind": "file",
+      "sizeBytes": 2
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "sandboxes_restart",
+  "description": "sandboxes.restart \u2192 POST /sandbox/sbx_1/reset.",
+  "call": {
+    "op": "sandboxes.restart",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/reset",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "success": true
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

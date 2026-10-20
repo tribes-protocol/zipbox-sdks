@@ -1,0 +1,40 @@
+{
+  "name": "error_insufficient_credits",
+  "description": "402 is not retried.",
+  "call": {
+    "op": "sandboxes.start",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/restore",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 402,
+        "body": {
+          "error": {
+            "code": "insufficient_credits",
+            "message": "Add credits to continue",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#insufficient_credits"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "insufficient_credits",
+      "status": 402
+    }
+  }
+}

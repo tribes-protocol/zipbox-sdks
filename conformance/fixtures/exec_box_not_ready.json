@@ -1,0 +1,48 @@
+{
+  "name": "exec_box_not_ready",
+  "description": "A box that is not ready raises box_not_running without calling the box.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "archived",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running"
+    }
+  }
+}

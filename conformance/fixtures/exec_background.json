@@ -1,0 +1,79 @@
+{
+  "name": "exec_background",
+  "description": "Background exec answers JSON {id,...} and returns a command handle.",
+  "call": {
+    "op": "sandbox.execBackground",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "npm run dev"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/exec",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        },
+        "body": {
+          "cmd": "npm run dev",
+          "background": true
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "id": "cmd_9",
+          "state": "running",
+          "argv": ["bash", "-lc", "npm run dev"],
+          "cwd": "/root/workspace",
+          "background": true,
+          "exitCode": null,
+          "signal": null,
+          "timedOut": false,
+          "startedAt": "2026-10-19T00:00:00.000Z",
+          "endedAt": null,
+          "stdoutBytes": 0,
+          "stderrBytes": 0
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "cmd_9",
+      "state": "running"
+    }
+  }
+}

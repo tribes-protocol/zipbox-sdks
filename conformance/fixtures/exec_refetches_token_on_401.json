@@ -1,0 +1,115 @@
+{
+  "name": "exec_refetches_token_on_401",
+  "description": "A 401 from the box re-fetches GET /sandbox/:id once and retries with the new token.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/exec",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        }
+      },
+      "response": {
+        "status": 401,
+        "body": {
+          "error": "unauthorized"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_rotated"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/exec",
+        "headers": {
+          "authorization": "Bearer bt_rotated"
+        },
+        "body": {
+          "cmd": "true"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "bodyText": "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_2\"}\n\nid: 0-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0,\"signal\":null,\"timedOut\":false}\n\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "cmd_2",
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "name": "files_write_relative",
+  "description": "A relative path resolves against /root/workspace; write posts the raw bytes to /files/write?dir=&name=.",
+  "call": {
+    "op": "files.write",
+    "args": {
+      "id": "sbx_1",
+      "path": "notes/a.txt",
+      "content": "hi"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/files/write?dir=%2Froot%2Fworkspace%2Fnotes&name=a.txt",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        },
+        "bodyText": "hi"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "path": "/root/workspace/notes/a.txt"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

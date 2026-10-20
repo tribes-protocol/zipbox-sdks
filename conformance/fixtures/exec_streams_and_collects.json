@@ -1,0 +1,71 @@
+{
+  "name": "exec_streams_and_collects",
+  "description": "exec fetches the box token once, POSTs /exec on the box, and collects the SSE stream. A non-zero exit is a result, not an error.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "echo hello; echo warn >&2; exit 3"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/exec",
+        "headers": {
+          "authorization": "Bearer bt_test_token",
+          "accept": "text/event-stream"
+        },
+        "body": {
+          "cmd": "echo hello; echo warn >&2; exit 3"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "bodyText": "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_1\"}\n\nid: 6-0\nevent: stdout\ndata: {\"data\":\"hello\\n\"}\n\nid: 6-5\nevent: stderr\ndata: {\"data\":\"warn\\n\"}\n\nid: 6-5\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":3,\"signal\":null,\"timedOut\":false}\n\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "cmd_1",
+      "exitCode": 3,
+      "stdout": "hello\n",
+      "stderr": "warn\n"
+    }
+  }
+}

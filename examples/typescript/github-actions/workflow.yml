@@ -1,0 +1,20 @@
+# Copy to .github/workflows/zipbox-tests.yml and run-tests.ts to the repository
+# root. Add ZIPBOX_API_KEY as a repository
+# secret (zipbox.ai → Settings → API keys). For a private repository, connect
+# GitHub in zipbox.ai once: the box then clones with your credentials.
+name: Tests in a Zipbox box
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @zipbox/sdk@0.1.0 tsx@4.23.15
+      - run: npx tsx run-tests.ts
+        env:
+          ZIPBOX_API_KEY: ${{ secrets.ZIPBOX_API_KEY }}
