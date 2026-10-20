@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zipbox"
-version = "0.1.0"
+version = "0.1.1"
 description = "Drive Zipbox boxes from Python: create, exec, files, PTY, previews."
 readme = "README.md"
 license = "Apache-2.0"

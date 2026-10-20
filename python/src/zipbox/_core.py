@@ -40,7 +40,7 @@ from zipbox._models import (
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
