@@ -13,9 +13,13 @@ package zipbox
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,7 +29,7 @@ import (
 )
 
 // Version is the SDK version, sent in the User-Agent header.
-const Version = "0.1.1"
+const Version = "0.1.2"
 
 // DefaultBaseURL is the Zipbox control plane.
 const DefaultBaseURL = "https://api.tribes.xyz"
@@ -137,13 +141,26 @@ func jsonBody(v any) (func() (io.Reader, error), error) {
 
 // do sends req, retrying retryable failures when req.retry is set. It returns
 // a 2xx response with its body open, or an error (a *Error for HTTP failures).
+//
+// A failure to connect or to complete the TLS handshake is retried for EVERY
+// method with no attempt ceiling: nothing was sent, and a box's certificate can
+// trail its readiness. The ladder is capped and jittered; ctx is the only bound.
 func (c *Client) do(ctx context.Context, req *request) (*http.Response, error) {
+	unsentAttempt := 0
 	for attempt := 0; ; attempt++ {
 		resp, err := c.once(ctx, req)
 		if err == nil {
 			return resp, nil
 		}
 		zerr, ok := asError(err)
+		if ok && zerr.unsent {
+			if err := sleep(ctx, c.backoff(unsentAttempt)); err != nil {
+				return nil, err
+			}
+			unsentAttempt++
+			attempt--
+			continue
+		}
 		if !req.retry || !ok || attempt >= c.maxRetries ||
 			(zerr.Code != CodeRateLimited && zerr.Code != CodeUnavailable) {
 			return nil, err
@@ -188,6 +205,7 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 			return nil, ctx.Err()
 		}
 		zerr := newError(CodeUnavailable, err.Error())
+		zerr.unsent = isUnsent(err)
 		return nil, zerr
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -196,6 +214,33 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return nil, errorFromResponse(resp, data)
+}
+
+// isUnsent reports whether a transport error provably happened before the request
+// left: a failed dial (DNS, refusal, unreachable), a TLS alert from the peer during
+// the handshake (Go reports it as a "remote error" OpError), or a certificate the
+// handshake could not verify. A reset or EOF is not: those can follow a sent request.
+func isUnsent(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "remote error") {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var verifyErr *tls.CertificateVerificationError
+	if errors.As(err, &verifyErr) {
+		return true
+	}
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &recordErr) {
+		return true
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &invalid)
 }
 
 // api calls the control plane with the account key.

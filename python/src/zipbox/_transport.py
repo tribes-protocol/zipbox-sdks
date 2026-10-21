@@ -15,7 +15,11 @@ _NO_TIMEOUT = httpx.Timeout(None, connect=30.0)
 
 
 def _network_error(error: Exception) -> ZipboxError:
-    return ZipboxError("unavailable", f"network error: {error}", retryable=True)
+    # ConnectError covers DNS, refusal and the TLS handshake (a fresh box name refuses
+    # TLS until its certificate lands); ConnectTimeout is the connect phase too. A
+    # ReadError/WriteError may follow a request that was already sent.
+    unsent = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
+    return ZipboxError("unavailable", f"network error: {error}", retryable=True, unsent=unsent)
 
 
 class _StreamState:

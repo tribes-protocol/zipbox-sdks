@@ -41,6 +41,7 @@ class ZipboxError(Exception):
         retryable: bool | None = None,
         retry_after_ms: int | None = None,
         docs_url: str | None = None,
+        unsent: bool = False,
     ) -> None:
         super().__init__(message)
         self.code: ErrorCode = code
@@ -50,6 +51,9 @@ class ZipboxError(Exception):
         self.retryable = code in _RETRYABLE if retryable is None else retryable
         self.retry_after_ms = retry_after_ms
         self.docs_url = docs_url or f"{DOCS_ERRORS_URL}#{code}"
+        # True when the request provably never left: the connection or its TLS
+        # handshake failed. Any method may be retried then, since nothing was sent.
+        self.unsent = unsent
 
     def __str__(self) -> str:
         status = f" ({self.status})" if self.status is not None else ""

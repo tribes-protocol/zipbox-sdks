@@ -6,7 +6,7 @@
 
 An API key, one install line, and ten lines of code that open a box and run a command.
 
-> **Agents:** read [/llms.txt](https://zipbox.ai/llms.txt) for every page and section, or use the `search_docs` tool on `https://mcp.zipbox.ai`. The SDKs move faster than your training data.
+> **Agents:** read [/llms.txt](https://zipbox.ai/llms.txt) for every page and section, or use the `search_docs` tool on `https://mcp.zipbox.ai/docs/mcp` (no sign-in needed). The SDKs move faster than your training data.
 
 ## Get an API key
 

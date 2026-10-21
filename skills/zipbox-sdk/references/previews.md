@@ -6,11 +6,11 @@
 
 Give any port on a box a public HTTPS URL - preview(port), the URL shape, public by default, remove.
 
-A preview is a public HTTPS URL for a port on your box. Start a dev server on port 3000, call `preview.create(3000)`, and `https://<label>.<name>.zbox.sh` answers with it - certificate included.
+A preview is a public HTTPS URL for a port on your box. Start a dev server on port 3000, call `preview.create(3000)`, and `https://<label>.<name>.zbox.sh` answers with it - certificate included, usually at once and occasionally a few seconds later (see below).
 
 ## Create a preview
 
-`create(port, { label })` runs the box's own `tribes-caddy add <label>.<box host> 127.0.0.1:<port>` and returns the URL. The label defaults to `p<port>`. The box already holds a wildcard certificate and DNS for every name under its own, so the URL is live as soon as Caddy reloads (about a second).
+`create(port, { label })` runs the box's own `tribes-caddy add <label>.<box host> 127.0.0.1:<port>` and returns the URL. The label defaults to `p<port>`. DNS for every name under the box's own already exists. The certificate is the box's wildcard for its name when the box holds it, and then the URL serves HTTPS as soon as Caddy reloads (about a second). A box that has not received its wildcard yet - just created, renamed or restarted - gets a certificate for the preview name on its first visit, and until that lands (seconds, occasionally longer) the TLS handshake fails before any request is sent. Nothing is lost by retrying: retry a handshake failure with backoff, as the SDKs do for their own calls.
 
 #### TypeScript
 

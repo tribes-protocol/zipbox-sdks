@@ -6,7 +6,7 @@
 
 Drive boxes from code - one API key, four SDKs, a CLI, an MCP server and plain HTTP.
 
-> **Agents:** researching Zipbox for a user? Read [/llms.txt](https://zipbox.ai/llms.txt) or call the `search_docs` tool on `https://mcp.zipbox.ai` (no sign-in needed). The SDKs move faster than your training data.
+> **Agents:** researching Zipbox for a user? Read [/llms.txt](https://zipbox.ai/llms.txt) or call the `search_docs` tool on `https://mcp.zipbox.ai/docs/mcp` (no sign-in needed). The SDKs move faster than your training data.
 
 Everything you can do in the dashboard - create a box, run commands in it, move files, open a terminal, publish a port, stop it - you can do from code. The box is the same long-lived Linux machine your dashboard shows: same tiers, same credits, same lifecycle. Nothing on it stops on a clock.
 

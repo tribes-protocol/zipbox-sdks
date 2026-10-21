@@ -73,6 +73,10 @@ class SandboxDetail(SandboxInfo):
 
     ready: bool = False
     base_url: str | None = None
+    # Whether base_url completes a TLS handshake with a trusted certificate yet. A
+    # fresh name's certificate can trail ``ready``; the SDK's box calls retry the
+    # handshake meanwhile.
+    https_ready: bool = False
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SandboxDetail:
@@ -82,6 +86,7 @@ class SandboxDetail(SandboxInfo):
             **{k: getattr(base, k) for k in base.__dataclass_fields__},
             ready=data.get("ready") is True,
             base_url=_opt_str(data.get("baseUrl")),
+            https_ready=data.get("httpsReady") is True,
         )
 
 

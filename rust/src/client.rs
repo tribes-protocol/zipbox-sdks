@@ -295,6 +295,10 @@ impl Zipbox {
     }
 
     /// One request to a box. A 401 re-fetches the box token once and retries once.
+    ///
+    /// A second 401 is not a deleted key: that fails the re-fetch itself, at the
+    /// control plane. The control plane just vouched for the key, so the box has not
+    /// received its token yet, and the error says so.
     pub(crate) async fn box_request(
         &self,
         id: &str,
@@ -331,6 +335,13 @@ impl Zipbox {
                     retry,
                 )
                 .await
+                .map_err(|err| {
+                    if err.status == Some(401) {
+                        key_not_received(id, err)
+                    } else {
+                        err
+                    }
+                })
             }
             other => other,
         }
@@ -356,6 +367,7 @@ impl Zipbox {
         retry: bool,
     ) -> Result<Response> {
         let mut backoff = Backoff::new(self.inner.retry_base_delay, Duration::from_secs(30));
+        let mut unsent_backoff = Backoff::new(self.inner.retry_base_delay, Duration::from_secs(30));
         let mut attempt = 0u32;
         loop {
             let mut req = self
@@ -386,6 +398,14 @@ impl Zipbox {
                     let bytes = resp.bytes().await.map_err(Error::transport)?;
                     Error::from_response(status, retry_after, &bytes)
                 }
+                // A failure to connect or to complete the TLS handshake: nothing was
+                // sent, and a box's certificate can trail its readiness. Retried for
+                // EVERY method with no attempt ceiling, on a capped, jittered ladder;
+                // dropping the future is the caller's bound.
+                Err(err) if err.is_connect() => {
+                    tokio::time::sleep(unsent_backoff.next_delay()).await;
+                    continue;
+                }
                 Err(err) => Error::transport(err),
             };
             let retryable = matches!(
@@ -400,6 +420,22 @@ impl Zipbox {
             tokio::time::sleep(delay).await;
         }
     }
+}
+
+/// The second 401 of `box_request`, worded for what it is.
+pub(crate) fn key_not_received(id: &str, err: Error) -> Error {
+    let mut out = Error::new(
+        ErrorCode::Unauthorized,
+        format!(
+            "box {id} has not received this API key's token yet: the control plane accepts \
+             the key, the box does not. A key created moments ago reaches its running boxes \
+             within seconds; retry then"
+        ),
+    );
+    out.status = Some(401);
+    out.retryable = true;
+    out.request_id = err.request_id;
+    out
 }
 
 pub(crate) fn json_body(value: &impl Serialize) -> Body {
@@ -427,11 +463,24 @@ pub(crate) fn encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::encode;
+    use super::{encode, key_not_received};
+    use crate::error::{Error, ErrorCode};
 
     #[test]
     fn encodes_paths_for_queries() {
         assert_eq!(encode("/root/workspace/a b"), "%2Froot%2Fworkspace%2Fa%20b");
         assert_eq!(encode("plain-name_1.txt"), "plain-name_1.txt");
+    }
+
+    // #4137: the box's own 401 used to pass through as if the key were deleted.
+    #[test]
+    fn a_second_401_says_the_box_has_not_received_a_live_key() {
+        let mut box_401 = Error::new(ErrorCode::Unauthorized, "unauthorized");
+        box_401.status = Some(401);
+        let err = key_not_received("sbx_1", box_401);
+        assert!(matches!(err.code, ErrorCode::Unauthorized));
+        assert_eq!(err.status, Some(401));
+        assert!(err.retryable);
+        assert!(err.message.contains("has not received"));
     }
 }

@@ -54,6 +54,9 @@ type Error struct {
 
 	// hasRetryAfter distinguishes "retry now" (Retry-After: 0) from no hint.
 	hasRetryAfter bool
+	// unsent marks a request that provably never left: the connection or its TLS
+	// handshake failed. Any method may be retried then, since nothing was sent.
+	unsent bool
 }
 
 // Error implements the error interface.

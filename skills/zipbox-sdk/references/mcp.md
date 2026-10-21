@@ -73,8 +73,8 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 | `preview_link`             | `id`, `port`, `label?`            |                       | A public HTTPS URL for a port ([Previews](https://zipbox.ai/docs/previews.md))              |
 | `get_logs`                 | `id`, `since?`                    | read-only             | The box's system journal                                                |
 | `desktop_screenshot`       | `id`                              | read-only             | A PNG of the box's desktop, returned as an image                        |
-| `search_docs`              | `query`                           | read-only, no sign-in | Search these docs                                                       |
-| `read_doc`                 | `slug`                            | read-only, no sign-in | One docs page as markdown                                               |
+| `search_docs`              | `query`                           | read-only (see below) | Search these docs                                                       |
+| `read_doc`                 | `slug`                            | read-only (see below) | One docs page as markdown                                               |
 
 **Output cap.** A tool result shows at most 32 KiB of output. `execute_command` returns the command id with its result; `get_command_output` reads the rest from the box, which keeps everything (64 MiB per stream).
 
@@ -93,7 +93,11 @@ The `onboard_box` prompt walks a model through opening a box and running a comma
 
 ## Read the docs before signing in
 
-`search_docs` and `read_doc` work without OAuth or a key, so a client can learn how to connect before it connects.
+`search_docs` and `read_doc` also run on a second, docs-only endpoint, `https://mcp.zipbox.ai/docs/mcp`, which needs no OAuth or key, so a client can learn how to connect before it connects. `https://mcp.zipbox.ai` itself always asks for sign-in (`401` with an OAuth challenge), docs tools included.
+
+```sh
+claude mcp add --transport http zipbox-docs https://mcp.zipbox.ai/docs/mcp
+```
 
 ## OAuth and removing access
 

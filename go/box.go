@@ -124,6 +124,17 @@ func (b *Box) do(ctx context.Context, req *request, boxPath string) (*boxRespons
 		if attempt == 0 && IsCode(err, CodeUnauthorized) {
 			continue
 		}
+		if IsCode(err, CodeUnauthorized) {
+			// Not a deleted key: that fails the re-read above, at the control plane.
+			// The control plane just vouched for this key, so the box has not
+			// received its token yet.
+			zerr := newError(CodeUnauthorized, "box "+b.ID+" has not received this API key's token yet: "+
+				"the control plane accepts the key, the box does not. A key created moments ago "+
+				"reaches its running boxes within seconds; retry then")
+			zerr.Status = http.StatusUnauthorized
+			zerr.Retryable = true
+			return nil, zerr
+		}
 		return nil, err
 	}
 }

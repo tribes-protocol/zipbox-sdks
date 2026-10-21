@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 import time
 
+import httpx
 import pytest
 
 from zipbox import ZipboxError
 from zipbox._backoff import Backoff
 from zipbox._core import _SCREENSHOT, BoxTarget, Core, exec_body, resolve_config, resolve_path
-from zipbox._effects import HttpRequest, HttpResponse
+from zipbox._effects import HttpRequest, HttpResponse, Sleep
 from zipbox._errors import code_for_status, error_from_response, parse_retry_after_ms
 from zipbox._sse import SseParser
+from zipbox._transport import _network_error
 
 EXIT = b'id: 6-0\nevent: exit\ndata: {"state":"exited","exitCode":0}\n\n'
 
@@ -165,3 +167,53 @@ def test_screenshot_uses_the_images_ffmpeg_and_fails_loudly() -> None:
     assert _SCREENSHOT.startswith("set -o pipefail;")
     assert 'ffmpeg -loglevel error -f x11grab -i "${DISPLAY:-:10}"' in _SCREENSHOT
     assert "import " not in _SCREENSHOT
+
+
+def test_only_connect_phase_failures_count_as_unsent() -> None:
+    # ConnectError covers DNS, refusal and the TLS handshake a fresh box name fails
+    # until its certificate lands (#4139); a read error may follow a sent request.
+    assert _network_error(httpx.ConnectError("tlsv1 alert internal error")).unsent is True
+    assert _network_error(httpx.ConnectTimeout("connect")).unsent is True
+    assert _network_error(httpx.ReadError("reset")).unsent is False
+
+
+def test_an_unsent_post_retries_past_max_retries_until_it_connects() -> None:
+    # #4139: exec on a box whose HTTPS was not up yet failed at once — only GETs and
+    # retry=True requests were retried, at most max_retries times. Nothing was sent.
+    core = Core(resolve_config("zb_k", "https://api.test", 0))
+    request = HttpRequest("POST", "https://box.test/exec", {})
+    op = core.send(request, retry=False)
+    assert op.send(None) == request
+    for _ in range(5):
+        effect = op.throw(_network_error(httpx.ConnectError("tlsv1 alert internal error")))
+        assert isinstance(effect, Sleep)
+        assert op.send(None) == request
+    with pytest.raises(StopIteration) as done:
+        op.send(HttpResponse(200, {}, b"{}"))
+    assert done.value.value.status == 200
+
+
+def test_a_post_whose_failure_may_follow_the_send_is_not_repeated() -> None:
+    core = Core(resolve_config("zb_k", "https://api.test", 3))
+    op = core.send(HttpRequest("POST", "https://box.test/exec", {}), retry=False)
+    op.send(None)
+    with pytest.raises(ZipboxError) as caught:
+        op.throw(_network_error(httpx.ReadError("reset")))
+    assert caught.value.code == "unavailable"
+
+
+def test_a_second_401_says_the_box_has_not_received_a_live_key() -> None:
+    # #4137: the old message ("was the key deleted?") was false — the control plane had
+    # just re-issued the token, which it never does for a deleted key.
+    core = Core(resolve_config("zb_k", "https://api.test", 0))
+    core._targets["sbx"] = BoxTarget("https://b.zbox.sh", "bt_old")
+    op = core.box("sbx", "POST", "/exec")
+    op.send(None)
+    refetch = op.send(HttpResponse(401, {}, b""))
+    assert isinstance(refetch, HttpRequest) and refetch.method == "GET"
+    body = {"id": "sbx", "status": "running", "ready": True, "baseUrl": "https://b.zbox.sh"}
+    op.send(HttpResponse(200, {}, json.dumps({**body, "boxToken": "bt_new"}).encode()))
+    with pytest.raises(ZipboxError) as caught:
+        op.send(HttpResponse(401, {}, b""))
+    assert caught.value.code == "unauthorized" and caught.value.retryable is True
+    assert "has not received" in caught.value.message

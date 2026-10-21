@@ -83,6 +83,11 @@ pub struct SandboxDetail {
     /// Running and serving the owner's generation: the box answers requests.
     #[serde(default)]
     pub ready: bool,
+    /// Whether `base_url` completes a TLS handshake with a trusted certificate yet.
+    /// A fresh name's certificate can trail `ready`; the client's box calls retry the
+    /// handshake meanwhile.
+    #[serde(default)]
+    pub https_ready: bool,
     /// The box's HTTPS origin, once ready.
     #[serde(default)]
     pub base_url: Option<String>,
@@ -96,6 +101,7 @@ impl std::fmt::Debug for SandboxDetail {
         f.debug_struct("SandboxDetail")
             .field("info", &self.info)
             .field("ready", &self.ready)
+            .field("https_ready", &self.https_ready)
             .field("base_url", &self.base_url)
             .field("box_token", &self.box_token.as_ref().map(|_| "<redacted>"))
             .finish()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zipbox"
-version = "0.1.1"
+version = "0.1.2"
 description = "Drive Zipbox boxes from Python: create, exec, files, PTY, previews."
 readme = "README.md"
 license = "Apache-2.0"
@@ -17,7 +17,9 @@ classifiers = [
   "Typing :: Typed",
   "Operating System :: OS Independent",
 ]
-dependencies = ["httpx>=0.27", "websockets>=13.0"]
+# certifi is httpx's default trust store; 2026.10.19 drops the roots the compromised
+# eMudhra intermediates chain to (October 2026), so it is a floor, not a convenience.
+dependencies = ["httpx>=0.27", "websockets>=13.0", "certifi>=2026.10.19"]
 
 [project.urls]
 Homepage = "https://zipbox.ai"

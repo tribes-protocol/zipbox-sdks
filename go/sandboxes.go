@@ -56,6 +56,10 @@ type SandboxDetail struct {
 	Sandbox
 	// Ready is true once the box is running and serving its owner.
 	Ready bool `json:"ready"`
+	// HTTPSReady is true once BaseURL completes a TLS handshake with a trusted
+	// certificate. A fresh name's certificate can trail Ready; the SDK's box calls
+	// retry the handshake meanwhile.
+	HTTPSReady bool `json:"httpsReady"`
 	// BaseURL is the box's HTTPS origin once Ready.
 	BaseURL *string `json:"baseUrl,omitempty"`
 	// BoxToken is the per-key, per-box bearer the box accepts. The SDK manages

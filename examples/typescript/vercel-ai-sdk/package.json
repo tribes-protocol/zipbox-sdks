@@ -7,7 +7,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@zipbox/sdk": "0.1.1",
+    "@zipbox/sdk": "0.1.2",
     "@ai-sdk/anthropic": "4.0.83",
     "ai": "7.0.145",
     "zod": "4.6.7"

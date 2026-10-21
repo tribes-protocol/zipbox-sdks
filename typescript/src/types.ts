@@ -49,6 +49,12 @@ export interface SandboxInfo {
 export interface SandboxDetail extends SandboxInfo {
   /** Running and serving the owner's generation: the box answers on `baseUrl`. */
   ready: boolean
+  /**
+   * Whether `baseUrl` completes a TLS handshake with a trusted certificate yet. A
+   * fresh name's certificate can trail `ready` by seconds to minutes; the SDK's own
+   * box calls retry the handshake meanwhile. Absent from an older control plane.
+   */
+  httpsReady?: boolean
   /** The box's HTTPS origin, once ready. */
   baseUrl?: string | null
   /** Per-key, per-box bearer token the box accepts. Held inside the client; never on a returned row. */

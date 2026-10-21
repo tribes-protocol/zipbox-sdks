@@ -40,7 +40,7 @@ from zipbox._models import (
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
@@ -251,13 +251,22 @@ class Core:
     def send(
         self, request: HttpRequest, *, retry: bool, passthrough: frozenset[int] = frozenset()
     ) -> Op[HttpResponse]:
-        """Send with the SDK retry rule; raise ``ZipboxError`` on a non-2xx status."""
+        """Send with the SDK retry rule; raise ``ZipboxError`` on a non-2xx status.
+
+        A failure to connect or to complete the TLS handshake is retried for EVERY
+        method with no attempt ceiling (CLAUDE.md §0): nothing was sent, and a box's
+        certificate can trail its readiness. The ladder is capped and jittered.
+        """
         attempt = 0
         backoff = self._backoff()
+        unsent_backoff = self._backoff()
         while True:
             try:
                 response: HttpResponse = yield request
             except ZipboxError as network_error:
+                if network_error.unsent:
+                    yield Sleep(unsent_backoff.next())
+                    continue
                 error = network_error
             else:
                 if 200 <= response.status < 300 or response.status in passthrough:
@@ -355,10 +364,16 @@ class Core:
             if response.handle is not None:
                 yield CloseStream(response)
             if refetched:
+                # Not a deleted key: that fails the re-read above, at the control
+                # plane. The control plane just vouched for this key, so the box has
+                # not received its token yet.
                 raise ZipboxError(
                     "unauthorized",
-                    "The box refused this key's token (was the key deleted?).",
+                    f"Box {sandbox_id} has not received this API key's token yet: the "
+                    "control plane accepts the key, the box does not. A key created "
+                    "moments ago reaches its running boxes within seconds; retry then.",
                     status=401,
+                    retryable=True,
                 )
             refetched = True
             self.forget(sandbox_id)

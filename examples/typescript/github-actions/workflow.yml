@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install --no-save @zipbox/sdk@0.1.1 tsx@4.23.15
+      - run: npm install --no-save @zipbox/sdk@0.1.2 tsx@4.23.15
       - run: npx tsx run-tests.ts
         env:
           ZIPBOX_API_KEY: ${{ secrets.ZIPBOX_API_KEY }}

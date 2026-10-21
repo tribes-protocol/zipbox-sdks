@@ -64,6 +64,10 @@ function resolvedFromDetail(detail: SandboxDetail): ResolvedBox | null {
  * Requests to a box. The box token comes from `GET /sandbox/:id` on first use and
  * is cached for the life of the client. A 401 from the box re-reads the detail
  * once and retries once; a second 401 is the caller's `unauthorized`.
+ *
+ * That second 401 is NOT a deleted key: a deleted key fails the re-read itself,
+ * at the control plane. The control plane just vouched for the key, so the box has
+ * not received its token yet — say so, and leave the retry to the caller.
  */
 export class BoxTransport {
   // ES-private: these hold box tokens, which must never show up in a logged object.
@@ -108,7 +112,21 @@ export class BoxTransport {
       if (!(error instanceof ZipboxError) || error.status !== 401) throw error
       this.invalidate(id)
       const fresh = await this.resolve(id, request.signal)
-      return this.send(fresh, request)
+      try {
+        return await this.send(fresh, request)
+      } catch (second) {
+        if (!(second instanceof ZipboxError) || second.status !== 401) throw second
+        throw new ZipboxError({
+          code: 'unauthorized',
+          message:
+            `box ${id} has not received this API key's token yet: the control plane ` +
+            'accepts the key, the box does not. A key created moments ago reaches its ' +
+            'running boxes within seconds; retry then.',
+          status: 401,
+          retryable: true,
+          requestId: second.requestId
+        })
+      }
     }
   }
 

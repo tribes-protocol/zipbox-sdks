@@ -56,9 +56,10 @@ Other fields are internal and may change without notice.
 
 ## GET /sandbox/:id and the box token
 
-`GET /sandbox/:id` adds three fields to the row:
+`GET /sandbox/:id` adds four fields to the row:
 
-- `ready` - the box is running and serving you. Only then can you call it.
+- `ready` - the box is running and serving you, and accepts every live key's token. Only then can you call it.
+- `httpsReady` - `baseUrl` completes a TLS handshake with a trusted certificate. A box never waits for its certificate to boot, so a freshly named or restarted box can be `ready` a few seconds to minutes before this turns true; until then a request fails in the TLS handshake, before anything is sent, and is safe to retry. The SDKs retry it for you.
 - `baseUrl` - the box's HTTPS origin, e.g. `https://demo.zbox.sh`. Null until `ready`.
 - `boxToken` - the bearer the box accepts for **this key on this box**. Null until `ready`, and always null when the dashboard calls the route.
 
@@ -79,7 +80,7 @@ curl https://api.tribes.xyz/sandbox/$ID \
 }
 ```
 
-The token is the same every time you ask (it is derived from your key and the box, never stored), has no expiry, and is accepted by no other box. Deleting the key kills every token derived from it. If the box answers `401`, fetch this route again and retry once.
+The token is the same every time you ask (it is derived from your key and the box, never stored), has no expiry, and is accepted by no other box. Deleting the key kills every token derived from it. If the box answers `401`, fetch this route again and retry once. If this route answers but the box still says `401`, the key is live and the box has not received its token yet (a key created moments ago reaches running boxes within seconds): retry shortly. A deleted key fails this route itself.
 
 ## Create a box
 
