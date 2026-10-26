@@ -12,7 +12,7 @@ Zipbox runs one hosted MCP server, `https://mcp.zipbox.ai` (streamable HTTP, wit
 
 **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector → `https://mcp.zipbox.ai`. Claude opens the Zipbox sign-in; approve it and the tools appear.
 
-**Claude Code:**
+**Claude Code:** the [Zipbox plugin](https://zipbox.ai/docs/integrations.md#claude-code) includes this server, with a pane of your boxes and `/zipbox` commands. To add the server alone:
 
 ```sh
 claude mcp add --transport http zipbox https://mcp.zipbox.ai

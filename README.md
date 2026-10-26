@@ -67,11 +67,16 @@ exits non-zero is a result, never an error.
 
 - `conformance/` — fixtures every SDK runs against a mock server.
 - `examples/` — runnable projects (framework integrations, CI, agents driving boxes).
-- `.claude-plugin/marketplace.json` — the Claude Code plugin marketplace for the public
-  mirror. It declares one plugin, `zipbox`, rooted at the mirror's top level, whose skill
-  is discovered at `skills/zipbox-sdk/SKILL.md`. The mirror export copies
-  `harnesses/setup/skills/zipbox-sdk/` (with its generated `references/`) to that path;
-  `npx skills add tribes-protocol/zipbox-sdks --skill zipbox-sdk` reads the same copy.
+- `claude-plugin/` — the Zipbox plugin for Claude Code: the hosted MCP server
+  (`.mcp.json`), a mod with the `/zipbox` pane and commands (`hooks/`, tested by
+  `claude plugin test`), and the `zipbox-sdk` skill. Install it with
+  `claude plugin marketplace add tribes-protocol/zipbox-sdks`, then
+  `claude plugin install zipbox@zipbox-sdks`; see
+  [zipbox.ai/docs/integrations](https://zipbox.ai/docs/integrations).
+- `.claude-plugin/marketplace.json` — the marketplace that lists that plugin. The mirror
+  export copies `harnesses/setup/skills/zipbox-sdk/` (with its generated `references/`)
+  to `skills/zipbox-sdk/` for `npx skills add`, and into `claude-plugin/skills/zipbox-sdk/`
+  for the plugin.
 
 This tree is the only place the SDKs are edited. Releases export it to the public
 mirror `tribes-protocol/zipbox-sdks` (Apache-2.0), which the package registries and Go

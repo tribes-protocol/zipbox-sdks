@@ -26,7 +26,7 @@ The installers verify the release checksum and install into a user-writable dire
 zipbox login
 ```
 
-`login` opens `zipbox.ai/cli/auth` in your browser. Sign in, and the page mints a key of kind `cli` and hands it to the CLI on a local callback - like `gh auth login`. The key is stored in your user config directory with owner-only permissions. In CI, skip `login` and set `ZIPBOX_API_KEY`; the environment variable always wins.
+`login` opens `zipbox.ai/cli/auth` in your browser. Sign in, and the page mints a key of kind `cli` and hands it to the CLI on a local callback - like `gh auth login`. The key is stored in your user config directory with owner-only permissions. In CI, skip `login` and set `ZIPBOX_API_KEY`; the environment variable always wins. The [Claude Code plugin](https://zipbox.ai/docs/integrations.md#claude-code)'s `/zipbox login` runs this same flow and reads the same stored key.
 
 | Command                     | Does                                                      |
 | --------------------------- | --------------------------------------------------------- |

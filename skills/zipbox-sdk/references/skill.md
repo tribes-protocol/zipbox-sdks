@@ -14,7 +14,7 @@ The Zipbox skill (`zipbox-sdk`) is a packaged set of instructions an agent loads
 npx skills add tribes-protocol/zipbox-sdks --skill zipbox-sdk
 ```
 
-For Claude Code, add the public repository as a plugin marketplace:
+For Claude Code, install the Zipbox plugin. It carries this skill, the [MCP server](https://zipbox.ai/docs/mcp.md) and the `/zipbox` pane and commands ([Integrations](https://zipbox.ai/docs/integrations.md#claude-code)):
 
 ```sh
 claude plugin marketplace add tribes-protocol/zipbox-sdks

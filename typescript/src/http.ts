@@ -2,7 +2,7 @@ import { backoffDelay, sleep } from './backoff.js'
 import { errorFromResponse, ZipboxError } from './errors.js'
 import type { FetchLike } from './types.js'
 
-const SDK_VERSION = '0.1.2'
+const SDK_VERSION = '0.1.3'
 const USER_AGENT = `zipbox-sdk-typescript/${SDK_VERSION}`
 const RETRY_CAP_MS = 30_000
 

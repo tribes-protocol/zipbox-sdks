@@ -129,7 +129,8 @@ One account API key (`zb_…`) does everything the dashboard can do except mint 
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | Writing an app or a script                        | An SDK: [TypeScript](https://zipbox.ai/docs/sdk-ts.md), [Python](https://zipbox.ai/docs/sdk-python.md), [Go](https://zipbox.ai/docs/sdk-go.md), [Rust](https://zipbox.ai/docs/sdk-rust.md) |
 | At a terminal, or in CI                           | The [CLI](https://zipbox.ai/docs/cli.md)                                                                                       |
-| Connecting Claude, Codex, Cursor or another agent | The [MCP server](https://zipbox.ai/docs/mcp.md)                                                                                |
+| Working in Claude Code                            | The [Claude Code plugin](https://zipbox.ai/docs/integrations.md#claude-code): MCP, skill, a pane of your boxes                 |
+| Connecting Claude, Codex, Cursor or another agent | The [MCP server](https://zipbox.ai/docs/mcp.md); every harness is on [Integrations](https://zipbox.ai/docs/integrations.md)                        |
 | In a language without an SDK                      | [Plain HTTP](https://zipbox.ai/docs/http-api.md) - every route works with curl                                                 |
 
 ## Machine entry points

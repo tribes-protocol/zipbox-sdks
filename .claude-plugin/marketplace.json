@@ -4,12 +4,12 @@
     "name": "Zipbox",
     "email": "support@tribes.xyz"
   },
+  "description": "Zipbox for Claude Code: drive your Zipbox boxes and their agents from Claude Code.",
   "plugins": [
     {
       "name": "zipbox",
-      "source": "./",
-      "description": "Drive Zipbox boxes from code: the zipbox-sdk skill for the TypeScript, Python, Go and Rust SDKs and the zipbox CLI.",
-      "strict": false
+      "source": "./claude-plugin",
+      "description": "Zipbox in Claude Code: a pane of your boxes and their agent tasks, /zipbox commands, the Zipbox MCP server and the zipbox-sdk skill."
     }
   ]
 }

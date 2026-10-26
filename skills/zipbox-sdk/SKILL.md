@@ -275,6 +275,7 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | Exact method lists per language                        | `references/sdk-python.md`, `references/sdk-ts.md`, `references/sdk-go.md`, `references/sdk-rust.md` |
 | Use the CLI, SSH, the desktop                          | `references/cli.md`                                                                                  |
 | Connect an MCP client, the tool list                   | `references/mcp.md`, `references/oauth.md`                                                           |
+| Set up Claude Code, Claude, Codex or Cursor            | `references/integrations.md`                                                                         |
 | Framework integrations (AI SDK, LangChain, Agents SDK) | `references/examples.md`                                                                             |
 | Decode an error or a limit                             | `references/errors.md`                                                                               |
 | See everything Zipbox can and cannot do                | `references/api.md`                                                                                  |

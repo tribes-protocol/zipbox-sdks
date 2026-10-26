@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zipbox": {
+      "type": "http",
+      "url": "https://mcp.zipbox.ai"
+    }
+  }
+}
