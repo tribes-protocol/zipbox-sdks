@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from zipbox._backoff import Backoff
 from zipbox._core import _SCREENSHOT, BoxTarget, Core, exec_body, resolve_config, resolve_path
 from zipbox._effects import HttpRequest, HttpResponse, Sleep
 from zipbox._errors import code_for_status, error_from_response, parse_retry_after_ms
+from zipbox._models import ExecResult
 from zipbox._sse import SseParser
 from zipbox._transport import _network_error
 
@@ -217,3 +219,57 @@ def test_a_second_401_says_the_box_has_not_received_a_live_key() -> None:
         op.send(HttpResponse(401, {}, b""))
     assert caught.value.code == "unauthorized" and caught.value.retryable is True
     assert "has not received" in caught.value.message
+
+
+@pytest.mark.parametrize(
+    ("origin", "apex"),
+    [
+        ("https://box--demo.zbox.sh", "demo.zbox.sh"),
+        ("https://box--box--demo.zbox.sh", "box--demo.zbox.sh"),
+        ("https://demo.zbox.sh", "demo.zbox.sh"),
+        ("https://mailbox--demo.zbox.sh", "mailbox--demo.zbox.sh"),
+        ("http://127.0.0.1:9100", "127.0.0.1"),
+    ],
+)
+def test_preview_apex_preserves_the_transport_origin(origin: str, apex: str) -> None:
+    target = BoxTarget(origin, "bt_test")
+    assert target.host == apex
+    assert target.base_url == origin
+
+
+def test_preview_pending_beyond30_seconds_uses_same_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = Core(resolve_config("key", "https://api.test", 0))
+    core._targets["box"] = BoxTarget("https://box--demo.zbox.sh", "bt")
+    calls: list[dict[str, Any]] = []
+
+    def execute(_box: str, body: dict[str, Any]) -> Any:
+        calls.append(body)
+        if False:
+            yield None
+        pending = len(calls) <= 16
+        return ExecResult(
+            id="p",
+            exit_code=75 if pending else 0,
+            stdout=json.dumps({"status": "pending", "retryAfterMs": 31_000}) if pending else "",
+            stderr="",
+        )
+
+    monkeypatch.setattr(core, "exec", execute)
+    op = core.preview("box", 4000, "web")
+    elapsed = 0.0
+    for _ in range(16):
+        effect = op.send(None)
+        assert isinstance(effect, Sleep)
+        assert effect.seconds >= 31
+        elapsed += effect.seconds
+    assert elapsed > 30
+    with pytest.raises(StopIteration) as completed:
+        op.send(None)
+    assert completed.value.value.url == "https://web.demo.zbox.sh"
+    assert (
+        calls
+        == [{"argv": ["tribes-caddy", "add", "web.demo.zbox.sh", "127.0.0.1:4000", "--no-wait"]}]
+        * 17
+    )

@@ -35,6 +35,7 @@ export const PI_ROWS = [
 type Answer = { status: number; body: unknown }
 
 export type FakeOptions = {
+  boxOrigin?: string
   env?: Record<string, string>
   files?: Record<string, string>
   /** The box's answer to a path, before the defaults. */
@@ -104,7 +105,7 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
           name: 'dev',
           status: 'running',
           ready: true,
-          baseUrl: 'https://dev.zbox.sh',
+          baseUrl: options.boxOrigin ?? 'https://dev.zbox.sh',
           boxToken: token
         })
       if (path === '/account/whoami')

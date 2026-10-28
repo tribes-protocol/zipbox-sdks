@@ -47,17 +47,17 @@ async fn main() -> Result<(), zipbox::Error> {
 
 ## Boxes
 
-| Method                                                                | Returns                           |
-| --------------------------------------------------------------------- | --------------------------------- |
-| `zb.sandboxes().create(CreateOptions { name, tier, ssh_public_key })` | `Sandbox`, ready                  |
-| `zb.sandboxes().get_or_create(name)`                                  | `Sandbox`                         |
-| `zb.sandboxes().list()`                                               | `Vec<SandboxInfo>`                |
-| `zb.sandboxes().get(id)`                                              | `Sandbox`                         |
-| `zb.sandboxes().start(id)` / `stop` / `restart`                       | `()`                              |
-| `zb.sandboxes().set_tier(id, tier)`                                   | `()`                              |
-| `zb.sandboxes().delete(id)`                                           | `()`                              |
-| `zb.sandboxes().wait_ready(id)`                                       | `Sandbox`, ready                  |
-| `zb.sandbox(id)`                                                      | `Sandbox` handle, no network call |
+| Method                                                                         | Returns                           |
+| ------------------------------------------------------------------------------ | --------------------------------- |
+| `zb.sandboxes().create(CreateOptions { name, tier, ssh_public_key, mailbox })` | `Sandbox`, ready                  |
+| `zb.sandboxes().get_or_create(name)`                                           | `Sandbox`                         |
+| `zb.sandboxes().list()`                                                        | `Vec<SandboxInfo>`                |
+| `zb.sandboxes().get(id)`                                                       | `Sandbox`                         |
+| `zb.sandboxes().start(id)` / `stop` / `restart`                                | `()`                              |
+| `zb.sandboxes().set_tier(id, tier)`                                            | `()`                              |
+| `zb.sandboxes().delete(id)`                                                    | `()`                              |
+| `zb.sandboxes().wait_ready(id)`                                                | `Sandbox`, ready                  |
+| `zb.sandbox(id)`                                                               | `Sandbox` handle, no network call |
 
 A `Sandbox` has `id()`, `info()` (the last `SandboxDetail` read) and `refresh()`, plus `start`, `stop`, `restart` and `delete` on itself.
 

@@ -6,7 +6,7 @@
 
 The routes every box serves at its own HTTPS origin - exec and its event stream, background commands, files and the PTY websocket.
 
-Every box serves its own API at its HTTPS origin, `https://<name>.zbox.sh`. The SDKs call it directly - there is no proxy in between - so a command's output streams from the box to you without a hop. This page is the wire reference; the how-to with samples in every language is in the guides: [Run commands](https://zipbox.ai/docs/commands.md), [Files](https://zipbox.ai/docs/files.md) and [Terminals](https://zipbox.ai/docs/terminals.md).
+Every box serves its own API at its HTTPS origin, `https://box--<name>.zbox.sh` (the `baseUrl` on the box row). The SDKs call it directly - there is no proxy in between - so a command's output streams from the box to you without a hop. This page is the wire reference; the how-to with samples in every language is in the guides: [Run commands](https://zipbox.ai/docs/commands.md), [Files](https://zipbox.ai/docs/files.md) and [Terminals](https://zipbox.ai/docs/terminals.md).
 
 ## Authentication
 

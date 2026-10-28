@@ -71,6 +71,7 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
                 name: args["name"].as_str().map(str::to_string),
                 tier: args["tier"].as_str().map(str::to_string),
                 ssh_public_key: args["sshPublicKey"].as_str().map(str::to_string),
+                mailbox: args["mailbox"].as_bool(),
             };
             Ok(to(serde_json::to_value(zb.sandboxes().create(opts).await?)))
         }
@@ -268,4 +269,42 @@ async fn every_fixture_passes() {
     }
     println!("{} fixtures, {} failed", paths.len(), failures.len());
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preview_pending_survives_the30second_exec_window() {
+    let (server, listener) = MockServer::bind().await;
+    let raw = std::fs::read_to_string(fixtures_dir().join("preview_pending.json"))
+        .unwrap()
+        .replace("{{BASE}}", &server.base)
+        .replace("{{HOST}}", &server.host);
+    let mut fixture: Value = serde_json::from_str(&raw).unwrap();
+    let body = fixture["exchanges"][1]["response"]["bodyText"]
+        .as_str()
+        .unwrap()
+        .replace("retryAfterMs\\\": 0", "retryAfterMs\\\": 31000");
+    assert!(body.contains("31000"));
+    fixture["exchanges"][1]["response"]["bodyText"] = Value::String(body);
+    let exchanges = fixture["exchanges"].as_array().unwrap();
+    server.state.lock().unwrap().exchanges = vec![
+        exchanges[0].clone(),
+        exchanges[1].clone(),
+        exchanges.last().unwrap().clone(),
+    ];
+    server.serve(listener);
+    let client = Zipbox::builder()
+        .api_key(API_KEY)
+        .base_url(&server.base)
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let preview = client
+        .sandbox("sbx_1")
+        .preview()
+        .create(3000, Some("web"))
+        .await
+        .unwrap();
+    assert!(start.elapsed() >= Duration::from_secs(31));
+    assert_eq!(preview.url, format!("https://web.{}", server.host));
+    assert!(server.finish().is_empty(), "{:?}", server.finish());
 }

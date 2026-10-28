@@ -161,7 +161,7 @@ func (b *Box) json(ctx context.Context, method, boxPath string, query url.Values
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// host is the hostname the box serves on (its baseURL's host, without port).
+// host is the custom preview apex, without the platform transport prefix or port.
 func (b *Box) host(ctx context.Context) (string, error) {
 	creds, err := b.client.boxCreds(ctx, b.ID, false)
 	if err != nil {
@@ -171,7 +171,7 @@ func (b *Box) host(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return u.Hostname(), nil
+	return strings.TrimPrefix(u.Hostname(), "box--"), nil
 }
 
 // WorkspaceDir is where relative paths resolve and commands start by default.

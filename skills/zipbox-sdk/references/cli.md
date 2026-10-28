@@ -38,16 +38,16 @@ zipbox login
 
 ## Boxes
 
-| Command                                                                      | Does                                        |
-| ---------------------------------------------------------------------------- | ------------------------------------------- |
-| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>]` | Create a box and wait until it is ready     |
-| `zipbox sandbox list`                                                        | Your boxes                                  |
-| `zipbox sandbox get <box>`                                                   | One box                                     |
-| `zipbox sandbox start <box>`                                                 | Start a stopped box                         |
-| `zipbox sandbox stop <box>`                                                  | Stop (disk archived, nothing billed)        |
-| `zipbox sandbox restart <box>`                                               | Hard restart; files survive                 |
-| `zipbox sandbox tier <box> <tier>`                                           | Resize                                      |
-| `zipbox sandbox delete <box> [--yes]`                                        | Delete (30-day recoverable copy by default) |
+| Command                                                                                  | Does                                        |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]` | Create a box and wait until it is ready     |
+| `zipbox sandbox list`                                                                    | Your boxes                                  |
+| `zipbox sandbox get <box>`                                                               | One box                                     |
+| `zipbox sandbox start <box>`                                                             | Start a stopped box                         |
+| `zipbox sandbox stop <box>`                                                              | Stop (disk archived, nothing billed)        |
+| `zipbox sandbox restart <box>`                                                           | Hard restart; files survive                 |
+| `zipbox sandbox tier <box> <tier>`                                                       | Resize                                      |
+| `zipbox sandbox delete <box> [--yes]`                                                    | Delete (30-day recoverable copy by default) |
 
 `<box>` is a box id or its name. `sandbox` also answers to `box`; `sandbox list` to `sandbox ls`. `delete` asks for confirmation unless you pass `--yes` (`-y`).
 

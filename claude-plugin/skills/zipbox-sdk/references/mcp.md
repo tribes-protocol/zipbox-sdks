@@ -53,7 +53,7 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 | -------------------------- | --------------------------------- | --------------------- | ----------------------------------------------------------------------- |
 | `list_sandboxes`           | -                                 | read-only             | Your boxes                                                              |
 | `get_sandbox`              | `id`                              | read-only             | One box: status, size, resource sample                                  |
-| `create_sandbox`           | `name?`, `tier?`                  |                       | Create a box and wait until it is ready                                 |
+| `create_sandbox`           | `name?`, `tier?`, `mailbox?`      |                       | Create a box and wait until it is ready                                 |
 | `start_sandbox`            | `id`                              |                       | Start a stopped box                                                     |
 | `stop_sandbox`             | `id`                              |                       | Stop a box (disk archived, nothing billed)                              |
 | `restart_sandbox`          | `id`                              |                       | Hard-restart a running box                                              |

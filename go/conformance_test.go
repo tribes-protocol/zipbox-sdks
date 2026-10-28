@@ -150,6 +150,11 @@ func str(args map[string]any, key string) string {
 	return v
 }
 
+func boolArg(args map[string]any, key string) bool {
+	v, _ := args[key].(bool)
+	return v
+}
+
 // invoke maps a fixture op onto the Go SDK and returns its result as JSON-ready data.
 func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any, error) {
 	id := str(args, "id")
@@ -160,7 +165,7 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 	case "sandboxes.get":
 		return c.Sandboxes.Get(ctx, id)
 	case "sandboxes.create":
-		b, err := c.Sandboxes.Create(ctx, CreateOptions{Name: str(args, "name"), Tier: str(args, "tier"), SSHPublicKey: str(args, "sshPublicKey")})
+		b, err := c.Sandboxes.Create(ctx, CreateOptions{Name: str(args, "name"), Tier: str(args, "tier"), SSHPublicKey: str(args, "sshPublicKey"), Mailbox: boolArg(args, "mailbox")})
 		if err != nil {
 			return nil, err
 		}

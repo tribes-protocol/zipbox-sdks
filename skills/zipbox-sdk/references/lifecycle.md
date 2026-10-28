@@ -27,12 +27,14 @@ A box is a long-lived machine, not a disposable sandbox. It runs until you stop 
 
 ```ts
 const box = await zb.sandboxes.create({ name: 'ci-runner', tier: 'm' })
+// mailbox: true  — create the mailbox now
 ```
 
 #### Python
 
 ```python
 box = zb.sandboxes.create(name="ci-runner", tier="m")
+# mailbox=True  — create the mailbox now
 ```
 
 #### Go
@@ -41,6 +43,7 @@ box = zb.sandboxes.create(name="ci-runner", tier="m")
 box, err := c.Sandboxes.Create(ctx, zipbox.CreateOptions{
 	Name: "ci-runner",
 	Tier: "m",
+	// Mailbox: true — create the mailbox now
 })
 ```
 
@@ -50,6 +53,7 @@ box, err := c.Sandboxes.Create(ctx, zipbox.CreateOptions{
 let options = zipbox::CreateOptions {
     name: Some("ci-runner".into()),
     tier: Some("m".into()),
+    // mailbox: Some(true) — create the mailbox now
     ..Default::default()
 };
 let sbx = zb.sandboxes().create(options).await?;
@@ -59,6 +63,7 @@ let sbx = zb.sandboxes().create(options).await?;
 
 ```sh
 zipbox sandbox create --name ci-runner --tier m
+# --mailbox  — create the mailbox now
 ```
 
 #### curl
@@ -69,13 +74,18 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" \
   -d '{"name":"ci-runner","tier":"m"}'
+# add "mailbox":true to create the mailbox now
 ```
 
 Tiers are `xs`, `s`, `m`, `l`, `xl` and `xxl`; prices are on the [pricing page](/pricing). With no credit balance, `create`, `start` and `setTier` answer `402 insufficient_credits`.
 
+A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved with the name; the mailbox is created the first time the box or its owner uses mail (`tribes-email` inside the box, opening the box in the dashboard, or a `/sandbox/:id/email` request). Pass `mailbox: true` to create it at claim time instead, for a box that must receive mail before anything on it has asked.
+
 ## Reuse a box by name
 
 `getOrCreate(name)` is the "keep my environment" pattern: there are no templates or snapshots, because a box _is_ its environment. Install your toolchain once and every later run picks up where the last one left off.
+
+Reusing a name also reuses its mailbox and wallets. A recurring job should claim one name and keep it, not create a box per run: every fresh name reserves an address, and every mailbox you then use is kept for you.
 
 #### TypeScript
 

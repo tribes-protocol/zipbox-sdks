@@ -54,16 +54,16 @@ No request has a timeout unless you pass an `AbortSignal`.
 
 ## Boxes
 
-| Method                                                 | Returns                           | Route                                      |
-| ------------------------------------------------------ | --------------------------------- | ------------------------------------------ |
-| `zb.sandboxes.create({ name?, tier?, sshPublicKey? })` | `Sandbox` (ready)                 | claim, then `GET /sandbox/:id` until ready |
-| `zb.sandboxes.getOrCreate(name, opts?)`                | `Sandbox`                         | `GET /sandbox`, then create                |
-| `zb.sandboxes.list()`                                  | `SandboxInfo[]`                   | `GET /sandbox`                             |
-| `zb.sandboxes.get(id)`                                 | `Sandbox`                         | `GET /sandbox/:id`                         |
-| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`  | `void`                            | restore / pause / reset                    |
-| `zb.sandboxes.setTier(id, tier)`                       | `void`                            | `POST /sandbox/:id/tier`                   |
-| `zb.sandboxes.delete(id, { archive? })`                | `void`                            | `DELETE /sandbox/:id`                      |
-| `zb.sandbox(id)`                                       | `Sandbox` handle, no network call |                                            |
+| Method                                                           | Returns                           | Route                                      |
+| ---------------------------------------------------------------- | --------------------------------- | ------------------------------------------ |
+| `zb.sandboxes.create({ name?, tier?, sshPublicKey?, mailbox? })` | `Sandbox` (ready)                 | claim, then `GET /sandbox/:id` until ready |
+| `zb.sandboxes.getOrCreate(name, opts?)`                          | `Sandbox`                         | `GET /sandbox`, then create                |
+| `zb.sandboxes.list()`                                            | `SandboxInfo[]`                   | `GET /sandbox`                             |
+| `zb.sandboxes.get(id)`                                           | `Sandbox`                         | `GET /sandbox/:id`                         |
+| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`            | `void`                            | restore / pause / reset                    |
+| `zb.sandboxes.setTier(id, tier)`                                 | `void`                            | `POST /sandbox/:id/tier`                   |
+| `zb.sandboxes.delete(id, { archive? })`                          | `void`                            | `DELETE /sandbox/:id`                      |
+| `zb.sandbox(id)`                                                 | `Sandbox` handle, no network call |                                            |
 
 A `Sandbox` has `id`, the getters `name`, `status`, `tier`, `ready`, `baseUrl` and `ipv6`, `info` (the last `SandboxDetail` read, with every documented row field such as `cpuPct`), `refresh()`, `start()` / `stop()` / `restart()` / `setTier(tier)` / `delete()`, and the methods below. Its box token is fetched on first use, cached for the life of the client, and re-fetched once on a `401`.
 

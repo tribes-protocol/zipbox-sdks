@@ -48,7 +48,7 @@
           "authorization": "Bearer bt_test_token"
         },
         "body": {
-          "argv": ["tribes-caddy", "add", "web.{{HOST}}", "127.0.0.1:3000"]
+          "argv": ["tribes-caddy", "add", "web.{{HOST}}", "127.0.0.1:3000", "--no-wait"]
         }
       },
       "response": {

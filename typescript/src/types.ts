@@ -68,6 +68,8 @@ export interface CreateSandboxOptions {
   tier?: SandboxTier
   /** One OpenSSH public key line to authorize for `ssh root@<ipv6>`. */
   sshPublicKey?: string
+  /** Create the box's mailbox at creation. Default: created on first use. */
+  mailbox?: boolean
   signal?: AbortSignal
 }
 

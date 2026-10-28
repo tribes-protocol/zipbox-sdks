@@ -350,7 +350,10 @@ export class Files {
 
 /** Public HTTPS URLs for ports on one box, served by the box's own Caddy. */
 export class Preview {
-  constructor(private readonly box: Sandbox) {}
+  constructor(
+    private readonly box: Sandbox,
+    private readonly ctx: ClientContext
+  ) {}
 
   /**
    * Publish `127.0.0.1:<port>` at `https://<label>.<box host>`. Public: anyone
@@ -359,7 +362,50 @@ export class Preview {
   async create(port: number, options: PreviewOptions = {}): Promise<PreviewLink> {
     const label = options.label ?? `p${port}`
     const host = `${label}.${await this.box.host(options)}`
-    await this.box.run(['tribes-caddy', 'add', host, `127.0.0.1:${port}`], 'preview', options)
+    let attempt = 0
+    for (;;) {
+      let retryAfterMs = 0
+      try {
+        const result = await this.box.exec(
+          ['tribes-caddy', 'add', host, `127.0.0.1:${port}`, '--no-wait'],
+          options
+        )
+        if (result.exitCode === 0) break
+        if (result.exitCode !== 75)
+          throw new ZipboxError({
+            code: 'conflict',
+            message: `preview failed: ${result.stderr.trim() || result.stdout.trim()}`
+          })
+        let pending: unknown
+        try {
+          pending = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '')
+        } catch {
+          throw new ZipboxError({
+            code: 'conflict',
+            message: 'preview returned invalid pending status'
+          })
+        }
+        if (
+          !isRecord(pending) ||
+          pending.status !== 'pending' ||
+          typeof pending.retryAfterMs !== 'number' ||
+          !Number.isFinite(pending.retryAfterMs) ||
+          pending.retryAfterMs < 0
+        ) {
+          throw new ZipboxError({
+            code: 'conflict',
+            message: 'preview returned invalid pending status'
+          })
+        }
+        retryAfterMs = pending.retryAfterMs
+      } catch (error) {
+        if (!(error instanceof ZipboxError) || !error.retryable) throw error
+        retryAfterMs = error.retryAfterMs ?? 0
+      }
+      // This operation is idempotent by hostname. A lost response can be retried;
+      // only installed, verified TLS exits0. Pending never resets the ladder.
+      await sleep(Math.max(retryAfterMs, retryDelay(this.ctx, attempt++)), options.signal)
+    }
     return { url: `https://${host}`, label }
   }
 
@@ -410,7 +456,7 @@ export class Sandbox {
     this.commands = new Commands(ctx, id)
     this.files = new Files(ctx, id)
     this.pty = new PtyApi(ctx, id)
-    this.preview = new Preview(this)
+    this.preview = new Preview(this, this.ctx)
   }
 
   /** The row as last read, or null for a handle made by `zb.sandbox(id)`. */
@@ -561,10 +607,10 @@ export class Sandbox {
     return deleteBox(this.ctx, this.id, options.archive, options.signal)
   }
 
-  /** @internal The box's hostname, as it is served. */
+  /** @internal The custom preview apex, without the platform transport prefix. */
   async host(options: CallOptions = {}): Promise<string> {
     const box = await this.ctx.boxes.resolve(this.id, options.signal)
-    return new URL(box.baseUrl).hostname
+    return new URL(box.baseUrl).hostname.replace(/^box--/, '')
   }
 
   /** @internal Run a command the SDK itself issues; a non-zero exit is an error. */

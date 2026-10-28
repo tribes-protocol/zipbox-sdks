@@ -376,3 +376,64 @@ func TestScreenshotUsesTheImagesFfmpeg(t *testing.T) {
 		t.Fatalf("screenshotCommand = %s", screenshotCommand)
 	}
 }
+
+func TestPreviewApexPreservesTransportOrigin(t *testing.T) {
+	cases := map[string]string{
+		"https://box--demo.zbox.sh":      "demo.zbox.sh",
+		"https://box--box--demo.zbox.sh": "box--demo.zbox.sh",
+		"https://demo.zbox.sh":           "demo.zbox.sh",
+		"https://mailbox--demo.zbox.sh":  "mailbox--demo.zbox.sh",
+		"http://127.0.0.1:9100":          "127.0.0.1",
+	}
+	for origin, apex := range cases {
+		t.Run(origin, func(t *testing.T) {
+			client := New("key")
+			client.creds["box"] = &boxCreds{baseURL: origin, token: "bt_test"}
+			host, err := client.Sandbox("box").host(context.Background())
+			if err != nil || host != apex {
+				t.Fatalf("host = %q, %v; want %q", host, err, apex)
+			}
+			if client.creds["box"].baseURL != origin {
+				t.Fatal("preview changed the transport origin")
+			}
+		})
+	}
+}
+
+func TestPreviewPendingBeyondExecDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("checks real provider Retry-After beyond the30s exec window")
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Argv []string `json:"argv"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if strings.Join(body.Argv, " ") != "tribes-caddy add web.127.0.0.1 127.0.0.1:4000 --no-wait" {
+			t.Errorf("unexpected command: %v", body.Argv)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			fmt.Fprint(w, "event: start\ndata: {\"id\":\"p\"}\n\nevent: stdout\ndata: {\"data\":\"{\\\"status\\\":\\\"pending\\\",\\\"retryAfterMs\\\":31000}\"}\n\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":75}\n\n")
+		} else {
+			fmt.Fprint(w, "event: start\ndata: {\"id\":\"p\"}\n\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n")
+		}
+	}))
+	defer server.Close()
+	client := New("key", WithBackoff(time.Millisecond, time.Millisecond))
+	client.creds["box"] = &boxCreds{baseURL: server.URL, token: "bt"}
+	start := time.Now()
+	preview, err := client.Sandbox("box").Preview.Create(context.Background(), 4000, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 31*time.Second {
+		t.Fatalf("returned readiness before provider delay: %v", elapsed)
+	}
+	if calls.Load() != 2 || preview.URL != "https://web.127.0.0.1" {
+		t.Fatalf("calls=%d preview=%+v", calls.Load(), preview)
+	}
+}

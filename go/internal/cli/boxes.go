@@ -44,6 +44,7 @@ func (a *app) sandboxCommand() *cobra.Command {
 	createCmd.Flags().StringVar(&create.Name, "name", "", "the box's permanent subdomain")
 	createCmd.Flags().StringVar(&create.Tier, "tier", "", "machine size: xs, s, m, l, xl, xxl")
 	createCmd.Flags().StringVar(&create.SSHPublicKey, "ssh-public-key", "", "an OpenSSH public key line to authorize")
+	createCmd.Flags().BoolVar(&create.Mailbox, "mailbox", false, "create the box's mailbox now instead of on first use")
 
 	listCmd := &cobra.Command{
 		Use:     "list",

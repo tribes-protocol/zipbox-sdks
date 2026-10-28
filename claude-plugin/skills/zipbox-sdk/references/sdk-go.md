@@ -61,18 +61,18 @@ func main() {
 
 ## Boxes
 
-| Method                                                                    | Returns                        |
-| ------------------------------------------------------------------------- | ------------------------------ |
-| `c.Sandboxes.Create(ctx, zipbox.CreateOptions{Name, Tier, SSHPublicKey})` | `*Box`, ready                  |
-| `c.Sandboxes.GetOrCreate(ctx, name)`                                      | `*Box`                         |
-| `c.Sandboxes.WaitReady(ctx, id)`                                          | `*Box`, ready                  |
-| `c.Sandboxes.List(ctx)`                                                   | `[]Sandbox`                    |
-| `c.Sandboxes.Get(ctx, id)`                                                | `*SandboxDetail`               |
-| `c.Sandboxes.Start(ctx, id)` / `Stop` / `Restart`                         | `error`                        |
-| `c.Sandboxes.SetTier(ctx, id, tier)`                                      | `error`                        |
-| `c.Sandboxes.Delete(ctx, id)`                                             | `error`                        |
-| `c.Sandbox(id)`                                                           | `*Box` handle, no network call |
-| `box.Refresh(ctx)`                                                        | `*SandboxDetail`               |
+| Method                                                                             | Returns                        |
+| ---------------------------------------------------------------------------------- | ------------------------------ |
+| `c.Sandboxes.Create(ctx, zipbox.CreateOptions{Name, Tier, SSHPublicKey, Mailbox})` | `*Box`, ready                  |
+| `c.Sandboxes.GetOrCreate(ctx, name)`                                               | `*Box`                         |
+| `c.Sandboxes.WaitReady(ctx, id)`                                                   | `*Box`, ready                  |
+| `c.Sandboxes.List(ctx)`                                                            | `[]Sandbox`                    |
+| `c.Sandboxes.Get(ctx, id)`                                                         | `*SandboxDetail`               |
+| `c.Sandboxes.Start(ctx, id)` / `Stop` / `Restart`                                  | `error`                        |
+| `c.Sandboxes.SetTier(ctx, id, tier)`                                               | `error`                        |
+| `c.Sandboxes.Delete(ctx, id)`                                                      | `error`                        |
+| `c.Sandbox(id)`                                                                    | `*Box` handle, no network call |
+| `box.Refresh(ctx)`                                                                 | `*SandboxDetail`               |
 
 ## Commands
 

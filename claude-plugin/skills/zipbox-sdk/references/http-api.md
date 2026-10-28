@@ -6,7 +6,7 @@
 
 The control plane over plain HTTP - authentication, every route, GET /sandbox/:id and the box token, the error envelope and idempotency.
 
-Everything the SDKs do is plain HTTPS and JSON. The control plane lives at `https://api.tribes.xyz`; each box serves its own [Box API](https://zipbox.ai/docs/box-api.md) at `https://<name>.zbox.sh`. The machine-readable contract for both is [/openapi.json](https://zipbox.ai/openapi.json).
+Everything the SDKs do is plain HTTPS and JSON. The control plane lives at `https://api.tribes.xyz`; each box serves its own [Box API](https://zipbox.ai/docs/box-api.md) at `https://box--<name>.zbox.sh`. The machine-readable contract for both is [/openapi.json](https://zipbox.ai/openapi.json).
 
 ## Authentication
 
@@ -27,7 +27,7 @@ Requests that carry an `Origin` header are refused with `403`: keys are for serv
 | `GET /billing/usage`           | Recent metered usage                                                        |
 | `GET /sandbox`                 | Your boxes                                                                  |
 | `GET /sandbox/:id`             | One box, plus `ready`, `baseUrl` and `boxToken`                             |
-| `POST /sandbox/identity/claim` | Create a box: `{name?, tier?, sshPublicKey?, timeZone?}`                    |
+| `POST /sandbox/identity/claim` | Create a box: `{name?, tier?, sshPublicKey?, timeZone?, mailbox?}`          |
 | `POST /sandbox/:id/pause`      | Stop: archive the disk; bills nothing while stopped                         |
 | `POST /sandbox/:id/restore`    | Start a stopped box                                                         |
 | `POST /sandbox/:id/reset`      | Restart: hard reboot, files survive                                         |
@@ -43,7 +43,7 @@ Three more routes exist for the dashboard and answer `403` to a key: `GET /accou
 | Field                                                                   | Meaning                                                                     |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `id`                                                                    | The box id used in every route                                              |
-| `name`, `domain`                                                        | The box answers at `<name>.<domain>`, e.g. `demo.zbox.sh`                   |
+| `name`, `domain`                                                        | The box's name: `<name>.<domain>`, e.g. `demo.zbox.sh`, and its previews    |
 | `status`                                                                | `provisioning`, `running`, `stopping`, `stopped`, `archived` or `destroyed` |
 | `tier`, `pendingTier`, `machineSize`                                    | Current size, a resize in flight, and the vCPU / memory / disk it runs at   |
 | `isArchived`                                                            | The disk is in cold storage (stopped, or being stopped)                     |
@@ -60,7 +60,7 @@ Other fields are internal and may change without notice.
 
 - `ready` - the box is running and serving you, and accepts every live key's token. Only then can you call it.
 - `httpsReady` - `baseUrl` completes a TLS handshake with a trusted certificate. A box never waits for its certificate to boot, so a freshly named or restarted box can be `ready` a few seconds to minutes before this turns true; until then a request fails in the TLS handshake, before anything is sent, and is safe to retry. The SDKs retry it for you.
-- `baseUrl` - the box's HTTPS origin, e.g. `https://demo.zbox.sh`. Null until `ready`.
+- `baseUrl` - the box's HTTPS origin, e.g. `https://box--demo.zbox.sh`. Null until `ready`. Previews live under the name, not this origin: `https://<label>.demo.zbox.sh`.
 - `boxToken` - the bearer the box accepts for **this key on this box**. Null until `ready`, and always null when the dashboard calls the route.
 
 ```sh
@@ -75,7 +75,7 @@ curl https://api.tribes.xyz/sandbox/$ID \
   "status": "running",
   "tier": "s",
   "ready": true,
-  "baseUrl": "https://demo.zbox.sh",
+  "baseUrl": "https://box--demo.zbox.sh",
   "boxToken": "3b1d…"
 }
 ```
@@ -93,6 +93,8 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
 ```
 
 The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) until `ready` is true. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`.
+
+A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved with the name, and the mailbox itself is created the first time the box or its owner uses mail: the first `tribes-email` call from inside the box, the first time the box is opened in the dashboard, or the first `/sandbox/:id/email` request. Pass `"mailbox": true` to create it at claim time instead, for a box that must be able to receive mail before anything on it has asked. Either way the mailbox belongs to the name, not the box: reusing a name (`getOrCreate`) reuses its mailbox, so prefer one long-lived name per recurring job over a fresh box per run.
 
 ## Idempotency
 
@@ -135,4 +137,4 @@ Billing reads are allowed; buying credits, the billing portal and auto top-up ch
 
 ## OpenAPI
 
-[/openapi.json](https://zipbox.ai/openapi.json) is the OpenAPI 3.1 contract for the control plane **and** the box. Box routes are listed under a `/box` prefix with their own server (`https://{box}`); the prefix is a documentation device - on the wire, `/box/exec` is `https://<name>.zbox.sh/exec`. It is generated from the same schemas the control plane validates with, so a route cannot exist without appearing in it.
+[/openapi.json](https://zipbox.ai/openapi.json) is the OpenAPI 3.1 contract for the control plane **and** the box. Box routes are listed under a `/box` prefix with their own server (`https://{box}`); the prefix is a documentation device - on the wire, `/box/exec` is `https://box--<name>.zbox.sh/exec`. It is generated from the same schemas the control plane validates with, so a route cannot exist without appearing in it.

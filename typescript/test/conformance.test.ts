@@ -172,9 +172,11 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
     case 'sandboxes.create': {
       const name = optionalArg(args, 'name')
       const tier = optionalArg(args, 'tier')
+      const mailbox = args.mailbox
       return zb.sandboxes.create({
         ...(name === undefined ? {} : { name }),
-        ...(tier === 's' || tier === 'm' ? { tier } : {})
+        ...(tier === 's' || tier === 'm' ? { tier } : {}),
+        ...(typeof mailbox === 'boolean' ? { mailbox } : {})
       })
     }
     case 'sandboxes.start':

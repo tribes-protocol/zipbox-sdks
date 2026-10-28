@@ -201,6 +201,9 @@ You are an agent on box A and need a clean machine for a job:
 4. **Stop it** (`zipbox sandbox stop job-1`) — nothing stops it for you, and a
    running box bills by the hour. Delete it if it will never be reused.
 
+Prefer one named box per recurring job; a fresh box per run leaks a reserved address
+and, once used, a mailbox.
+
 ### Git repositories
 
 Private GitHub repositories clone without a token in your code if the user connected

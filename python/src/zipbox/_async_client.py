@@ -111,19 +111,33 @@ class AsyncSandboxes:
         name: str | None = None,
         tier: Tier | None = None,
         ssh_public_key: str | None = None,
+        mailbox: bool | None = None,
     ) -> AsyncSandbox:
-        """Create a box and wait until it is ready (no deadline)."""
+        """Create a box and wait until it is ready (no deadline).
+
+        ``mailbox=True`` creates the box's mailbox now; by default it is created
+        the first time the box uses mail.
+        """
         detail = await self._client._run(
-            self._client._core.create(name=name, tier=tier, ssh_public_key=ssh_public_key)
+            self._client._core.create(
+                name=name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+            )
         )
         return AsyncSandbox(self._client, detail.id, detail)
 
     async def get_or_create(
-        self, name: str, *, tier: Tier | None = None, ssh_public_key: str | None = None
+        self,
+        name: str,
+        *,
+        tier: Tier | None = None,
+        ssh_public_key: str | None = None,
+        mailbox: bool | None = None,
     ) -> AsyncSandbox:
         """Return the live box named ``name`` (starting it if stopped), or create it."""
         detail = await self._client._run(
-            self._client._core.get_or_create(name, tier=tier, ssh_public_key=ssh_public_key)
+            self._client._core.get_or_create(
+                name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+            )
         )
         return AsyncSandbox(self._client, detail.id, detail)
 

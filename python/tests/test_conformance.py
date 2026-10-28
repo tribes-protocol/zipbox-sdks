@@ -91,7 +91,9 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.get":
             return zb.sandboxes.get(a["id"])
         case "sandboxes.create":
-            return zb.sandboxes.create(name=a.get("name"), tier=a.get("tier"))
+            return zb.sandboxes.create(
+                name=a.get("name"), tier=a.get("tier"), mailbox=a.get("mailbox")
+            )
         case "sandboxes.start":
             return zb.sandboxes.start(a["id"])
         case "sandboxes.stop":
@@ -143,7 +145,9 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.get":
             return await zb.sandboxes.get(a["id"])
         case "sandboxes.create":
-            return await zb.sandboxes.create(name=a.get("name"), tier=a.get("tier"))
+            return await zb.sandboxes.create(
+                name=a.get("name"), tier=a.get("tier"), mailbox=a.get("mailbox")
+            )
         case "sandboxes.start":
             return await zb.sandboxes.start(a["id"])
         case "sandboxes.stop":

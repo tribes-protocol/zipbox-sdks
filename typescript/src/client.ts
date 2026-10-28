@@ -53,10 +53,11 @@ export class Sandboxes {
    * box keeps booting).
    */
   async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
-    const body: Record<string, string> = {}
+    const body: Record<string, string | boolean> = {}
     if (options.name !== undefined) body.name = options.name
     if (options.tier !== undefined) body.tier = options.tier
     if (options.sshPublicKey !== undefined) body.sshPublicKey = options.sshPublicKey
+    if (options.mailbox !== undefined) body.mailbox = options.mailbox
     const response = await this.ctx.api.request({
       method: 'POST',
       path: '/sandbox/identity/claim',

@@ -3,8 +3,11 @@ package zipbox
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PreviewService publishes ports on a box. Reach it as Box.Preview.
@@ -34,12 +37,35 @@ func (s *PreviewService) Create(ctx context.Context, port int, label string) (*P
 		return nil, err
 	}
 	fqdn := label + "." + host
-	res, err := s.box.ExecArgv(ctx, []string{"tribes-caddy", "add", fqdn, "127.0.0.1:" + strconv.Itoa(port)})
-	if err != nil {
-		return nil, err
-	}
-	if res.ExitCode != 0 {
-		return nil, newError(CodeInvalidRequest, "tribes-caddy add failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
+	for attempt := 0; ; attempt++ {
+		retryAfter := time.Duration(0)
+		res, err := s.box.ExecArgv(ctx, []string{"tribes-caddy", "add", fqdn, "127.0.0.1:" + strconv.Itoa(port), "--no-wait"})
+		if err != nil {
+			var zerr *Error
+			if !errors.As(err, &zerr) || !zerr.Retryable {
+				return nil, err
+			}
+			retryAfter = zerr.RetryAfter
+		} else {
+			if res.ExitCode == 0 {
+				break
+			}
+			if res.ExitCode != 75 {
+				return nil, newError(CodeInvalidRequest, "tribes-caddy add failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
+			}
+			lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+			var pending struct {
+				Status       string `json:"status"`
+				RetryAfterMs *int64 `json:"retryAfterMs"`
+			}
+			if json.Unmarshal([]byte(lines[len(lines)-1]), &pending) != nil || pending.Status != "pending" || pending.RetryAfterMs == nil || *pending.RetryAfterMs < 0 {
+				return nil, newError(CodeConflict, "preview returned invalid pending status")
+			}
+			retryAfter = time.Duration(*pending.RetryAfterMs) * time.Millisecond
+		}
+		if err := sleep(ctx, max(retryAfter, s.box.client.backoff(attempt))); err != nil {
+			return nil, err
+		}
 	}
 	return &Preview{URL: "https://" + fqdn, Label: label, Host: fqdn}, nil
 }

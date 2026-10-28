@@ -148,10 +148,26 @@ async function onBox($: EngineInterface, action: string, rest: string[]): Promis
       if (!Number.isInteger(port) || port < 1 || port > 65535)
         return 'Name the port: /zipbox preview <port>'
       const box = await pickBox($)
-      const host = `p${port}.${new URL(await boxOrigin($, box.id)).host}`
+      const apex = new URL(await boxOrigin($, box.id)).hostname.replace(/^box--/, '')
+      const host = `p${port}.${apex}`
       const ran = await exec($, box.id, {
-        argv: ['tribes-caddy', 'add', host, `127.0.0.1:${port}`]
+        argv: ['tribes-caddy', 'add', host, `127.0.0.1:${port}`, '--no-wait']
       })
+      if (ran.exitCode === 75) {
+        try {
+          const pending = JSON.parse(ran.stdout.trim().split('\n').at(-1) || '')
+          if (
+            pending.status === 'pending' &&
+            Number.isFinite(pending.retryAfterMs) &&
+            pending.retryAfterMs >= 0
+          ) {
+            return `Custom HTTPS is pending. Retry /zipbox preview ${port} after ${Math.ceil(pending.retryAfterMs / 1000)} seconds; this resumes the same publication.`
+          }
+        } catch {
+          /* A malformed pending result is not readiness. */
+        }
+        return 'The box returned an invalid preview status; the port is not ready.'
+      }
       if (ran.exitCode !== 0) return ran.stderr.trim() || 'The box did not publish the port.'
       return `https://${host} (public: anyone with the link reaches port ${port})`
     }

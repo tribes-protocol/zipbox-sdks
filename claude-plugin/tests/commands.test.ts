@@ -36,9 +36,10 @@ test('/zipbox files lists a folder under /root/workspace', async ($, on) => {
   )
 })
 
-test('/zipbox preview publishes a port at the box host', async ($, on) => {
+test('/zipbox preview uses the custom apex of a platform transport host', async ($, on) => {
   const execs: unknown[] = []
   fakeZipbox(on, {
+    boxOrigin: 'https://box--dev.zbox.sh',
     box: (_method, path, body) => {
       if (path === '/exec') execs.push(body.argv)
       return undefined
@@ -47,7 +48,13 @@ test('/zipbox preview publishes a port at the box host', async ($, on) => {
   await start($)
   await zipbox($, 'use dev')
   expect((await zipbox($, 'preview 3000')).text).toContain('https://p3000.dev.zbox.sh')
-  expect(execs).toContainEqual(['tribes-caddy', 'add', 'p3000.dev.zbox.sh', '127.0.0.1:3000'])
+  expect(execs).toContainEqual([
+    'tribes-caddy',
+    'add',
+    'p3000.dev.zbox.sh',
+    '127.0.0.1:3000',
+    '--no-wait'
+  ])
 })
 
 test('/zipbox save copies a box file into this folder', async ($, on) => {

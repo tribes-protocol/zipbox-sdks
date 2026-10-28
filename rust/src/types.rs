@@ -128,6 +128,9 @@ pub struct CreateOptions {
     /// An OpenSSH public key to authorize for `root`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_public_key: Option<String>,
+    /// Create the box's mailbox now. `None` = created the first time the box uses mail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<bool>,
 }
 
 /// Options for a command beyond the command line itself.

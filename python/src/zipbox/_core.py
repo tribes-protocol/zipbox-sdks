@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import posixpath
 import random
@@ -40,7 +41,7 @@ from zipbox._models import (
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
@@ -230,8 +231,8 @@ class BoxTarget:
 
     @property
     def host(self) -> str:
-        """The box's hostname (no port)."""
-        return urlparse(self.base_url).hostname or ""
+        """The custom preview apex, without the platform transport prefix or port."""
+        return (urlparse(self.base_url).hostname or "").removeprefix("box--")
 
 
 class Core:
@@ -421,6 +422,7 @@ class Core:
         name: str | None = None,
         tier: str | None = None,
         ssh_public_key: str | None = None,
+        mailbox: bool | None = None,
     ) -> Op[SandboxDetail]:
         """Claim a box (idempotent) and wait until it is ready."""
         body: dict[str, Any] = {}
@@ -430,6 +432,8 @@ class Core:
             body["tier"] = tier
         if ssh_public_key is not None:
             body["sshPublicKey"] = ssh_public_key
+        if mailbox is not None:
+            body["mailbox"] = mailbox
         created = yield from self.control(
             "POST",
             "/sandbox/identity/claim",
@@ -440,7 +444,12 @@ class Core:
         return (yield from self.wait_ready(str(created["sandboxId"])))
 
     def get_or_create(
-        self, name: str, *, tier: str | None = None, ssh_public_key: str | None = None
+        self,
+        name: str,
+        *,
+        tier: str | None = None,
+        ssh_public_key: str | None = None,
+        mailbox: bool | None = None,
     ) -> Op[SandboxDetail]:
         """The live box with this name, started if stopped; created if there is none."""
         boxes = yield from self.list_sandboxes()
@@ -449,7 +458,11 @@ class Core:
                 if box.status == "archived" or box.is_archived:
                     yield from self.start(box.id)
                 return (yield from self.wait_ready(box.id))
-        return (yield from self.create(name=name, tier=tier, ssh_public_key=ssh_public_key))
+        return (
+            yield from self.create(
+                name=name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+            )
+        )
 
     def lifecycle(self, sandbox_id: str, action: str, body: Any = None) -> Op[None]:
         """POST /sandbox/:id/<action>."""
@@ -665,13 +678,41 @@ class Core:
         target = yield from self.target(sandbox_id)
         chosen = label or f"p{port}"
         host = f"{chosen}.{target.host}"
-        result = yield from self.exec(
-            sandbox_id, exec_body(["tribes-caddy", "add", host, f"127.0.0.1:{port}"])
-        )
-        if result.exit_code != 0:
-            raise ZipboxError(
-                "conflict", f"tribes-caddy add failed: {(result.stderr or result.stdout).strip()}"
-            )
+        backoff = self._backoff()
+        while True:
+            retry_after = 0.0
+            try:
+                result = yield from self.exec(
+                    sandbox_id,
+                    exec_body(["tribes-caddy", "add", host, f"127.0.0.1:{port}", "--no-wait"]),
+                )
+                if result.exit_code == 0:
+                    break
+                if result.exit_code != 75:
+                    raise ZipboxError(
+                        "conflict",
+                        f"tribes-caddy add failed: {(result.stderr or result.stdout).strip()}",
+                    )
+                try:
+                    pending = json.loads(result.stdout.strip().splitlines()[-1])
+                    delay = pending["retryAfterMs"]
+                    if (
+                        pending.get("status") != "pending"
+                        or not isinstance(delay, (int, float))
+                        or not math.isfinite(delay)
+                        or delay < 0
+                    ):
+                        raise ValueError("invalid pending status")
+                    retry_after = delay / 1000
+                except (ValueError, KeyError, IndexError, TypeError) as error:
+                    raise ZipboxError(
+                        "conflict", "preview returned invalid pending status"
+                    ) from error
+            except ZipboxError as error:
+                if not error.retryable:
+                    raise
+                retry_after = (error.retry_after_ms or 0) / 1000
+            yield Sleep(max(backoff.next(), retry_after))
         return Preview(url=f"https://{host}", label=chosen)
 
     def unpreview(self, sandbox_id: str, label: str) -> Op[None]:

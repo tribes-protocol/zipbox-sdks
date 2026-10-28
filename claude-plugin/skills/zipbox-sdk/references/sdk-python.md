@@ -68,16 +68,16 @@ No request has a timeout. To bound one, pass your own `http_client=httpx.Client(
 
 ## Boxes
 
-| Method                                                             | Returns                           |
-| ------------------------------------------------------------------ | --------------------------------- |
-| `zb.sandboxes.create(name=None, tier=None, ssh_public_key=None)`   | `Sandbox`, ready                  |
-| `zb.sandboxes.get_or_create(name, tier=None, ssh_public_key=None)` | `Sandbox`                         |
-| `zb.sandboxes.list()`                                              | `list[SandboxInfo]`               |
-| `zb.sandboxes.get(id)`                                             | `Sandbox`                         |
-| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`              | `None`                            |
-| `zb.sandboxes.set_tier(id, tier)`                                  | `None`                            |
-| `zb.sandboxes.delete(id)`                                          | `None`                            |
-| `zb.sandbox(id)`                                                   | `Sandbox` handle, no network call |
+| Method                                                                           | Returns                           |
+| -------------------------------------------------------------------------------- | --------------------------------- |
+| `zb.sandboxes.create(name=None, tier=None, ssh_public_key=None, mailbox=None)`   | `Sandbox`, ready                  |
+| `zb.sandboxes.get_or_create(name, tier=None, ssh_public_key=None, mailbox=None)` | `Sandbox`                         |
+| `zb.sandboxes.list()`                                                            | `list[SandboxInfo]`               |
+| `zb.sandboxes.get(id)`                                                           | `Sandbox`                         |
+| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`                            | `None`                            |
+| `zb.sandboxes.set_tier(id, tier)`                                                | `None`                            |
+| `zb.sandboxes.delete(id)`                                                        | `None`                            |
+| `zb.sandbox(id)`                                                                 | `Sandbox` handle, no network call |
 
 ## Commands
 

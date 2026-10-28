@@ -29,7 +29,7 @@ import (
 )
 
 // Version is the SDK version, sent in the User-Agent header.
-const Version = "0.1.3"
+const Version = "0.1.4"
 
 // DefaultBaseURL is the Zipbox control plane.
 const DefaultBaseURL = "https://api.tribes.xyz"

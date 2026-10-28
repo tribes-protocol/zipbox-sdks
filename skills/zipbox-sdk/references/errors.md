@@ -104,7 +104,7 @@ These never reach a server:
 - **No API key** - the SDK found no key argument and no `ZIPBOX_API_KEY`. Raised as `unauthorized` ("no API key: …"); the CLI says "not logged in: run `zipbox login`, or set ZIPBOX_API_KEY".
 - **No WebSocket** - the TypeScript SDK on Node 20 has no built-in `WebSocket` for PTYs. Raised as `invalid_request` ("no WebSocket available: …"); pass `WebSocket` (e.g. from the `ws` package) to `new Zipbox()`.
 - **Unsupported `runCode` language** - anything but `python`, `node` or `bash`, raised as `invalid_request`.
-- **Transport errors** - DNS, TLS or a dropped connection. Retried like `unavailable` on safe requests. A box's address needs DNS for `<name>.zbox.sh`; SSH additionally needs IPv6.
+- **Transport errors** - DNS, TLS or a dropped connection. Retried like `unavailable` on safe requests. A box's address needs DNS for `box--<name>.zbox.sh`; SSH additionally needs IPv6.
 
 ## Retries
 

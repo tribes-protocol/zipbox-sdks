@@ -1,5 +1,8 @@
 //! One box: commands, code, logs, SSH, previews and screenshots.
 
+use std::time::Duration;
+
+use crate::backoff::Backoff;
 use base64::Engine;
 use futures::{Stream, StreamExt};
 use reqwest::Method;
@@ -252,7 +255,10 @@ impl Sandbox {
         let access = self.client.box_access(&self.id, false).await?;
         url::Url::parse(&access.base_url)
             .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
+            .and_then(|u| {
+                u.host_str()
+                    .map(|host| host.strip_prefix("box--").unwrap_or(host).to_string())
+            })
             .ok_or_else(|| Error::new(ErrorCode::Unavailable, "box origin has no host"))
     }
 }
@@ -272,16 +278,53 @@ impl Previews {
             .map(str::to_string)
             .unwrap_or_else(|| format!("p{port}"));
         let host = format!("{label}.{}", self.sandbox.box_host().await?);
-        let out = self
-            .sandbox
-            .exec_argv(vec![
-                "tribes-caddy".into(),
-                "add".into(),
-                host.clone(),
-                format!("127.0.0.1:{port}"),
-            ])
-            .await?;
-        check_ok(&out, "tribes-caddy add")?;
+        let mut backoff = Backoff::new(
+            self.sandbox.client.inner.retry_base_delay,
+            Duration::from_secs(30),
+        );
+        loop {
+            let retry_after = match self
+                .sandbox
+                .exec_argv(vec![
+                    "tribes-caddy".into(),
+                    "add".into(),
+                    host.clone(),
+                    format!("127.0.0.1:{port}"),
+                    "--no-wait".into(),
+                ])
+                .await
+            {
+                Ok(out) => {
+                    if out.exit_code == Some(0) {
+                        break;
+                    }
+                    if out.exit_code != Some(75) {
+                        check_ok(&out, "tribes-caddy add")?;
+                    }
+                    let pending: serde_json::Value =
+                        serde_json::from_str(out.stdout.trim().lines().last().unwrap_or(""))
+                            .map_err(|_| {
+                                Error::new(
+                                    ErrorCode::Conflict,
+                                    "preview returned invalid pending status",
+                                )
+                            })?;
+                    let delay = pending["retryAfterMs"]
+                        .as_u64()
+                        .filter(|_| pending["status"] == "pending")
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Conflict,
+                                "preview returned invalid pending status",
+                            )
+                        })?;
+                    Duration::from_millis(delay)
+                }
+                Err(error) if error.retryable => error.retry_after.unwrap_or_default(),
+                Err(error) => return Err(error),
+            };
+            tokio::time::sleep(retry_after.max(backoff.next_delay())).await;
+        }
         Ok(Preview {
             url: format!("https://{host}"),
             label,
@@ -364,6 +407,32 @@ async fn collect(
 #[cfg(test)]
 mod tests {
     use super::SCREENSHOT_COMMAND;
+    use crate::client::{BoxAccess, Zipbox};
+
+    #[tokio::test]
+    async fn preview_apex_preserves_transport_origin() {
+        for (origin, apex) in [
+            ("https://box--demo.zbox.sh", "demo.zbox.sh"),
+            ("https://box--box--demo.zbox.sh", "box--demo.zbox.sh"),
+            ("https://demo.zbox.sh", "demo.zbox.sh"),
+            ("https://mailbox--demo.zbox.sh", "mailbox--demo.zbox.sh"),
+            ("http://127.0.0.1:9100", "127.0.0.1"),
+        ] {
+            let client = Zipbox::new("key").unwrap();
+            client.inner.boxes.lock().unwrap().insert(
+                "box".into(),
+                BoxAccess {
+                    base_url: origin.into(),
+                    token: "bt_test".into(),
+                },
+            );
+            assert_eq!(client.sandbox("box").box_host().await.unwrap(), apex);
+            assert_eq!(
+                client.box_access("box", false).await.unwrap().base_url,
+                origin
+            );
+        }
+    }
 
     #[test]
     fn screenshot_uses_the_images_ffmpeg_and_fails_loudly() {

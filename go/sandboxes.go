@@ -84,6 +84,8 @@ type CreateOptions struct {
 	Tier string
 	// SSHPublicKey is an OpenSSH public key line authorized on the box.
 	SSHPublicKey string
+	// Mailbox creates the box's mailbox now. False = created the first time the box uses mail.
+	Mailbox bool
 }
 
 // SandboxesService manages boxes. Reach it as Client.Sandboxes.
@@ -95,6 +97,7 @@ type createBody struct {
 	Name         string `json:"name,omitempty"`
 	Tier         string `json:"tier,omitempty"`
 	SSHPublicKey string `json:"sshPublicKey,omitempty"`
+	Mailbox      bool   `json:"mailbox,omitempty"`
 }
 
 type createResponse struct {
@@ -108,7 +111,7 @@ type createResponse struct {
 func (s *SandboxesService) Create(ctx context.Context, opts CreateOptions) (*Box, error) {
 	var created createResponse
 	headers := map[string]string{"Idempotency-Key": newID()}
-	body := createBody{Name: opts.Name, Tier: opts.Tier, SSHPublicKey: opts.SSHPublicKey}
+	body := createBody{Name: opts.Name, Tier: opts.Tier, SSHPublicKey: opts.SSHPublicKey, Mailbox: opts.Mailbox}
 	if err := s.client.api(ctx, "POST", "/sandbox/identity/claim", body, &created, true, headers); err != nil {
 		return nil, err
 	}
