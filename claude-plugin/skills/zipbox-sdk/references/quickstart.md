@@ -58,7 +58,7 @@ curl -fsSL https://zipbox.ai/install.sh | sh
 
 ## Open a box and run a command
 
-`getOrCreate` returns the box with that name, creating it (and waiting until it is ready) the first time.
+`getOrCreate` returns the box with that name, creating it (and waiting until it is ready) the first time. It takes the same options as `create` (`tier`, `sshPublicKey`, `mailbox`, `private`) and applies them only when it creates the box; a box that already has the name comes back as it is.
 
 #### TypeScript
 
@@ -66,7 +66,7 @@ curl -fsSL https://zipbox.ai/install.sh | sh
 import { Zipbox } from '@zipbox/sdk'
 
 const zb = new Zipbox() // reads ZIPBOX_API_KEY
-const box = await zb.sandboxes.getOrCreate('quickstart')
+const box = await zb.sandboxes.getOrCreate('quickstart', { tier: 's' })
 const result = await box.exec('python3 --version')
 console.log(result.exitCode, result.stdout)
 ```
@@ -77,7 +77,7 @@ console.log(result.exitCode, result.stdout)
 from zipbox import Zipbox
 
 zb = Zipbox()  # reads ZIPBOX_API_KEY
-box = zb.sandboxes.get_or_create("quickstart")
+box = zb.sandboxes.get_or_create("quickstart", tier="s")
 result = box.exec("python3 --version")
 print(result.exit_code, result.stdout)
 ```
@@ -92,7 +92,8 @@ import ("context"; "fmt"; "github.com/tribes-protocol/zipbox-go")
 func main() {
 	ctx := context.Background()
 	c := zipbox.New("") // "" reads ZIPBOX_API_KEY
-	box, _ := c.Sandboxes.GetOrCreate(ctx, "quickstart")
+	opts := zipbox.CreateOptions{Tier: "s"}
+	box, _ := c.Sandboxes.GetOrCreate(ctx, "quickstart", opts)
 	res, _ := box.Exec(ctx, "python3 --version")
 	fmt.Println(res.ExitCode, res.Stdout)
 }
@@ -101,12 +102,13 @@ func main() {
 #### Rust
 
 ```rust
-use zipbox::Zipbox;
+use zipbox::{CreateOptions, Zipbox};
 
 #[tokio::main]
 async fn main() -> Result<(), zipbox::Error> {
     let zb = Zipbox::from_env()?;
-    let sbx = zb.sandboxes().get_or_create("quickstart").await?;
+    let opts = CreateOptions { tier: Some("s".into()), ..Default::default() };
+    let sbx = zb.sandboxes().get_or_create_with("quickstart", opts).await?;
     let res = sbx.exec("python3 --version").await?;
     println!("{:?} {}", res.exit_code, res.stdout);
     Ok(())

@@ -3,11 +3,14 @@ package zipbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 // Box is a handle to one box. It is cheap to create (Client.Sandbox makes no
@@ -27,6 +30,8 @@ type Box struct {
 	Pty *PtyService
 	// Preview publishes a local port at a public HTTPS URL.
 	Preview *PreviewService
+	// Tailscale joins the box to your own tailnet.
+	Tailscale *TailscaleService
 
 	client *Client
 }
@@ -38,6 +43,7 @@ func (c *Client) Sandbox(id string) *Box {
 	b.Commands = &CommandsService{box: b}
 	b.Pty = &PtyService{box: b}
 	b.Preview = &PreviewService{box: b}
+	b.Tailscale = &TailscaleService{box: b}
 	return b
 }
 
@@ -54,10 +60,42 @@ func (b *Box) Refresh(ctx context.Context) (*SandboxDetail, error) {
 	return detail, nil
 }
 
+// WaitReady re-reads the box with backoff until it is ready (see
+// SandboxesService.WaitReady).
+func (b *Box) WaitReady(ctx context.Context) (*SandboxDetail, error) {
+	ready, err := b.client.Sandboxes.WaitReady(ctx, b.ID)
+	if err != nil {
+		return nil, err
+	}
+	b.Detail = ready.Detail
+	return b.Detail, nil
+}
+
+// Start starts the box if it is stopped (see SandboxesService.Start).
+func (b *Box) Start(ctx context.Context) error { return b.client.Sandboxes.Start(ctx, b.ID) }
+
+// Stop stops the box: its disk is archived and nothing is billed while stopped.
+func (b *Box) Stop(ctx context.Context) error { return b.client.Sandboxes.Stop(ctx, b.ID) }
+
+// Restart hard-restarts the box. Files survive; running processes do not.
+func (b *Box) Restart(ctx context.Context) error { return b.client.Sandboxes.Restart(ctx, b.ID) }
+
+// Delete deletes the box (see SandboxesService.Delete).
+func (b *Box) Delete(ctx context.Context, opts DeleteOptions) error {
+	return b.client.Sandboxes.Delete(ctx, b.ID, opts)
+}
+
+// SetTier moves the box to another tier. A running box restarts into it.
+func (b *Box) SetTier(ctx context.Context, tier string) error {
+	return b.client.Sandboxes.SetTier(ctx, b.ID, tier)
+}
+
 type boxCreds struct {
 	baseURL string
 	token   string
 	detail  *SandboxDetail
+	// reachable records a private box that answered the reachability probe.
+	reachable bool
 }
 
 func (c *Client) storeCreds(id string, detail *SandboxDetail) {
@@ -83,7 +121,7 @@ func (c *Client) boxCreds(ctx context.Context, id string, refresh bool) (*boxCre
 		cached := c.creds[id]
 		c.mu.Unlock()
 		if cached != nil {
-			return cached, nil
+			return c.ensureReachable(ctx, id, cached)
 		}
 	}
 	detail, err := c.Sandboxes.Get(ctx, id)
@@ -99,8 +137,66 @@ func (c *Client) boxCreds(ctx context.Context, id string, refresh bool) (*boxCre
 	}
 	c.storeCreds(id, detail)
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.creds[id], nil
+	creds := c.creds[id]
+	c.mu.Unlock()
+	return c.ensureReachable(ctx, id, creds)
+}
+
+// defaultPrivateProbeTimeout bounds the reachability probe of a private box. It is a
+// probe, not a call: the box-direct call itself still has no deadline.
+const defaultPrivateProbeTimeout = 5 * time.Second
+
+// unroutable reports a failure to reach the box's address at all: DNS, a failed
+// dial, or the probe deadline. A TLS failure is not one: the box answered.
+func unroutable(err error) bool {
+	var opErr *net.OpError
+	var dnsErr *net.DNSError
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &dnsErr) ||
+		(errors.As(err, &opErr) && opErr.Op == "dial")
+}
+
+// ensureReachable checks, once per box, that a private box answers from this
+// device. A private box answers only devices on its owner's tailnet; off the
+// tailnet its address does not route and a call would hang, so a network
+// failure is box_private_unreachable instead. Any HTTP answer counts as
+// reachable, and only success is cached.
+func (c *Client) ensureReachable(ctx context.Context, id string, creds *boxCreds) (*boxCreds, error) {
+	if creds.detail == nil || !creds.detail.PrivateMode {
+		return creds, nil
+	}
+	c.mu.Lock()
+	reachable := creds.reachable
+	c.mu.Unlock()
+	if reachable {
+		return creds, nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, c.privateProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, "GET", creds.baseURL+"/challenge", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "zipbox-sdk-go/"+Version)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if unroutable(err) {
+			name := id
+			if creds.detail.Name != nil && *creds.detail.Name != "" {
+				name = *creds.detail.Name
+			}
+			return nil, newError(CodeBoxPrivateUnreachable, name+" is private: it can only be reached from devices on your tailnet. "+
+				"Turn on Tailscale on this device (https://tailscale.com/download).")
+		}
+	} else {
+		_ = resp.Body.Close()
+	}
+	c.mu.Lock()
+	creds.reachable = true
+	c.mu.Unlock()
+	return creds, nil
 }
 
 // do sends a request to the box. A 401 re-fetches the box token once and

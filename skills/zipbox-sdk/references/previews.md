@@ -4,9 +4,9 @@
 
 # Previews
 
-Give any port on a box a public HTTPS URL - preview(port), the URL shape, public by default, remove.
+Give any port on a box an HTTPS URL - preview(port), the URL shape, who can open it, remove.
 
-A preview is a public HTTPS URL for a port on your box. Start a dev server on port 4000, call `preview.create(4000)`, and receive `https://<label>.<name>.zbox.sh` once its HTTPS certificate is installed and usable.
+A preview is an HTTPS URL for a port on your box. Start a dev server on port 4000, call `preview.create(4000)`, and receive `https://<label>.<name>.zbox.sh` once its HTTPS certificate is installed and usable.
 
 ## Create a preview
 
@@ -64,9 +64,14 @@ curl -N -X POST "$BASE/exec" -H "Authorization: Bearer $BOX_TOKEN" \
 
 `https://<label>.<box host>`, where the box host is the box's own name (`demo.zbox.sh`). The API transport uses `box--demo.zbox.sh`; that `box--` prefix is not part of the preview apex. Labels are DNS labels: lower case letters, digits and hyphens. Each label is one site; creating the same label again points it at the new port.
 
-## Previews are public
+## Who can open a preview
 
-Anyone with the URL can open it - there is no sign-in in front of it. That matches how sites you serve from the box with `tribes-caddy` have always worked. Don't preview something you would not put on the internet; private or signed previews are not in this version ([Errors and limits](https://zipbox.ai/docs/errors.md#out-of-v1)).
+A preview has no sign-in in front of it, so who can open it is decided by the box:
+
+- **A public box:** anyone with the URL. That matches how sites you serve from the box with `tribes-caddy` have always worked. Don't preview something you would not put on the internet.
+- **A [private box](https://zipbox.ai/docs/tailscale.md):** only devices on your tailnet. The URL is the same; its DNS points at the box's tailnet address, and the box serves it with its own certificate. Off your tailnet it does not answer.
+
+Signed previews are not in this version ([Errors and limits](https://zipbox.ai/docs/errors.md#out-of-v1)).
 
 Bind your dev server to `127.0.0.1`; Caddy proxies to it, so it never needs to listen publicly.
 

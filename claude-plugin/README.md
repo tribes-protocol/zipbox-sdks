@@ -40,7 +40,7 @@ too.
 | `/zipbox files [path]`       | List a folder (relative paths are under /root/workspace) |
 | `/zipbox read <path>`        | Show a text file                                         |
 | `/zipbox save <path>`        | Copy a file of the box into this folder                  |
-| `/zipbox preview <port>`     | A public HTTPS URL for a port                            |
+| `/zipbox preview <port>`     | An HTTPS URL for a port (tailnet-only on a private box)  |
 | `/zipbox screenshot`         | Save the box's desktop as `zipbox-screenshot.png`        |
 | `/zipbox open`               | Open the box's desktop in the browser                    |
 | `/zipbox whoami` / `logout`  | The account in use; forget the stored key                |
@@ -49,6 +49,13 @@ Press a task in the pane to follow it: its conversation so far is drawn in this
 window, new replies and tool calls appear as the box writes them, and what you type
 goes to that task. Sessions started in the box's own terminal are listed but cannot
 be followed.
+
+A private box (Settings › Tailscale › Private) answers only devices on your tailnet.
+The commands that talk to the box work when this computer runs Tailscale on that
+tailnet; otherwise they say so within 5 seconds instead of hanging. The MCP server
+runs on Zipbox, so it never reaches a private box. Connecting a box to your tailnet
+is done in the dashboard or with `zipbox tailscale connect`, never in this window,
+so the auth key stays out of the conversation.
 
 ## Develop
 

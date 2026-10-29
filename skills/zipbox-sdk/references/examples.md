@@ -15,7 +15,7 @@ Clone the repository into a box once, then every run is a pull, an install and a
 #### TypeScript
 
 ```ts
-const box = await zb.sandboxes.getOrCreate('tests')
+const box = await zb.sandboxes.getOrCreate('tests', { tier: 'm' })
 // clone on the first run only
 const cloned = await box.exec('test -d app')
 if (cloned.exitCode !== 0) {
@@ -31,7 +31,7 @@ console.log(run.exitCode === 0 ? 'green' : run.stdout + run.stderr)
 #### Python
 
 ```python
-box = zb.sandboxes.get_or_create("tests")
+box = zb.sandboxes.get_or_create("tests", tier="m")
 # clone on the first run only
 if box.exec("test -d app").exit_code != 0:
     box.exec("git clone https://github.com/acme/app app")
@@ -45,7 +45,7 @@ print("green" if run.exit_code == 0 else run.stdout + run.stderr)
 #### Go
 
 ```go
-box, _ := c.Sandboxes.GetOrCreate(ctx, "tests")
+box, _ := c.Sandboxes.GetOrCreate(ctx, "tests", zipbox.CreateOptions{Tier: "m"})
 // clone on the first run only
 if res, _ := box.Exec(ctx, "test -d app"); res.ExitCode != 0 {
 	_, _ = box.Exec(ctx, "git clone https://github.com/acme/app app")
@@ -61,7 +61,11 @@ fmt.Println(run.ExitCode, run.Stdout)
 #### Rust
 
 ```rust
-let sbx = zb.sandboxes().get_or_create("tests").await?;
+let opts = zipbox::CreateOptions {
+    tier: Some("m".into()),
+    ..Default::default()
+};
+let sbx = zb.sandboxes().get_or_create_with("tests", opts).await?;
 // clone on the first run only
 if sbx.exec("test -d app").await?.exit_code != Some(0) {
     sbx.exec("git clone https://github.com/acme/app app").await?;
@@ -126,7 +130,7 @@ jobs:
 Start the server in the background, give its port a public URL, and come back to its output whenever you like - nothing stops it on a clock.
 
 ```ts
-const box = await zb.sandboxes.getOrCreate('preview-demo')
+const box = await zb.sandboxes.getOrCreate('preview-demo', { tier: 's' })
 // start the dev server in the clone, in the background
 const dev = 'npm run dev -- --port 3000 --host 127.0.0.1'
 const server = await box.execBackground(dev, { cwd: 'app' })
@@ -158,7 +162,7 @@ const runCommand = tool({
   description: 'Run a shell command in a persistent Linux box',
   inputSchema: z.object({ cmd: z.string() }),
   execute: async ({ cmd }) => {
-    const box = await zb.sandboxes.getOrCreate('ai-sdk')
+    const box = await zb.sandboxes.getOrCreate('ai-sdk', { tier: 's' })
     const { exitCode, stdout, stderr } = await box.exec(cmd)
     return { exitCode, output: (stdout + stderr).slice(-8000) }
   }
@@ -178,7 +182,7 @@ const shell = tool({
   description: 'Run a shell command in a persistent Linux box',
   parameters: z.object({ cmd: z.string() }),
   execute: async ({ cmd }) => {
-    const box = await zb.sandboxes.getOrCreate('agents')
+    const box = await zb.sandboxes.getOrCreate('agents', { tier: 's' })
     return (await box.exec(cmd)).stdout
   }
 })
@@ -223,7 +227,7 @@ zb = Zipbox()
 @tool
 def run_in_box(cmd: str) -> str:
     """Run a shell command in a persistent Linux box and return its output."""
-    result = zb.sandboxes.get_or_create("langchain").exec(cmd)
+    result = zb.sandboxes.get_or_create("langchain", tier="s").exec(cmd)
     return f"exit {result.exit_code}\n{result.stdout}{result.stderr}"[-8000:]
 ```
 

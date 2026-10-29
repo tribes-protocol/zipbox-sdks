@@ -5,7 +5,7 @@ import { Zipbox } from '@zipbox/sdk'
 import { z } from 'zod'
 
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('openai-agent')
+const box = await zb.sandboxes.getOrCreate('openai-agent', { tier: 's' })
 
 const shell = tool({
   name: 'shell',

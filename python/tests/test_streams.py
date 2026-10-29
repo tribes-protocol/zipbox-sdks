@@ -108,7 +108,7 @@ def test_wait_reattaches_from_the_last_cursor_after_a_drop(server: MockServer) -
     assert (result.id, result.exit_code, result.stdout) == ("cmd_1", 0, "ab\ncd\n")
 
 
-def test_exec_stream_that_ends_without_exit_is_unavailable(server: MockServer) -> None:
+def test_exec_stream_that_ends_before_start_is_unavailable(server: MockServer) -> None:
     base = server.base_url
     server.load(
         [
@@ -121,7 +121,7 @@ def test_exec_stream_that_ends_without_exit_is_unavailable(server: MockServer) -
                 "response": {
                     "status": 200,
                     "headers": {"content-type": "text/event-stream"},
-                    "bodyText": _sse(("0-0", "start", '{"id":"c"}')),
+                    "bodyText": "",
                 },
             },
         ]
@@ -129,6 +129,43 @@ def test_exec_stream_that_ends_without_exit_is_unavailable(server: MockServer) -
     with Zipbox(KEY, base_url=base) as zb, pytest.raises(ZipboxError) as caught:
         zb.sandbox("sbx_1").exec("sleep 1")
     assert caught.value.code == "unavailable"
+
+
+def test_exec_stream_that_drops_after_start_resumes_from_its_cursor(server: MockServer) -> None:
+    base = server.base_url
+    server.load(
+        [
+            {
+                "request": {"method": "GET", "path": "/sandbox/sbx_1"},
+                "response": {"status": 200, "body": _detail(base)},
+            },
+            {
+                "request": {"method": "POST", "path": "/exec"},
+                "response": {
+                    "status": 200,
+                    "headers": {"content-type": "text/event-stream"},
+                    "bodyText": _sse(
+                        ("0-0", "start", '{"id":"c"}'), ("3-0", "stdout", '{"data":"ab\\n"}')
+                    ),
+                },
+            },
+            {
+                "request": {"method": "GET", "path": "/exec/c/events?since=3-0"},
+                "response": {
+                    "status": 200,
+                    "headers": {"content-type": "text/event-stream"},
+                    "bodyText": _sse(
+                        ("6-0", "stdout", '{"data":"cd\\n"}'),
+                        ("6-0", "exit", '{"state":"exited","exitCode":0,"timedOut":false}'),
+                    ),
+                },
+            },
+        ]
+    )
+    with Zipbox(KEY, base_url=base, retry_base_delay_s=0.001) as zb:
+        result = zb.sandbox("sbx_1").exec("echo ab; echo cd")
+    assert server.errors == [] and server.unserved() == 0
+    assert (result.exit_code, result.stdout) == (0, "ab\ncd\n")
 
 
 def test_second_box_401_is_unauthorized(server: MockServer) -> None:

@@ -6,7 +6,7 @@ import { generateText, stepCountIs, tool } from 'ai'
 import { z } from 'zod'
 
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('ai-sdk-agent')
+const box = await zb.sandboxes.getOrCreate('ai-sdk-agent', { tier: 's' })
 
 const runCommand = tool({
   description: 'Run a shell command on a Linux machine (Debian, root, /root/workspace).',

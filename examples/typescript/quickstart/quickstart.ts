@@ -3,7 +3,7 @@
 import { Zipbox } from '@zipbox/sdk'
 
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('quickstart')
+const box = await zb.sandboxes.getOrCreate('quickstart', { tier: 's' })
 
 const { stdout } = await box.exec('uname -a')
 console.log(stdout)

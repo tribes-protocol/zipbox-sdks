@@ -6,7 +6,7 @@
 
 Every error code with its cause and fix, HTTP statuses, box-side and client-side errors, retry rules, limits, and what is not in this version.
 
-Every error a public caller sees - control plane, box, SDK, CLI or MCP - resolves to one of nine codes. Each error's `docsUrl` points at the section below named after its code.
+Every error a public caller sees - control plane, box, SDK, CLI or MCP - resolves to one of fourteen codes. Each error's `docsUrl` points at the section below named after its code.
 
 ## Nothing times out on a clock
 
@@ -14,19 +14,23 @@ No box, command, PTY, preview or token ends because time passed. There is no idl
 
 ## HTTP statuses
 
-| Status | Code                   | Retry?                                                      |
-| ------ | ---------------------- | ----------------------------------------------------------- |
-| 400    | `invalid_request`      | No - fix the request                                        |
-| 401    | `unauthorized`         | No - fix the credential (once on a box: re-fetch the token) |
-| 402    | `insufficient_credits` | No - add credit                                             |
-| 403    | `forbidden`            | No                                                          |
-| 404    | `not_found`            | No                                                          |
-| 409    | `conflict`             | No - the box is in the wrong state; read it and act on that |
-| 413    | `invalid_request`      | No - the file is over 250 MiB                               |
-| 422    | `invalid_request`      | No - fix the request                                        |
-| 429    | `rate_limited`         | Yes, after `Retry-After`                                    |
-| 502    | `box_not_running`      | Yes, once the box is running                                |
-| 503    | `unavailable`          | Yes, with backoff (any other 5xx too)                       |
+| Status | Code                                    | Retry?                                                      |
+| ------ | --------------------------------------- | ----------------------------------------------------------- |
+| 400    | `invalid_request`                       | No - fix the request                                        |
+| 401    | `unauthorized`                          | No - fix the credential (once on a box: re-fetch the token) |
+| 402    | `insufficient_credits`                  | No - add credit                                             |
+| 403    | `forbidden`                             | No                                                          |
+| 404    | `not_found`                             | No                                                          |
+| 409    | `conflict`                              | No - the box is in the wrong state; read it and act on that |
+| 409    | `box_key_changed`                       | Once - re-read `agentPublicKey`, re-seal, send again        |
+| 409    | `tailnet_not_connected`                 | No - connect the box to your tailnet first                  |
+| 409    | `tailscale_unavailable_egress_lockdown` | No - not available on this box                              |
+| 409    | `tailscale_requires_update`             | No - update the box's ZipOS first                           |
+| 413    | `invalid_request`                       | No - the file is over 250 MiB                               |
+| 422    | `invalid_request`                       | No - fix the request                                        |
+| 429    | `rate_limited`                          | Yes, after `Retry-After`                                    |
+| 502    | `box_not_running`                       | Yes, once the box is running                                |
+| 503    | `unavailable`                           | Yes, with backoff (any other 5xx too)                       |
 
 ## The error envelope
 
@@ -79,6 +83,26 @@ More than 600 requests a minute with one key, or a box past 32 running commands 
 
 The box is stopped, starting or restarting, so it has nothing to answer with. Start it (`start(id)`), or wait until `GET /sandbox/:id` reports `ready: true`, then retry.
 
+## box_key_changed
+
+A sealed credential (a Tailscale auth key) was sealed to an `agentPublicKey` that is no longer the box's key: claiming a box re-mints it. Read `GET /sandbox/:id` again, seal to the new `agentPublicKey`, and send once more. The SDKs do this exactly once; a second `box_key_changed` is raised to you.
+
+## tailnet_not_connected
+
+Private mode was turned on while the box is not connected to your tailnet with a tailnet IPv4, so nothing could reach it afterwards. Connect it first ([Tailscale](https://zipbox.ai/docs/tailscale.md#connect-a-box)), wait for `state: connected`, then turn private on. To start a box private from the beginning, pass `private: true` at create instead.
+
+## tailscale_unavailable_egress_lockdown
+
+The box runs under company egress lockdown, which only lets traffic out through the company proxy, so Tailscale cannot reach its servers or peers. Use a box without egress lockdown.
+
+## tailscale_requires_update
+
+The box's ZipOS predates Tailscale: it reported that it has no managed Tailscale, so it could never use the key. Accept the ZipOS software update (**Settings → Software Update** in the dashboard; the box restarts into it), then connect again. A box row says so ahead of time with `tailscaleSupported: false`. Applies to `PUT /sandbox/:id/tailscale` and to turning private mode on; turning private mode off is never refused.
+
+## box_private_unreachable
+
+The box is private: it can only be reached from devices on your tailnet, and this device is not on it (or Tailscale is off). Box calls (exec, files, PTY, previews, logs) fail fast with this code; lifecycle calls still work. Turn on Tailscale on this device ([tailscale.com/download](https://tailscale.com/download)) and retry. The hosted MCP server can never reach a private box ([Tailscale](https://zipbox.ai/docs/tailscale.md#reaching-a-private-box)).
+
 ## unavailable
 
 A temporary failure on our side: capacity, maintenance, or a dependency that is down. Retry with exponential backoff and jitter; the SDKs do. The `message` says when it is maintenance.
@@ -104,11 +128,12 @@ These never reach a server:
 - **No API key** - the SDK found no key argument and no `ZIPBOX_API_KEY`. Raised as `unauthorized` ("no API key: …"); the CLI says "not logged in: run `zipbox login`, or set ZIPBOX_API_KEY".
 - **No WebSocket** - the TypeScript SDK on Node 20 has no built-in `WebSocket` for PTYs. Raised as `invalid_request` ("no WebSocket available: …"); pass `WebSocket` (e.g. from the `ws` package) to `new Zipbox()`.
 - **Unsupported `runCode` language** - anything but `python`, `node` or `bash`, raised as `invalid_request`.
+- **Private box off the tailnet** - a box call on a box with `privateMode: true` that does not answer a 5-second probe of its `/challenge` raises `box_private_unreachable` instead of hanging.
 - **Transport errors** - DNS, TLS or a dropped connection. Retried like `unavailable` on safe requests. A box's address needs DNS for `box--<name>.zbox.sh`; SSH additionally needs IPv6.
 
 ## Retries
 
-Retry only `retryable` errors: `rate_limited`, `unavailable`, `box_not_running`. Honour `Retry-After`; otherwise back off exponentially with jitter. The SDKs retry GET requests and `create` (which carries an `Idempotency-Key`, so a retry never makes two boxes) up to `maxRetries` (default 3). They never retry anything else on their own, because a repeated `exec` runs the command twice.
+Retry only `retryable` errors: `rate_limited`, `unavailable`, `box_not_running`. Honour `Retry-After`; otherwise back off exponentially with jitter. The SDKs retry GET requests and `create` (which carries an `Idempotency-Key`, so a retry never makes two boxes) up to `maxRetries` (default 3). They never retry anything else on their own, because a repeated `exec` runs the command twice. The one exception is `box_key_changed`, which `tailscale.connect` re-seals and sends once more.
 
 ## Limits
 
@@ -129,14 +154,16 @@ Retry only `retryable` errors: `rate_limited`, `unavailable`, `box_not_running`.
 
 Documented gaps, not hidden stubs:
 
-- **Named snapshots and templates.** A box is its own template; reuse it with `getOrCreate(name)`.
+- **Named snapshots and templates.** A box is its own template; reuse it with `getOrCreate(name, options)` (the create options apply only when the box is created).
 - **Volumes** shared between boxes.
 - **LSP** language-server endpoints.
 - **Outbound network policy.** Metered-provider egress exists; it is not user-configurable.
 - **Per-key scopes.** Every key has full access to the account's boxes.
 - **Memory pause and resume.** Stop archives the disk; restart reboots. Files survive both; running processes do not.
 - **File watch** events.
-- **Private or signed previews.** Previews are public.
+- **Signed previews.** A preview is public on a public box, and tailnet-only on a [private box](https://zipbox.ai/docs/tailscale.md).
+- **Tailscale exit nodes, Funnel and `tailscale serve`.** See [what is not supported](https://zipbox.ai/docs/tailscale.md#what-is-not-supported).
+- **MCP on a private box.** The hosted server cannot join your tailnet; box tools return `box_private_unreachable`.
 
 ## FAQ
 

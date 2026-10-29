@@ -54,7 +54,7 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 | `list_sandboxes`           | -                                 | read-only             | Your boxes                                                              |
 | `get_sandbox`              | `id`                              | read-only             | One box: status, size, resource sample                                  |
 | `create_sandbox`           | `name?`, `tier?`, `mailbox?`      |                       | Create a box and wait until it is ready                                 |
-| `start_sandbox`            | `id`                              |                       | Start a stopped box                                                     |
+| `start_sandbox`            | `id`                              |                       | Start a stopped box; one still stopping, once its stop lands            |
 | `stop_sandbox`             | `id`                              |                       | Stop a box (disk archived, nothing billed)                              |
 | `restart_sandbox`          | `id`                              |                       | Hard-restart a running box                                              |
 | `delete_sandbox`           | `id`, `keepCopy?`                 | destructive           | Delete a box; `keepCopy` (default true) keeps a 30-day recoverable copy |
@@ -73,12 +73,22 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 | `preview_link`             | `id`, `port`, `label?`            |                       | A public HTTPS URL for a port ([Previews](https://zipbox.ai/docs/previews.md))              |
 | `get_logs`                 | `id`, `since?`                    | read-only             | The box's system journal                                                |
 | `desktop_screenshot`       | `id`                              | read-only             | A PNG of the box's desktop, returned as an image                        |
+| `tailscale_status`         | `id`                              | read-only             | The box's tailnet status (`get_sandbox` has `privateMode`)              |
+| `tailscale_connect_link`   | `id`                              | read-only             | A link to the box's Settings → Tailscale, where you paste an auth key   |
+| `tailscale_disconnect`     | `id`                              | destructive           | Log the box out of your tailnet                                         |
+| `set_private_mode`         | `id`, `enabled`                   |                       | Make the box private (tailnet only) or public                           |
 | `search_docs`              | `query`                           | read-only (see below) | Search these docs                                                       |
 | `read_doc`                 | `slug`                            | read-only (see below) | One docs page as markdown                                               |
 
 **Output cap.** A tool result shows at most 32 KiB of output. `execute_command` returns the command id with its result; `get_command_output` reads the rest from the box, which keeps everything (64 MiB per stream).
 
 **Nothing stops on a clock.** A command `execute_command` starts has no deadline unless you pass `timeoutMs`; use `start_background_command` for dev servers and watchers.
+
+## Private boxes and Tailscale
+
+**MCP cannot reach a [private box](https://zipbox.ai/docs/tailscale.md).** A private box answers only to devices on your tailnet. The hosted MCP server runs in Zipbox's cloud and can never join your tailnet, and `zipbox mcp start` only bridges to it, so it fails the same way. On a private box, every tool that talks to the box itself (`execute_command`, `run_code`, the background and output tools, the file tools, `git_clone`, `preview_link`, `get_logs`, `desktop_screenshot`) returns `box_private_unreachable`: "build is private: it can only be reached from devices on your tailnet. Zipbox MCP can't reach it." Lifecycle tools and the Tailscale tools go through the control plane and keep working, so a model can still start, stop, check and make a private box public again.
+
+**No tool takes an auth key.** A key passed to a tool would sit in plain text in the model's transcript and on the MCP server. `tailscale_connect_link` returns the box's **Settings → Tailscale** link instead; paste the key there, where it is sealed in your browser. From code, use an SDK's `tailscale.connect`, which seals on your machine.
 
 ## Resources and prompts
 

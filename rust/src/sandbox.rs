@@ -4,17 +4,19 @@ use std::time::Duration;
 
 use crate::backoff::Backoff;
 use base64::Engine;
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use reqwest::Method;
 
-use crate::client::{json_body, Zipbox};
+use crate::client::{encode, json_body, Zipbox};
 use crate::commands::{exec_events, Command, Commands};
 use crate::error::{Error, ErrorCode, Result};
 use crate::files::{resolve_path, Files};
 use crate::pty::PtyClient;
+use crate::tailscale::Tailscale;
 use crate::types::{
-    ExecEvent, ExecOptions, ExecRecord, ExecRequestBody, ExecResult, Language, LogOptions,
-    OutputStream, Preview, SandboxDetail, SshInfo,
+    DeleteOptions, ExecEvent, ExecOptions, ExecRecord, ExecRequestBody, ExecResult, Language,
+    LogOptions, OutputStream, Preview, SandboxDetail, SshInfo,
 };
 
 /// Captures the desktop (`:10`) with ffmpeg's x11grab, which the platform image
@@ -63,6 +65,14 @@ impl Sandbox {
         Ok(self.detail.insert(detail))
     }
 
+    /// Re-reads the box with backoff until it is ready (see
+    /// [`crate::Sandboxes::wait_ready`]).
+    pub async fn wait_ready(&mut self) -> Result<&SandboxDetail> {
+        let ready = self.client.sandboxes().wait_ready(&self.id).await?;
+        let detail = ready.detail.expect("wait_ready returns the detail it read");
+        Ok(self.detail.insert(detail))
+    }
+
     /// Starts the box if it is stopped.
     pub async fn start(&self) -> Result<()> {
         self.client.sandboxes().start(&self.id).await
@@ -78,9 +88,49 @@ impl Sandbox {
         self.client.sandboxes().restart(&self.id).await
     }
 
-    /// Deletes the box.
+    /// Deletes the box, keeping a recoverable copy for 30 days.
     pub async fn delete(&self) -> Result<()> {
         self.client.sandboxes().delete(&self.id).await
+    }
+
+    /// [`Sandbox::delete`] with options (`archive: Some(false)` skips the copy).
+    pub async fn delete_with(&self, options: DeleteOptions) -> Result<()> {
+        self.client.sandboxes().delete_with(&self.id, options).await
+    }
+
+    /// Moves the box to another tier (`xs` … `xxl`).
+    pub async fn set_tier(&self, tier: &str) -> Result<()> {
+        self.client.sandboxes().set_tier(&self.id, tier).await
+    }
+
+    /// The box's tailnet: connect, status, disconnect.
+    pub fn tailscale(&self) -> Tailscale {
+        Tailscale {
+            client: self.client.clone(),
+            id: self.id.clone(),
+        }
+    }
+
+    /// Makes the box private ("tailnet only") or public again.
+    ///
+    /// Turning it on needs the box connected to your tailnet
+    /// ([`ErrorCode::TailnetNotConnected`] otherwise). A private box answers only
+    /// devices on your tailnet; box calls from anywhere else fail with
+    /// [`ErrorCode::BoxPrivateUnreachable`].
+    pub async fn set_private(&self, enabled: bool) -> Result<()> {
+        self.client
+            .inner
+            .boxes
+            .lock()
+            .expect("box cache")
+            .remove(&self.id);
+        self.client
+            .api_unit(
+                Method::PUT,
+                &format!("/sandbox/{}/private", encode(&self.id)),
+                json_body(&serde_json::json!({ "enabled": enabled })),
+            )
+            .await
     }
 
     // ---- exec ------------------------------------------------------------
@@ -98,9 +148,11 @@ impl Sandbox {
         collect(self.exec_stream_with(cmd, options).await?).await
     }
 
-    /// Runs `cmd` and streams its events as they happen. Dropping the stream
-    /// before the exit event ends the command; use [`Sandbox::exec_background`]
-    /// for anything that must outlive the connection.
+    /// Runs `cmd` and streams its events as they happen. A stream that drops after
+    /// the command started re-attaches from its last cursor (see
+    /// [`Command::events`]). Dropping the stream before the exit event ends the
+    /// command; use [`Sandbox::exec_background`] for anything that must outlive
+    /// the connection.
     pub async fn exec_stream(
         &self,
         cmd: &str,
@@ -125,25 +177,15 @@ impl Sandbox {
                 Some("text/event-stream"),
             )
             .await?;
-        Ok(exec_events(resp))
+        Ok(resume_on_drop(self.clone(), exec_events(resp).boxed()))
     }
 
     pub(crate) async fn exec_argv(&self, argv: Vec<String>) -> Result<ExecResult> {
-        let body = ExecRequestBody {
+        let options = ExecOptions {
             argv: Some(argv),
-            ..ExecRequestBody::default()
+            ..ExecOptions::default()
         };
-        let resp = self
-            .client
-            .box_request(
-                &self.id,
-                Method::POST,
-                "/exec",
-                || json_body(&body),
-                Some("text/event-stream"),
-            )
-            .await?;
-        collect(exec_events(resp)).await
+        self.exec_with("", options).await
     }
 
     /// Starts `cmd` in the background and returns at once. The command keeps
@@ -162,17 +204,37 @@ impl Sandbox {
         Ok(Command::new(self.clone(), record.id.clone(), Some(record)))
     }
 
-    /// Runs a snippet of code: writes it to a temp file and runs `python3`,
-    /// `node` or `bash` on it.
+    /// Runs a snippet of code: writes it to a temp file, runs `python3`, `node`
+    /// (as an ES module) or `bash` on it through the login shell, then removes it.
     pub async fn run_code(&self, language: Language, code: &str) -> Result<ExecResult> {
+        self.run_code_with(language, code, ExecOptions::default())
+            .await
+    }
+
+    /// [`Sandbox::run_code`] with options (`cwd`, `env`, `timeout_ms`, `user`;
+    /// `argv` and `stdin` are ignored).
+    pub async fn run_code_with(
+        &self,
+        language: Language,
+        code: &str,
+        options: ExecOptions,
+    ) -> Result<ExecResult> {
         let path = format!(
             "/tmp/zipbox-run-{}.{}",
             uuid::Uuid::new_v4(),
             language.extension()
         );
         self.files().write(&path, code.as_bytes().to_vec()).await?;
-        self.exec_argv(vec![language.interpreter().to_string(), path])
-            .await
+        let script = format!(
+            "{} '{path}'; status=$?; rm -f '{path}'; exit $status",
+            language.interpreter()
+        );
+        let options = ExecOptions {
+            argv: None,
+            stdin: false,
+            ..options
+        };
+        self.exec_with(&script, options).await
     }
 
     /// Commands on this box, by id.
@@ -203,7 +265,8 @@ impl Sandbox {
         }
     }
 
-    /// The box's system log (`journalctl`).
+    /// The box's system log (`journalctl`). A failed journalctl is a
+    /// [`ErrorCode::Conflict`].
     pub async fn logs(&self, options: LogOptions) -> Result<String> {
         let mut argv: Vec<String> = ["journalctl", "-o", "short-iso", "--no-pager"]
             .iter()
@@ -217,7 +280,12 @@ impl Sandbox {
             argv.push("-n".into());
             argv.push(lines.to_string());
         }
+        if let Some(unit) = options.unit {
+            argv.push("-u".into());
+            argv.push(unit);
+        }
         let out = self.exec_argv(argv).await?;
+        check_ok(&out, "journalctl")?;
         Ok(out.stdout)
     }
 
@@ -280,7 +348,7 @@ impl Previews {
         let host = format!("{label}.{}", self.sandbox.box_host().await?);
         let mut backoff = Backoff::new(
             self.sandbox.client.inner.retry_base_delay,
-            Duration::from_secs(30),
+            self.sandbox.client.inner.retry_max_delay,
         );
         loop {
             let retry_after = match self
@@ -331,9 +399,14 @@ impl Previews {
         })
     }
 
-    /// Stops serving a preview.
+    /// Stops serving a preview, by its label (or full host).
     pub async fn remove(&self, label: &str) -> Result<()> {
-        let host = format!("{label}.{}", self.sandbox.box_host().await?);
+        let box_host = self.sandbox.box_host().await?;
+        let host = if label.ends_with(&format!(".{box_host}")) {
+            label.to_string()
+        } else {
+            format!("{label}.{box_host}")
+        };
         let out = self
             .sandbox
             .exec_argv(vec!["tribes-caddy".into(), "rm".into(), host])
@@ -374,7 +447,87 @@ fn request_body(cmd: &str, options: &ExecOptions, background: bool) -> ExecReque
     }
 }
 
-async fn collect(
+/// A foreground command's events: the `POST /exec` stream, then, if it drops after
+/// the command started, the command's followed stream from the last cursor.
+fn resume_on_drop(
+    sandbox: Sandbox,
+    first: BoxStream<'static, Result<ExecEvent>>,
+) -> impl Stream<Item = Result<ExecEvent>> + Send + 'static {
+    struct Foreground {
+        sandbox: Sandbox,
+        stream: BoxStream<'static, Result<ExecEvent>>,
+        command_id: Option<String>,
+        cursor: String,
+        resumed: bool,
+        done: bool,
+    }
+    let state = Foreground {
+        sandbox,
+        stream: first,
+        command_id: None,
+        cursor: "0-0".to_string(),
+        resumed: false,
+        done: false,
+    };
+    futures::stream::unfold(state, |mut st| async move {
+        if st.done {
+            return None;
+        }
+        let lost = match st.stream.next().await {
+            Some(Ok(event)) => {
+                st.cursor = event.cursor().to_string();
+                if let ExecEvent::Start { id, .. } = &event {
+                    st.command_id = Some(id.clone());
+                }
+                st.done = matches!(event, ExecEvent::Exit { .. });
+                return Some((Ok(event), st));
+            }
+            Some(Err(err)) => err,
+            None => Error::new(
+                ErrorCode::Unavailable,
+                "the box closed the command stream before the command exited",
+            ),
+        };
+        // The followed stream reconnects on its own; its error is final.
+        let id = match (&st.command_id, st.resumed) {
+            (Some(id), false) if lost.retryable => id.clone(),
+            _ => {
+                st.done = true;
+                return Some((Err(lost), st));
+            }
+        };
+        let followed = st
+            .sandbox
+            .commands()
+            .command(&id)
+            .events(Some(&st.cursor))
+            .await;
+        match followed {
+            Ok(stream) => {
+                st.stream = stream.boxed();
+                st.resumed = true;
+                match st.stream.next().await {
+                    Some(Ok(event)) => {
+                        st.cursor = event.cursor().to_string();
+                        st.done = matches!(event, ExecEvent::Exit { .. });
+                        Some((Ok(event), st))
+                    }
+                    Some(Err(err)) => {
+                        st.done = true;
+                        Some((Err(err), st))
+                    }
+                    None => None,
+                }
+            }
+            Err(err) => {
+                st.done = true;
+                Some((Err(err), st))
+            }
+        }
+    })
+}
+
+pub(crate) async fn collect(
     stream: impl Stream<Item = Result<ExecEvent>> + Send + 'static,
 ) -> Result<ExecResult> {
     let mut stream = Box::pin(stream);
@@ -424,6 +577,9 @@ mod tests {
                 BoxAccess {
                     base_url: origin.into(),
                     token: "bt_test".into(),
+                    name: "box".into(),
+                    private: false,
+                    reachable: false,
                 },
             );
             assert_eq!(client.sandbox("box").box_host().await.unwrap(), apex);

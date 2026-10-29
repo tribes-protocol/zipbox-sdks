@@ -17,6 +17,7 @@ await box.files.write('notes/todo.txt', 'ship it\n')
 const text = await box.files.readText('notes/todo.txt')
 const entries = await box.files.list('notes')
 await box.files.move('notes/todo.txt', 'notes/done.txt')
+await box.files.copy('notes/done.txt', 'archive/done.txt')
 ```
 
 #### Python
@@ -26,6 +27,7 @@ box.files.write("notes/todo.txt", "ship it\n")
 text = box.files.read_text("notes/todo.txt")
 entries = box.files.list("notes")
 box.files.move("notes/todo.txt", "notes/done.txt")
+box.files.copy("notes/done.txt", "archive/done.txt")
 ```
 
 #### Go
@@ -35,6 +37,7 @@ _ = box.Files.Write(ctx, "notes/todo.txt", strings.NewReader("ship it\n"))
 data, err := box.Files.Read(ctx, "notes/todo.txt")
 entries, err := box.Files.List(ctx, "notes")
 _ = box.Files.Move(ctx, "notes/todo.txt", "notes/done.txt")
+_ = box.Files.Copy(ctx, "notes/done.txt", "archive/done.txt")
 ```
 
 #### Rust
@@ -44,6 +47,7 @@ sbx.files().write("notes/todo.txt", "ship it\n").await?;
 let text = sbx.files().read_text("notes/todo.txt").await?;
 let entries = sbx.files().list("notes").await?;
 sbx.files().move_to("notes/todo.txt", "notes/done.txt").await?;
+sbx.files().copy("notes/done.txt", "archive/done.txt").await?;
 ```
 
 #### CLI
@@ -75,6 +79,10 @@ curl "$BASE/files?path=%2Froot%2Fworkspace%2Fnotes" \
 curl -X POST "$BASE/files/mutate" -H "Authorization: Bearer $BOX_TOKEN" \
   -d '{"action":"move","path":"/root/workspace/notes/todo.txt",
        "destination":"/root/workspace/notes/done.txt"}'
+# copy
+curl -X POST "$BASE/files/mutate" -H "Authorization: Bearer $BOX_TOKEN" \
+  -d '{"action":"copy","path":"/root/workspace/notes/done.txt",
+       "destination":"/root/workspace/archive/done.txt"}'
 ```
 
 Writes are atomic: the box writes a temporary file and renames it, so a reader never sees half a file. `list` returns `{name, kind, sizeBytes, modifiedAtMs}` per entry, where `kind` is `file`, `directory`, `symlink` or `other`. `stat(path)` returns one entry; `mkdir` and `delete` round out the set.

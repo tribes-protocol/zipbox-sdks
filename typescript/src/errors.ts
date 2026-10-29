@@ -9,6 +9,16 @@ export type ZipboxErrorCode =
   | 'rate_limited'
   | 'box_not_running'
   | 'unavailable'
+  /** The box's key changed between reading it and sealing to it. */
+  | 'box_key_changed'
+  /** Private mode needs the box connected to a tailnet first. */
+  | 'tailnet_not_connected'
+  /** Company egress lockdown boxes cannot run Tailscale. */
+  | 'tailscale_unavailable_egress_lockdown'
+  /** The box's ZipOS predates Tailscale: accept the ZipOS update first. */
+  | 'tailscale_requires_update'
+  /** A private box, and this device is not on its tailnet. */
+  | 'box_private_unreachable'
 
 const ERROR_CODES: readonly ZipboxErrorCode[] = [
   'invalid_request',
@@ -19,7 +29,12 @@ const ERROR_CODES: readonly ZipboxErrorCode[] = [
   'conflict',
   'rate_limited',
   'box_not_running',
-  'unavailable'
+  'unavailable',
+  'box_key_changed',
+  'tailnet_not_connected',
+  'tailscale_unavailable_egress_lockdown',
+  'tailscale_requires_update',
+  'box_private_unreachable'
 ]
 
 const DOCS_ERRORS_URL = 'https://zipbox.ai/docs/errors'
@@ -85,6 +100,11 @@ function isRetryableCode(code: ZipboxErrorCode): boolean {
     case 'not_found':
     case 'insufficient_credits':
     case 'conflict':
+    case 'box_key_changed':
+    case 'tailnet_not_connected':
+    case 'tailscale_unavailable_egress_lockdown':
+    case 'tailscale_requires_update':
+    case 'box_private_unreachable':
       return false
   }
 }

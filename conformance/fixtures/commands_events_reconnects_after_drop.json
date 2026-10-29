@@ -1,0 +1,96 @@
+{
+  "name": "commands_events_reconnects_after_drop",
+  "description": "commands.events follows a command to its exit: a stream that ends without exit re-attaches from the last cursor via ?since=, and nothing printed is lost.",
+  "call": {
+    "op": "commands.events",
+    "args": {
+      "id": "sbx_1",
+      "commandId": "cmd_9"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-29T00:00:00.000Z",
+          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/exec/cmd_9/events",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "bodyText": "id: 4-0\nevent: stdout\ndata: {\"data\":\"one\\n\"}\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/exec/cmd_9/events?since=4-0",
+        "headers": {
+          "authorization": "Bearer bt_test_token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "bodyText": "id: 8-0\nevent: stdout\ndata: {\"data\":\"two\\n\"}\n\nid: 8-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0,\"signal\":null,\"timedOut\":false}\n\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "events": [
+        {
+          "type": "stdout",
+          "cursor": "4-0",
+          "data": "one\n"
+        },
+        {
+          "type": "stdout",
+          "cursor": "8-0",
+          "data": "two\n"
+        },
+        {
+          "type": "exit",
+          "cursor": "8-0",
+          "exitCode": 0
+        }
+      ]
+    }
+  }
+}

@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::{json, Value};
-use zipbox::{CreateOptions, Error, ExecEvent, OutputStream, Signal, Zipbox};
+use zipbox::{
+    CreateOptions, DeleteOptions, Error, ExecEvent, LogOptions, OutputStream, Signal, Zipbox,
+};
 
 use common::{subset, MockServer};
 
@@ -59,6 +61,16 @@ fn event_json(event: &ExecEvent) -> Value {
     }
 }
 
+fn create_options(args: &Value) -> CreateOptions {
+    CreateOptions {
+        name: args["name"].as_str().map(str::to_string),
+        tier: args["tier"].as_str().map(str::to_string),
+        ssh_public_key: args["sshPublicKey"].as_str().map(str::to_string),
+        mailbox: args["mailbox"].as_bool(),
+        private: args["private"].as_bool(),
+    }
+}
+
 async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
     let to = |v: serde_json::Result<Value>| v.expect("results serialize");
     match op {
@@ -66,15 +78,23 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
         "sandboxes.get" => Ok(to(serde_json::to_value(
             zb.sandboxes().get(arg(args, "id")).await?,
         ))),
-        "sandboxes.create" => {
+        "sandboxes.create" => Ok(to(serde_json::to_value(
+            zb.sandboxes().create(create_options(args)).await?,
+        ))),
+        "sandboxes.getOrCreate" => {
             let opts = CreateOptions {
-                name: args["name"].as_str().map(str::to_string),
-                tier: args["tier"].as_str().map(str::to_string),
-                ssh_public_key: args["sshPublicKey"].as_str().map(str::to_string),
-                mailbox: args["mailbox"].as_bool(),
+                name: None,
+                ..create_options(args)
             };
-            Ok(to(serde_json::to_value(zb.sandboxes().create(opts).await?)))
+            Ok(to(serde_json::to_value(
+                zb.sandboxes()
+                    .get_or_create_with(arg(args, "name"), opts)
+                    .await?,
+            )))
         }
+        "sandboxes.waitReady" => Ok(to(serde_json::to_value(
+            zb.sandboxes().wait_ready(arg(args, "id")).await?,
+        ))),
         "sandboxes.start" => zb
             .sandboxes()
             .start(arg(args, "id"))
@@ -92,7 +112,12 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
             .map(|_| Value::Null),
         "sandboxes.delete" => zb
             .sandboxes()
-            .delete(arg(args, "id"))
+            .delete_with(
+                arg(args, "id"),
+                DeleteOptions {
+                    archive: args["archive"].as_bool(),
+                },
+            )
             .await
             .map(|_| Value::Null),
         "sandboxes.setTier" => zb
@@ -123,6 +148,22 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
                 out.push(event_json(&e?));
             }
             Ok(json!({ "events": out }))
+        }
+        "commands.closeStdin" => zb
+            .sandbox(arg(args, "id"))
+            .commands()
+            .close_stdin(arg(args, "commandId"))
+            .await
+            .map(|_| Value::Null),
+        "sandbox.logs" => {
+            let options = LogOptions {
+                since: args["since"].as_str().map(str::to_string),
+                lines: args["lines"].as_u64().map(|n| n as u32),
+                unit: args["unit"].as_str().map(str::to_string),
+            };
+            Ok(Value::String(
+                zb.sandbox(arg(args, "id")).logs(options).await?,
+            ))
         }
         "commands.signal" => {
             let signal: Signal = arg(args, "signal").parse()?;
@@ -168,6 +209,12 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
             .move_to(arg(args, "path"), arg(args, "destination"))
             .await
             .map(|_| Value::Null),
+        "files.copy" => zb
+            .sandbox(arg(args, "id"))
+            .files()
+            .copy(arg(args, "path"), arg(args, "destination"))
+            .await
+            .map(|_| Value::Null),
         "files.delete" => zb
             .sandbox(arg(args, "id"))
             .files()
@@ -183,6 +230,26 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
                 .await?;
             Ok(to(serde_json::to_value(preview)))
         }
+        "sandbox.setPrivate" => zb
+            .sandbox(arg(args, "id"))
+            .set_private(args["enabled"].as_bool().expect("enabled"))
+            .await
+            .map(|_| Value::Null),
+        "tailscale.status" => Ok(to(serde_json::to_value(
+            zb.sandbox(arg(args, "id")).tailscale().status().await?,
+        ))),
+        "tailscale.connect" => zb
+            .sandbox(arg(args, "id"))
+            .tailscale()
+            .connect(arg(args, "authKey"))
+            .await
+            .map(|_| Value::Null),
+        "tailscale.disconnect" => zb
+            .sandbox(arg(args, "id"))
+            .tailscale()
+            .disconnect()
+            .await
+            .map(|_| Value::Null),
         "account.balance" => zb.account().balance().await,
         "account.whoami" => zb.account().whoami().await,
         other => panic!("unknown op {other}"),
@@ -228,6 +295,23 @@ async fn run_fixture(path: PathBuf) -> Result<(), String> {
     .map_err(|_| "timed out".to_string())?;
 
     let mut problems = server.finish();
+    if let Some(auth_key) = fixture["call"]["args"]["authKey"].as_str() {
+        let leaked = server
+            .state
+            .lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .any(|b| String::from_utf8_lossy(b).contains(auth_key));
+        if leaked {
+            problems.push("the auth key left the client in a request body".into());
+        }
+        if let Err(err) = &outcome {
+            if format!("{err} {err:?}").contains(auth_key) {
+                problems.push("the auth key is in an error".into());
+            }
+        }
+    }
     let expect = &fixture["expect"];
     match (outcome, expect.get("result"), expect.get("error")) {
         (Ok(value), Some(result), None) => {

@@ -24,6 +24,25 @@ def substitute(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def body_matches(expected: Any, actual: Any) -> bool:
+    """Deep equality, where the string ``{{ANY}}`` matches any non-null value."""
+    if expected == ANY:
+        return actual is not None
+    if isinstance(expected, dict):
+        return (
+            isinstance(actual, dict)
+            and set(expected) == set(actual)
+            and all(body_matches(value, actual[key]) for key, value in expected.items())
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(expected) == len(actual)
+            and all(body_matches(e, a) for e, a in zip(expected, actual, strict=True))
+        )
+    return bool(expected == actual)
+
+
 class MockServer:
     """One fixture's server. ``start()`` returns the base URL."""
 
@@ -31,6 +50,8 @@ class MockServer:
         self.exchanges: list[dict[str, Any]] = []
         self.index = 0
         self.errors: list[str] = []
+        # Every request body served, so a test can assert what never left the client.
+        self.bodies: list[bytes] = []
         self._lock = threading.Lock()
         server = self
 
@@ -91,6 +112,7 @@ class MockServer:
                 return 599, {}, b""
             exchange = self.exchanges[self.index]
             self.index += 1
+            self.bodies.append(body)
         expected = exchange["request"]
         problems: list[str] = []
         if expected["method"] != method:
@@ -109,7 +131,7 @@ class MockServer:
                 parsed = json.loads(body) if body else None
             except ValueError:
                 parsed = f"<non-json {body!r}>"
-            if parsed != expected["body"]:
+            if not body_matches(expected["body"], parsed):
                 problems.append(f"body {parsed!r} != {expected['body']!r}")
         if "bodyText" in expected and body.decode("utf-8", "replace") != expected["bodyText"]:
             problems.append(f"bodyText {body!r} != {expected['bodyText']!r}")

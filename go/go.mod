@@ -1,6 +1,6 @@
 module github.com/tribes-protocol/zipbox-go
 
-go 1.23
+go 1.24
 
 require (
 	github.com/coder/websocket v1.8.13

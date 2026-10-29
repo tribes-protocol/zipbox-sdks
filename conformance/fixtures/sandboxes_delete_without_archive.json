@@ -1,0 +1,34 @@
+{
+  "name": "sandboxes_delete_without_archive",
+  "description": "delete with archive: false asks the control plane to skip the recoverable copy.",
+  "call": {
+    "op": "sandboxes.delete",
+    "args": {
+      "id": "sbx_1",
+      "archive": false
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "DELETE",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        },
+        "body": {
+          "archiveBeforeDestroy": false
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "success": true
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

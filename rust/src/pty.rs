@@ -2,8 +2,9 @@
 //!
 //! A session is a PTY on the box that outlives every connection to it. A [`Pty`]
 //! keeps its connection alive on its own: a dropped socket re-attaches with
-//! exponential backoff (cap 30 s, jitter) and no attempt limit, and the ladder
-//! resets only when a frame actually arrives. Re-attaching replays the screen.
+//! exponential backoff (cap `pty_max_delay`, default 30 s, jitter) and no attempt
+//! limit, and the ladder resets only when a frame actually arrives. Re-attaching
+//! replays the screen.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -22,10 +23,11 @@ use crate::backoff::Backoff;
 use crate::client::{encode, Body};
 use crate::error::{Error, ErrorCode, Result};
 use crate::sandbox::Sandbox;
+use crate::types::PtyOptions;
 
 /// The websocket subprotocol marker the box expects before the token.
 pub const PTY_SUBPROTOCOL: &str = "tribes.session";
-const RECONNECT_CAP: Duration = Duration::from_secs(30);
+const CLIENT_LABEL: &str = "zipbox-sdk";
 const CLOSE_REVOKED: u16 = 4401;
 const CLOSE_UNKNOWN_SESSION: u16 = 4404;
 
@@ -36,15 +38,15 @@ pub struct PtyClient {
 }
 
 impl PtyClient {
-    /// Opens a new shell session (`bash`) sized `cols` × `rows`.
-    pub async fn create(&self, cols: u16, rows: u16) -> Result<Pty> {
+    /// Opens a new shell session (`bash`). No size in `options` = the box's default.
+    pub async fn create(&self, options: PtyOptions) -> Result<Pty> {
         let session = format!("bash-{}", uuid::Uuid::new_v4());
-        Pty::open(self.sandbox.clone(), session, Some((cols, rows))).await
+        Pty::open(self.sandbox.clone(), session, options).await
     }
 
     /// Re-attaches to an existing session; its screen is replayed.
-    pub async fn attach(&self, session_id: &str) -> Result<Pty> {
-        Pty::open(self.sandbox.clone(), session_id.to_string(), None).await
+    pub async fn attach(&self, session_id: &str, options: PtyOptions) -> Result<Pty> {
+        Pty::open(self.sandbox.clone(), session_id.to_string(), options).await
     }
 }
 
@@ -75,6 +77,7 @@ pub enum PtyEvent {
 enum Control {
     Input(String),
     Resize(u16, u16),
+    Takeover,
     Stop,
 }
 
@@ -108,26 +111,36 @@ struct ServerFrame {
 }
 
 impl Pty {
-    async fn open(sandbox: Sandbox, session_id: String, size: Option<(u16, u16)>) -> Result<Pty> {
+    async fn open(sandbox: Sandbox, session_id: String, options: PtyOptions) -> Result<Pty> {
         let client_id = format!("sdk-{}", uuid::Uuid::new_v4().simple());
+        let size = options.cols.zip(options.rows);
+        let label = options
+            .client_label
+            .unwrap_or_else(|| CLIENT_LABEL.to_string());
+        let target = Target {
+            session_id: &session_id,
+            client_id: &client_id,
+            label: &label,
+        };
         // The first connection's failure is the caller's to see (after one token
         // re-fetch on a 401); every later drop is recovered automatically.
-        let socket = match connect(&sandbox, &session_id, &client_id, false, false).await {
-            Err(err) if err.status == Some(401) => {
-                connect(&sandbox, &session_id, &client_id, false, true).await?
-            }
+        let socket = match connect(&sandbox, &target, false, false).await {
+            Err(err) if err.status == Some(401) => connect(&sandbox, &target, false, true).await?,
             other => other?,
         };
         let (control, control_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
+        let inner = &sandbox.client.inner;
+        let backoff = Backoff::new(inner.pty_base_delay, inner.pty_max_delay);
         let task = Session {
             sandbox: sandbox.clone(),
             session_id: session_id.clone(),
             client_id: client_id.clone(),
+            label,
             size,
             control: control_rx,
             events: events_tx,
-            backoff: Backoff::new(sandbox.client.inner.reconnect_base_delay, RECONNECT_CAP),
+            backoff,
             owned: false,
             pending: VecDeque::new(),
             frames: 0,
@@ -155,6 +168,11 @@ impl Pty {
     /// Resizes the terminal. Re-applied after every reconnect.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.send(Control::Resize(cols, rows))
+    }
+
+    /// Takes the session over from another client attached to it.
+    pub fn takeover(&self) -> Result<()> {
+        self.send(Control::Takeover)
     }
 
     /// Disconnects and leaves the session running on the box.
@@ -195,6 +213,7 @@ struct Session {
     sandbox: Sandbox,
     session_id: String,
     client_id: String,
+    label: String,
     size: Option<(u16, u16)>,
     control: mpsc::UnboundedReceiver<Control>,
     events: mpsc::UnboundedSender<PtyEvent>,
@@ -252,15 +271,12 @@ impl Session {
             if self.control.is_closed() {
                 return;
             }
-            match connect(
-                &self.sandbox,
-                &self.session_id,
-                &self.client_id,
-                true,
-                refresh,
-            )
-            .await
-            {
+            let target = Target {
+                session_id: &self.session_id,
+                client_id: &self.client_id,
+                label: &self.label,
+            };
+            match connect(&self.sandbox, &target, true, refresh).await {
                 Ok(ws) => {
                     refetched = refresh;
                     refresh = false;
@@ -300,6 +316,15 @@ impl Session {
                         Some(Control::Resize(cols, rows)) => {
                             self.size = Some((cols, rows));
                             resize_frame(cols, rows)
+                        }
+                        // A takeover is how a blocked socket asks for ownership,
+                        // so it never waits for it.
+                        Some(Control::Takeover) => {
+                            let frame = serde_json::json!({ "t": "takeover" }).to_string();
+                            if send_frame(&mut ws, frame).await.is_err() {
+                                return Outcome::Dropped;
+                            }
+                            continue;
                         }
                         Some(Control::Stop) | None => {
                             let _ = ws.close(None).await;
@@ -401,10 +426,16 @@ async fn send_frame(ws: &mut Socket, frame: String) -> std::result::Result<(), (
     ws.send(Message::text(frame)).await.map_err(|_| ())
 }
 
+/// Which session to attach, as whom.
+struct Target<'a> {
+    session_id: &'a str,
+    client_id: &'a str,
+    label: &'a str,
+}
+
 async fn connect(
     sandbox: &Sandbox,
-    session_id: &str,
-    client_id: &str,
+    target: &Target<'_>,
     resume: bool,
     refresh: bool,
 ) -> Result<Socket> {
@@ -417,9 +448,10 @@ async fn connect(
         access.base_url.clone()
     };
     let mut url = format!(
-        "{ws_origin}/?session={}&clientId={}&clientLabel=zipbox-sdk",
-        encode(session_id),
-        encode(client_id)
+        "{ws_origin}/?session={}&clientId={}&clientLabel={}",
+        encode(target.session_id),
+        encode(target.client_id),
+        encode(target.label)
     );
     if resume {
         url.push_str("&resume=1");

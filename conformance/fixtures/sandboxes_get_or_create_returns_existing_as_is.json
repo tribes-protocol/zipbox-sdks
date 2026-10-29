@@ -1,0 +1,80 @@
+{
+  "name": "sandboxes_get_or_create_returns_existing_as_is",
+  "description": "getOrCreate on a name that already has a box returns it as it is: the create options apply only on create, so a different tier is neither an error nor a resize, and nothing is claimed.",
+  "call": {
+    "op": "sandboxes.getOrCreate",
+    "args": {
+      "name": "ci-runner",
+      "tier": "l",
+      "mailbox": true
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "sbx_1",
+            "name": "ci-runner",
+            "domain": "zbox.sh",
+            "ipv6": "2a01::1",
+            "status": "running",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": false,
+            "cpuPct": 3,
+            "memPct": 10,
+            "diskPct": 20,
+            "createdAt": "2026-10-29T00:00:00.000Z",
+            "updatedAt": "2026-10-29T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "ci-runner",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-29T00:00:00.000Z",
+          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true,
+      "tier": "s"
+    }
+  }
+}

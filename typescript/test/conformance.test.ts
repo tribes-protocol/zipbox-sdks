@@ -6,7 +6,7 @@ import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { Zipbox, ZipboxError } from '../src/index.js'
+import { type CreateSandboxOptions, Zipbox, ZipboxError } from '../src/index.js'
 
 const FIXTURE_DIR = join(import.meta.dirname, '..', '..', 'conformance', 'fixtures')
 const API_KEY = `zb_${'T'.repeat(43)}`
@@ -49,6 +49,16 @@ function loadFixture(file: string, base: string): Fixture {
   const parsed: unknown = JSON.parse(raw)
   if (!isFixture(parsed)) throw new Error(`bad fixture ${file}`)
   return parsed
+}
+
+// `{{ANY}}` inside a fixture body matches any non-null value at that position.
+function bodyMatcher(value: unknown): unknown {
+  if (value === '{{ANY}}') return expect.anything()
+  if (Array.isArray(value)) return value.map(bodyMatcher)
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bodyMatcher(item)]))
+  }
+  return value
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -139,7 +149,7 @@ class MockServer {
         return `body is not JSON: ${text}`
       }
       try {
-        expect(parsed).toStrictEqual(expected.body)
+        expect(parsed).toStrictEqual(bodyMatcher(expected.body))
       } catch {
         return `body ${text} ≠ ${JSON.stringify(expected.body)}`
       }
@@ -162,6 +172,19 @@ function optionalArg(args: Record<string, unknown>, key: string): string | undef
   return typeof value === 'string' ? value : undefined
 }
 
+function createOptions(args: Record<string, unknown>): Omit<CreateSandboxOptions, 'name'> {
+  const tier = optionalArg(args, 'tier')
+  const sshPublicKey = optionalArg(args, 'sshPublicKey')
+  const mailbox = args.mailbox
+  const privateBox = args.private
+  return {
+    ...(tier === 's' || tier === 'm' || tier === 'l' ? { tier } : {}),
+    ...(sshPublicKey === undefined ? {} : { sshPublicKey }),
+    ...(typeof mailbox === 'boolean' ? { mailbox } : {}),
+    ...(typeof privateBox === 'boolean' ? { private: privateBox } : {})
+  }
+}
+
 async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promise<unknown> {
   const box = (): ReturnType<Zipbox['sandbox']> => zb.sandbox(arg(args, 'id'))
   switch (op) {
@@ -171,14 +194,15 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return zb.sandboxes.get(arg(args, 'id'))
     case 'sandboxes.create': {
       const name = optionalArg(args, 'name')
-      const tier = optionalArg(args, 'tier')
-      const mailbox = args.mailbox
       return zb.sandboxes.create({
         ...(name === undefined ? {} : { name }),
-        ...(tier === 's' || tier === 'm' ? { tier } : {}),
-        ...(typeof mailbox === 'boolean' ? { mailbox } : {})
+        ...createOptions(args)
       })
     }
+    case 'sandboxes.getOrCreate':
+      return zb.sandboxes.getOrCreate(arg(args, 'name'), createOptions(args))
+    case 'sandboxes.waitReady':
+      return zb.sandboxes.waitReady(arg(args, 'id'))
     case 'sandboxes.start':
       return zb.sandboxes.start(arg(args, 'id'))
     case 'sandboxes.stop':
@@ -187,8 +211,10 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return zb.sandboxes.restart(arg(args, 'id'))
     case 'sandboxes.setTier':
       return zb.sandboxes.setTier(arg(args, 'id'), arg(args, 'tier') === 'm' ? 'm' : 's')
-    case 'sandboxes.delete':
-      return zb.sandboxes.delete(arg(args, 'id'))
+    case 'sandboxes.delete': {
+      const archive = args.archive
+      return zb.sandboxes.delete(arg(args, 'id'), typeof archive === 'boolean' ? { archive } : {})
+    }
     case 'sandbox.exec':
       return box().exec(arg(args, 'cmd'))
     case 'sandbox.execBackground':
@@ -203,6 +229,18 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
         events.push(event)
       }
       return { events }
+    }
+    case 'commands.closeStdin':
+      return box().commands.closeStdin(arg(args, 'commandId'))
+    case 'sandbox.logs': {
+      const since = optionalArg(args, 'since')
+      const unit = optionalArg(args, 'unit')
+      const lines = args.lines
+      return box().logs({
+        ...(since === undefined ? {} : { since }),
+        ...(typeof lines === 'number' ? { lines } : {}),
+        ...(unit === undefined ? {} : { unit })
+      })
     }
     case 'commands.signal':
       return box().commands.signal(
@@ -221,6 +259,8 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return box().files.mkdir(arg(args, 'path'))
     case 'files.move':
       return box().files.move(arg(args, 'path'), arg(args, 'destination'))
+    case 'files.copy':
+      return box().files.copy(arg(args, 'path'), arg(args, 'destination'))
     case 'files.delete':
       return box().files.delete(arg(args, 'path'))
     case 'preview.create': {
@@ -233,6 +273,14 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return zb.account.balance()
     case 'account.whoami':
       return zb.account.whoami()
+    case 'sandbox.setPrivate':
+      return box().setPrivate(args.enabled === true)
+    case 'tailscale.status':
+      return box().tailscale.status()
+    case 'tailscale.connect':
+      return box().tailscale.connect(arg(args, 'authKey'))
+    case 'tailscale.disconnect':
+      return box().tailscale.disconnect()
     default:
       throw new Error(`unmapped op ${op}`)
   }
@@ -280,7 +328,7 @@ describe('conformance', () => {
   })
 
   it('has fixtures', () => {
-    expect(files.length).toBeGreaterThanOrEqual(27)
+    expect(files.length).toBeGreaterThanOrEqual(38)
   })
 
   for (const file of files) {

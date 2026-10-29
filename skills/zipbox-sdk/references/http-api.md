@@ -20,19 +20,23 @@ Requests that carry an `Origin` header are refused with `403`: keys are for serv
 
 ## Routes
 
-| Method and path                | Does                                                                        |
-| ------------------------------ | --------------------------------------------------------------------------- |
-| `GET /account/whoami`          | `{userId, apiKey}` - who the key belongs to                                 |
-| `GET /billing/summary`         | Credit balance and auto top-up state                                        |
-| `GET /billing/usage`           | Recent metered usage                                                        |
-| `GET /sandbox`                 | Your boxes                                                                  |
-| `GET /sandbox/:id`             | One box, plus `ready`, `baseUrl` and `boxToken`                             |
-| `POST /sandbox/identity/claim` | Create a box: `{name?, tier?, sshPublicKey?, timeZone?, mailbox?}`          |
-| `POST /sandbox/:id/pause`      | Stop: archive the disk; bills nothing while stopped                         |
-| `POST /sandbox/:id/restore`    | Start a stopped box                                                         |
-| `POST /sandbox/:id/reset`      | Restart: hard reboot, files survive                                         |
-| `POST /sandbox/:id/tier`       | Resize: `{tier}`                                                            |
-| `DELETE /sandbox/:id`          | Delete: `{archiveBeforeDestroy?}` (default keeps a 30-day recoverable copy) |
+| Method and path                 | Does                                                                         |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /account/whoami`           | `{userId, apiKey}` - who the key belongs to                                  |
+| `GET /billing/summary`          | Credit balance and auto top-up state                                         |
+| `GET /billing/usage`            | Recent metered usage                                                         |
+| `GET /sandbox`                  | Your boxes                                                                   |
+| `GET /sandbox/:id`              | One box, plus `ready`, `baseUrl` and `boxToken`                              |
+| `POST /sandbox/identity/claim`  | Create a box: `{name?, tier?, sshPublicKey?, timeZone?, mailbox?, private?}` |
+| `POST /sandbox/:id/pause`       | Stop: archive the disk; bills nothing while stopped                          |
+| `POST /sandbox/:id/restore`     | Start a stopped box                                                          |
+| `POST /sandbox/:id/reset`       | Restart: hard reboot, files survive                                          |
+| `POST /sandbox/:id/tier`        | Resize: `{tier}`                                                             |
+| `DELETE /sandbox/:id`           | Delete: `{archiveBeforeDestroy?}` (default keeps a 30-day recoverable copy)  |
+| `GET /sandbox/:id/tailscale`    | The box's tailnet status: `{tailscale, privateMode}`                         |
+| `PUT /sandbox/:id/tailscale`    | Join your tailnet: `{envelope, agentPublicKey}` (a sealed auth key) → `202`  |
+| `DELETE /sandbox/:id/tailscale` | Leave the tailnet → `200`                                                    |
+| `PUT /sandbox/:id/private`      | Private mode on or off: `{enabled}`                                          |
 
 Three more routes exist for the dashboard and answer `403` to a key: `GET /account/apikeys`, `POST /account/apikeys` and `DELETE /account/apikeys/:id` (key management), and `POST /oauth/consent` (the [OAuth](https://zipbox.ai/docs/oauth.md) consent page).
 
@@ -40,17 +44,20 @@ Three more routes exist for the dashboard and answer `403` to a key: `GET /accou
 
 `GET /sandbox` and `GET /sandbox/:id` return box rows. The documented fields:
 
-| Field                                                                   | Meaning                                                                     |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `id`                                                                    | The box id used in every route                                              |
-| `name`, `domain`                                                        | The box's name: `<name>.<domain>`, e.g. `demo.zbox.sh`, and its previews    |
-| `status`                                                                | `provisioning`, `running`, `stopping`, `stopped`, `archived` or `destroyed` |
-| `tier`, `pendingTier`, `machineSize`                                    | Current size, a resize in flight, and the vCPU / memory / disk it runs at   |
-| `isArchived`                                                            | The disk is in cold storage (stopped, or being stopped)                     |
-| `ipv6`                                                                  | The box's public IPv6 address (SSH goes straight here)                      |
-| `cpuPct`, `memPct`, `diskPct`, `netRxBps`, `netTxBps`, `statsUpdatedAt` | The latest resource sample, the same one the dashboard shows                |
-| `startFailedAt`                                                         | Set when the last start failed                                              |
-| `claimedAt`, `createdAt`, `updatedAt`                                   | Timestamps                                                                  |
+| Field                                                                   | Meaning                                                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                                                                    | The box id used in every route                                                                                                                                                                                                                         |
+| `name`, `domain`                                                        | The box's name: `<name>.<domain>`, e.g. `demo.zbox.sh`, and its previews                                                                                                                                                                               |
+| `status`                                                                | `provisioning`, `running`, `stopping` (a stop, delete or resize has been accepted and the box has not finished going down; never `ready`), `stopped`, `archived`, `deleting` (signing out of its tailnet before deletion; never billed) or `destroyed` |
+| `tier`, `pendingTier`, `machineSize`                                    | Current size, a resize in flight, and the vCPU / memory / disk it runs at                                                                                                                                                                              |
+| `isArchived`                                                            | The disk is in cold storage (stopped, or being stopped)                                                                                                                                                                                                |
+| `ipv6`                                                                  | The box's public IPv6 address (SSH goes straight here, unless private)                                                                                                                                                                                 |
+| `privateMode`                                                           | Only devices on your tailnet can reach the box ([Tailscale](https://zipbox.ai/docs/tailscale.md))                                                                                                                                                                          |
+| `tailscale`                                                             | Its tailnet status, or null when it never joined ([Tailscale](https://zipbox.ai/docs/tailscale.md#read-the-status))                                                                                                                                                        |
+| `agentPublicKey`                                                        | The box's own P-256 public key (SPKI DER, base64), to seal credentials to. Null until the box has started; re-read it right before sealing                                                                                                             |
+| `cpuPct`, `memPct`, `diskPct`, `netRxBps`, `netTxBps`, `statsUpdatedAt` | The latest resource sample, the same one the dashboard shows                                                                                                                                                                                           |
+| `startFailedAt`                                                         | Set when the last start failed                                                                                                                                                                                                                         |
+| `claimedAt`, `createdAt`, `updatedAt`                                   | Timestamps                                                                                                                                                                                                                                             |
 
 Other fields are internal and may change without notice.
 
@@ -95,6 +102,35 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
 The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) until `ready` is true. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`.
 
 A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved with the name, and the mailbox itself is created the first time the box or its owner uses mail: the first `tribes-email` call from inside the box, the first time the box is opened in the dashboard, or the first `/sandbox/:id/email` request. Pass `"mailbox": true` to create it at claim time instead, for a box that must be able to receive mail before anything on it has asked. Either way the mailbox belongs to the name, not the box: reusing a name (`getOrCreate`) reuses its mailbox, so prefer one long-lived name per recurring job over a fresh box per run.
+
+## Tailscale and private mode
+
+The how-to, with samples in every language, is [Tailscale and private boxes](https://zipbox.ai/docs/tailscale.md). These routes go through the control plane, so they work for a private box from anywhere.
+
+`GET /sandbox/:id/tailscale` answers `{tailscale, privateMode, supported}`. `tailscale` is `{state, tailnet, ipv4, ipv6, dnsName, keyExpiry, pending, peers}`, or null when the box never joined and no key is pending. `peers` is your other devices on the tailnet as the box sees them, online first and at most 50: `{name, dnsName, os, online, ipv4, connection}`, with `connection` `direct`, `relay` or null (no recent traffic). `supported` (also `tailscaleSupported` on every box row) is false when the box's ZipOS predates Tailscale, and null until the box has reported since it booted.
+
+`PUT /sandbox/:id/tailscale` takes an auth key **sealed to the box** - never the key itself:
+
+```json
+{
+  "envelope": { "ephemeralPublicKey": "…", "iv": "…", "ciphertext": "…" },
+  "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE…"
+}
+```
+
+`agentPublicKey` is the value you sealed to, read from `GET /sandbox/:id` right before sealing ([how to seal](https://zipbox.ai/docs/tailscale.md#how-the-key-is-sealed)). The answer is `202 {pending: true}`; the box reports its state on its own heartbeat. A newer key replaces one that has not been delivered yet.
+
+`DELETE /sandbox/:id/tailscale` logs the box out, removes it from your tailnet admin and wipes its Tailscale state (`200 {success}`). A private box is made public first, in the same call; `409 box_not_running` when the box is not running.
+
+`PUT /sandbox/:id/private` with `{"enabled": true}` or `{"enabled": false}` answers `200 {privateMode}`. Pass `"private": true` to `POST /sandbox/identity/claim` to create a box that is never public.
+
+| Status | Code                                    | When                                                                                  |
+| ------ | --------------------------------------- | ------------------------------------------------------------------------------------- |
+| 409    | `box_not_running`                       | `PUT …/tailscale` on a box that is not provisioning or running                        |
+| 409    | `box_key_changed`                       | `agentPublicKey` is not the box's current key: read it again, re-seal, send once more |
+| 409    | `tailscale_unavailable_egress_lockdown` | The box has company egress lockdown, which Tailscale cannot pass                      |
+| 409    | `tailnet_not_connected`                 | `PUT …/private` `{enabled: true}` while the box is not connected with a tailnet IPv4  |
+| 409    | `tailscale_requires_update`             | The box's ZipOS predates Tailscale (`tailscaleSupported: false`): update it first     |
 
 ## Idempotency
 

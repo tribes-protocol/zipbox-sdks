@@ -39,7 +39,7 @@ def to_json(value: Any) -> Any:
             for f in dataclasses.fields(value)
             if f.name != "raw"
         }
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [to_json(item) for item in value]
     if isinstance(value, dict):
         return {k: to_json(v) for k, v in value.items()}
@@ -83,6 +83,16 @@ def matches(expected: Any, actual: Any, where: str = "result") -> list[str]:
     return [] if expected == actual else [f"{where}: {actual!r} != {expected!r}"]
 
 
+def _create_options(a: dict[str, Any]) -> dict[str, Any]:
+    """The create options a fixture passes, as keyword arguments."""
+    return {
+        "tier": a.get("tier"),
+        "ssh_public_key": a.get("sshPublicKey"),
+        "mailbox": a.get("mailbox"),
+        "private": a.get("private"),
+    }
+
+
 def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
     box = zb.sandbox(a["id"]) if "id" in a else None
     match op:
@@ -91,9 +101,11 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.get":
             return zb.sandboxes.get(a["id"])
         case "sandboxes.create":
-            return zb.sandboxes.create(
-                name=a.get("name"), tier=a.get("tier"), mailbox=a.get("mailbox")
-            )
+            return zb.sandboxes.create(name=a.get("name"), **_create_options(a))
+        case "sandboxes.getOrCreate":
+            return zb.sandboxes.get_or_create(a["name"], **_create_options(a))
+        case "sandboxes.waitReady":
+            return zb.sandboxes.wait_ready(a["id"])
         case "sandboxes.start":
             return zb.sandboxes.start(a["id"])
         case "sandboxes.stop":
@@ -103,7 +115,7 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.setTier":
             return zb.sandboxes.set_tier(a["id"], a["tier"])
         case "sandboxes.delete":
-            return zb.sandboxes.delete(a["id"])
+            return zb.sandboxes.delete(a["id"], archive=a.get("archive"))
     assert box is not None or op.startswith("account.")
     match op:
         case "sandbox.exec":
@@ -112,6 +124,10 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
             return box.exec_background(a["cmd"])  # type: ignore[union-attr]
         case "commands.events":
             return {"events": list(box.commands.events(a["commandId"], since=a.get("since")))}  # type: ignore[union-attr]
+        case "commands.closeStdin":
+            return box.commands.close_stdin(a["commandId"])  # type: ignore[union-attr]
+        case "sandbox.logs":
+            return box.logs(a.get("since"), a.get("lines"), a.get("unit"))  # type: ignore[union-attr]
         case "commands.signal":
             return box.commands.signal(a["commandId"], a["signal"])  # type: ignore[union-attr]
         case "files.read":
@@ -126,10 +142,20 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
             return box.files.mkdir(a["path"])  # type: ignore[union-attr]
         case "files.move":
             return box.files.move(a["path"], a["destination"])  # type: ignore[union-attr]
+        case "files.copy":
+            return box.files.copy(a["path"], a["destination"])  # type: ignore[union-attr]
         case "files.delete":
             return box.files.delete(a["path"])  # type: ignore[union-attr]
         case "preview.create":
             return box.preview.create(a["port"], label=a.get("label"))  # type: ignore[union-attr]
+        case "sandbox.setPrivate":
+            return box.set_private(a["enabled"])  # type: ignore[union-attr]
+        case "tailscale.status":
+            return box.tailscale.status()  # type: ignore[union-attr]
+        case "tailscale.connect":
+            return box.tailscale.connect(a["authKey"])  # type: ignore[union-attr]
+        case "tailscale.disconnect":
+            return box.tailscale.disconnect()  # type: ignore[union-attr]
         case "account.balance":
             return zb.account.balance()
         case "account.whoami":
@@ -145,9 +171,11 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.get":
             return await zb.sandboxes.get(a["id"])
         case "sandboxes.create":
-            return await zb.sandboxes.create(
-                name=a.get("name"), tier=a.get("tier"), mailbox=a.get("mailbox")
-            )
+            return await zb.sandboxes.create(name=a.get("name"), **_create_options(a))
+        case "sandboxes.getOrCreate":
+            return await zb.sandboxes.get_or_create(a["name"], **_create_options(a))
+        case "sandboxes.waitReady":
+            return await zb.sandboxes.wait_ready(a["id"])
         case "sandboxes.start":
             return await zb.sandboxes.start(a["id"])
         case "sandboxes.stop":
@@ -157,7 +185,7 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
         case "sandboxes.setTier":
             return await zb.sandboxes.set_tier(a["id"], a["tier"])
         case "sandboxes.delete":
-            return await zb.sandboxes.delete(a["id"])
+            return await zb.sandboxes.delete(a["id"], archive=a.get("archive"))
         case "sandbox.exec":
             return await box.exec(a["cmd"])
         case "sandbox.execBackground":
@@ -166,6 +194,10 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
             return {
                 "events": [e async for e in box.commands.events(a["commandId"], a.get("since"))]
             }
+        case "commands.closeStdin":
+            return await box.commands.close_stdin(a["commandId"])
+        case "sandbox.logs":
+            return await box.logs(a.get("since"), a.get("lines"), a.get("unit"))
         case "commands.signal":
             return await box.commands.signal(a["commandId"], a["signal"])
         case "files.read":
@@ -180,10 +212,20 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
             return await box.files.mkdir(a["path"])
         case "files.move":
             return await box.files.move(a["path"], a["destination"])
+        case "files.copy":
+            return await box.files.copy(a["path"], a["destination"])
         case "files.delete":
             return await box.files.delete(a["path"])
         case "preview.create":
             return await box.preview.create(a["port"], label=a.get("label"))
+        case "sandbox.setPrivate":
+            return await box.set_private(a["enabled"])
+        case "tailscale.status":
+            return await box.tailscale.status()
+        case "tailscale.connect":
+            return await box.tailscale.connect(a["authKey"])
+        case "tailscale.disconnect":
+            return await box.tailscale.disconnect()
         case "account.balance":
             return await zb.account.balance()
         case "account.whoami":
@@ -206,6 +248,7 @@ def _load(server: MockServer, path: Path) -> dict[str, Any]:
     )
     server.load(fixture["exchanges"])
     server.errors.clear()
+    server.bodies.clear()
     return fixture
 
 
@@ -213,6 +256,9 @@ def _verify(
     server: MockServer, fixture: dict[str, Any], result: Any, error: ZipboxError | None
 ) -> None:
     problems = list(server.errors)
+    auth_key = fixture["call"]["args"].get("authKey")
+    if isinstance(auth_key, str) and any(auth_key.encode() in body for body in server.bodies):
+        problems.append("the auth key left the client in a request body")
     if server.unserved():
         problems.append(f"{server.unserved()} exchange(s) never requested")
     expect = fixture["expect"]
@@ -234,6 +280,11 @@ def _verify(
     assert not problems, "\n".join(problems)
 
 
+def _assert_key_absent(fixture: dict[str, Any], text: str) -> None:
+    auth_key = fixture["call"]["args"].get("authKey")
+    assert not (isinstance(auth_key, str) and auth_key in text), "auth key in an error"
+
+
 @pytest.mark.parametrize("path", _fixtures(), ids=lambda p: p.stem)
 def test_sync(server: MockServer, path: Path) -> None:
     fixture = _load(server, path)
@@ -250,6 +301,8 @@ def test_sync(server: MockServer, path: Path) -> None:
             result = run_sync_op(zb, fixture["call"]["op"], fixture["call"]["args"])
         except ZipboxError as caught:
             error = caught
+    if error is not None:
+        _assert_key_absent(fixture, str(error) + repr(error))
     _verify(server, fixture, result, error)
 
 
@@ -269,6 +322,8 @@ async def test_async(server: MockServer, path: Path) -> None:
             result = await run_async_op(zb, fixture["call"]["op"], fixture["call"]["args"])
         except ZipboxError as caught:
             error = caught
+    if error is not None:
+        _assert_key_absent(fixture, str(error) + repr(error))
     _verify(server, fixture, result, error)
 
 

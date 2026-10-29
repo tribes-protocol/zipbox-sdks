@@ -53,6 +53,19 @@ export interface ResolvedBox {
   detail: SandboxDetail
 }
 
+// How long a private box's /challenge may take to answer before this device is
+// taken to be off its tailnet (sdks/conformance/README.md rule 10).
+const PRIVATE_PROBE_TIMEOUT_MS = 5_000
+
+function privateUnreachable(id: string, detail: SandboxDetail): ZipboxError {
+  return new ZipboxError({
+    code: 'box_private_unreachable',
+    message:
+      `${detail.name ?? id} is private: it can only be reached from devices on your tailnet. ` +
+      'Turn on Tailscale on this device (https://tailscale.com/download).'
+  })
+}
+
 function resolvedFromDetail(detail: SandboxDetail): ResolvedBox | null {
   if (!detail.ready || typeof detail.baseUrl !== 'string' || typeof detail.boxToken !== 'string') {
     return null
@@ -73,6 +86,8 @@ export class BoxTransport {
   // ES-private: these hold box tokens, which must never show up in a logged object.
   readonly #boxes = new Map<string, ResolvedBox>()
   readonly #inFlight = new Map<string, Promise<ResolvedBox>>()
+  // Private boxes this client has already reached once.
+  readonly #reachable = new Set<string>()
 
   constructor(
     private readonly api: ControlPlane,
@@ -91,6 +106,7 @@ export class BoxTransport {
 
   invalidate(id: string): void {
     this.#boxes.delete(id)
+    this.#reachable.delete(id)
   }
 
   /** The box's origin and token, fetching the detail when none is cached. */
@@ -104,8 +120,15 @@ export class BoxTransport {
     return promise
   }
 
+  /** {@link resolve}, then make sure this device can reach the box (private boxes). */
+  async reach(id: string, signal?: AbortSignal): Promise<ResolvedBox> {
+    const box = await this.resolve(id, signal)
+    await this.assertReachable(id, box, signal)
+    return box
+  }
+
   async request(id: string, request: ApiRequest): Promise<Response> {
-    const box = await this.resolve(id, request.signal)
+    const box = await this.reach(id, request.signal)
     try {
       return await this.send(box, request)
     } catch (error) {
@@ -128,6 +151,23 @@ export class BoxTransport {
         })
       }
     }
+  }
+
+  /**
+   * A private box answers only on its owner's tailnet. Off the tailnet its address
+   * is not routed and a request would hang, so the first call probes /challenge
+   * with a short deadline and fails fast with `box_private_unreachable`.
+   */
+  private async assertReachable(
+    id: string,
+    box: ResolvedBox,
+    signal: AbortSignal | undefined
+  ): Promise<void> {
+    if (box.detail.privateMode !== true || this.#reachable.has(id)) return
+    if (!(await this.http.answers(`${box.baseUrl}/challenge`, PRIVATE_PROBE_TIMEOUT_MS, signal))) {
+      throw privateUnreachable(id, box.detail)
+    }
+    this.#reachable.add(id)
   }
 
   private send(box: ResolvedBox, request: ApiRequest): Promise<Response> {

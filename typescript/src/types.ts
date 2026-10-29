@@ -20,7 +20,62 @@ export type SandboxStatus =
   | 'stopping'
   | 'stopped'
   | 'archived'
+  | 'deleting'
   | 'destroyed'
+
+/**
+ * The box's managed Tailscale daemon: `joining` (key accepted, coming up),
+ * `connected`, `needsApproval` (a tailnet admin must approve the device),
+ * `needsLogin` (the key was refused or the node key expired), `stopped`, `failed`.
+ */
+export type TailscaleState =
+  | 'joining'
+  | 'connected'
+  | 'needsApproval'
+  | 'needsLogin'
+  | 'stopped'
+  | 'failed'
+
+/** One of the owner's other devices on the tailnet, as the box sees it. */
+export interface TailscalePeer {
+  /** The device's own name, e.g. `lucys-macbook`. */
+  name: string
+  /** Its MagicDNS name. */
+  dnsName?: string | null
+  /** `macOS`, `linux`, `iOS`, `windows`, `android`, … */
+  os?: string | null
+  /** Connected to Tailscale right now. */
+  online: boolean
+  /** Its tailnet IPv4 (100.x). */
+  ipv4?: string | null
+  /**
+   * `direct` (peer to peer), `relay` (through a Tailscale DERP relay), or null (no
+   * recent traffic). Kept as a string: a later value must not break parsing.
+   */
+  connection?: string | null
+}
+
+/** A box's tailnet status (`GET /sandbox/:id/tailscale`). */
+export interface TailscaleStatus {
+  /** Null when only the last known identity is known (the box is stopped). */
+  state?: TailscaleState | null
+  /** The tailnet's name, e.g. `example.com`. */
+  tailnet?: string | null
+  /** The box's tailnet IPv4 (100.x). */
+  ipv4?: string | null
+  ipv6?: string | null
+  /** The box's MagicDNS name. */
+  dnsName?: string | null
+  /** When the node key expires; null when expiry is off (recommended). */
+  keyExpiry?: string | null
+  /**
+   * True while an auth key is on its way to the box. It dropping without `state`
+   * advancing means the key never arrived: connect again with a new key.
+   */
+  pending: boolean
+  /** The owner's other devices (online first, at most 50); null while not reporting. */
+  peers?: TailscalePeer[] | null
+}
 
 /** The documented fields of a box row. Other fields may be present and are internal. */
 export interface SandboxInfo {
@@ -41,6 +96,21 @@ export interface SandboxInfo {
   statsUpdatedAt?: string | null
   startFailedAt?: string | null
   claimedAt?: string | null
+  /** Private mode: reachable only from devices on the owner's tailnet. */
+  privateMode?: boolean | null
+  /** The box's tailnet status; null when it never joined one. */
+  tailscale?: TailscaleStatus | null
+  /**
+   * False when the box's ZipOS predates Tailscale: `box.tailscale.connect` fails
+   * with `tailscale_requires_update` until the ZipOS update is accepted. Null until
+   * the box has reported since it booted.
+   */
+  tailscaleSupported?: boolean | null
+  /**
+   * The box's own P-256 public key (SPKI DER, base64). Credentials are sealed to
+   * it; it changes when a box is claimed, so it is read right before sealing.
+   */
+  agentPublicKey?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -61,7 +131,10 @@ export interface SandboxDetail extends SandboxInfo {
   boxToken?: string | null
 }
 
-/** Options for {@link Sandboxes.create}. */
+/**
+ * Options for {@link Sandboxes.create}. {@link Sandboxes.getOrCreate} takes the same
+ * options minus `name`, and applies them only when it creates the box.
+ */
 export interface CreateSandboxOptions {
   /** The box's permanent subdomain. Absent = the account's default box. */
   name?: string
@@ -70,6 +143,12 @@ export interface CreateSandboxOptions {
   sshPublicKey?: string
   /** Create the box's mailbox at creation. Default: created on first use. */
   mailbox?: boolean
+  /**
+   * Start the box private: never public, reachable only from devices on your
+   * tailnet once it joins. `create` then returns as soon as the box is running
+   * with its key (it is not `ready` until it joins); call `box.tailscale.connect`.
+   */
+  private?: boolean
   signal?: AbortSignal
 }
 
@@ -181,6 +260,8 @@ export interface LogsOptions extends CallOptions {
   since?: string
   /** Most recent N lines; everything when unset (as the other SDKs and the CLI). */
   lines?: number
+  /** Only this systemd unit (`journalctl -u`). */
+  unit?: string
 }
 
 /** How to SSH into a box. */
@@ -190,10 +271,13 @@ export interface SshInfo {
   command: string
 }
 
-/** Options for {@link PtyApi.create}. */
+/** Options for {@link PtyApi.create} and {@link PtyApi.attach}. */
 export interface PtyCreateOptions {
+  /** Initial size. Absent: the box's default. */
   cols?: number
   rows?: number
+  /** Names this client in the box's session list. Default `zipbox-sdk`. */
+  clientLabel?: string
 }
 
 // Method-shorthand inside an indexed type keeps the handler parameter bivariant,
@@ -228,10 +312,18 @@ export interface ZipboxOptions {
    * Followed command streams and PTYs are live surfaces and never give up.
    */
   maxRetries?: number
-  /** First retry delay; doubles per attempt, capped at 30 s, with jitter. Default 500 ms. */
+  /** First retry delay; doubles per attempt up to `retryMaxDelayMs`, with jitter. Default 500 ms. */
   retryBaseDelayMs?: number
-  /** First delay between readiness checks in `create`; grows to 10 s. Default 1000 ms. */
+  /** Cap on the retry delay. Default 30 s. */
+  retryMaxDelayMs?: number
+  /** First delay between readiness checks in `create`; grows to `pollMaxIntervalMs`. Default 1000 ms. */
   pollIntervalMs?: number
+  /** Cap on the delay between readiness checks. Default 10 s. */
+  pollMaxIntervalMs?: number
+  /** First PTY reconnect delay; doubles up to `ptyMaxDelayMs`, with jitter. Default 500 ms. */
+  ptyBaseDelayMs?: number
+  /** Cap on the PTY reconnect delay. Default 30 s. */
+  ptyMaxDelayMs?: number
   fetch?: FetchLike
   /** WebSocket constructor for PTYs (needed on Node 20; Node 22+ has one built in). */
   WebSocket?: WebSocketConstructor

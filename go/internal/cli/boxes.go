@@ -24,19 +24,35 @@ func (a *app) sandboxCommand() *cobra.Command {
 		Short:   "Create and manage boxes",
 	}
 	var create zipbox.CreateOptions
+	var tailscaleKeyFile string
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a box and wait until it is ready",
-		Args:  cobra.NoArgs,
+		Example: "  zipbox sandbox create --name demo\n" +
+			"  zipbox sandbox create --name build --private --tailscale-auth-key-file tskey.txt",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := a.client()
 			if err != nil {
 				return err
 			}
+			// Read the key before creating anything, so a bad key never leaves a box behind.
+			var tailscaleKey string
+			if tailscaleKeyFile != "" {
+				if tailscaleKey, err = a.readAuthKey(tailscaleKeyFile); err != nil {
+					return err
+				}
+			}
 			fmt.Fprintln(a.err, "Creating box…")
 			box, err := c.Sandboxes.Create(cmd.Context(), create)
 			if err != nil {
 				return err
+			}
+			if tailscaleKey != "" {
+				if err := box.Tailscale.Connect(cmd.Context(), tailscaleKey); err != nil {
+					return err
+				}
+				fmt.Fprintf(a.err, "Tailscale auth key sealed to %s and sent. Check with `zipbox tailscale status %s`.\n", box.ID, box.ID)
 			}
 			return a.emit(box.Detail, func() { a.printDetail(box.Detail) })
 		},
@@ -45,6 +61,8 @@ func (a *app) sandboxCommand() *cobra.Command {
 	createCmd.Flags().StringVar(&create.Tier, "tier", "", "machine size: xs, s, m, l, xl, xxl")
 	createCmd.Flags().StringVar(&create.SSHPublicKey, "ssh-public-key", "", "an OpenSSH public key line to authorize")
 	createCmd.Flags().BoolVar(&create.Mailbox, "mailbox", false, "create the box's mailbox now instead of on first use")
+	createCmd.Flags().BoolVar(&create.Private, "private", false, "start the box private: reachable only from devices on your tailnet")
+	createCmd.Flags().StringVar(&tailscaleKeyFile, "tailscale-auth-key-file", "", "join your tailnet once the box runs, with the auth key in this file (- for stdin)")
 
 	listCmd := &cobra.Command{
 		Use:     "list",
@@ -140,7 +158,7 @@ func (a *app) sandboxCommand() *cobra.Command {
 					return errors.New("not confirmed")
 				}
 			}
-			if err := c.Sandboxes.Delete(cmd.Context(), box.ID); err != nil {
+			if err := c.Sandboxes.Delete(cmd.Context(), box.ID, zipbox.DeleteOptions{}); err != nil {
 				return err
 			}
 			return a.emit(map[string]string{"id": box.ID, "action": "delete"}, func() {
@@ -178,6 +196,9 @@ func (a *app) printDetail(d *zipbox.SandboxDetail) {
 	fmt.Fprintf(w, "status\t%s\n", d.Status)
 	fmt.Fprintf(w, "tier\t%s\n", deref(d.Tier))
 	fmt.Fprintf(w, "ready\t%t\n", d.Ready)
+	if d.PrivateMode {
+		fmt.Fprintln(w, "private\tyes (tailnet only)")
+	}
 	if d.BaseURL != nil {
 		fmt.Fprintf(w, "url\t%s\n", *d.BaseURL)
 	}

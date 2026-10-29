@@ -6,7 +6,7 @@
 import { Zipbox } from '@zipbox/sdk'
 
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('dev-server')
+const box = await zb.sandboxes.getOrCreate('dev-server', { tier: 's' })
 const commandId = process.argv[2]
 
 if (commandId === undefined) {
@@ -18,7 +18,7 @@ if (commandId === undefined) {
 } else {
   // Replays everything the server printed, then follows it live. Ctrl-C detaches;
   // the server keeps running.
-  for await (const event of box.commands.follow(commandId)) {
+  for await (const event of box.commands.events(commandId)) {
     if (event.type === 'stdout' || event.type === 'stderr') process.stdout.write(event.data)
     if (event.type === 'exit') console.log(`server exited with ${event.exitCode ?? 'unknown'}`)
   }

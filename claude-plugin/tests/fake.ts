@@ -47,6 +47,8 @@ export type FakeOptions = {
   session?: () => string
   /** Programs this computer does not have. */
   missing?: string[]
+  /** Box b-1 is private; how its `/challenge` probe goes from this computer. */
+  privateBox?: 'answers' | 'refused' | 'silent'
 }
 
 const sse = (stdout: string, exitCode = 0) =>
@@ -106,11 +108,18 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
           status: 'running',
           ready: true,
           baseUrl: options.boxOrigin ?? 'https://dev.zbox.sh',
-          boxToken: token
+          boxToken: token,
+          privateMode: options.privateBox !== undefined
         })
       if (path === '/account/whoami')
         return answer(200, { userId: 'u-1', apiKey: { name: 'CLI', kind: 'cli', last4: 'aaaa' } })
       return answer(404, { error: { message: 'not found' } })
+    }
+    if (path === '/challenge' && options.privateBox !== undefined) {
+      if (options.privateBox === 'refused') throw new Error('connect ECONNREFUSED')
+      // Off the tailnet a 100.x address is not routed: the connect never ends.
+      if (options.privateBox === 'silent') return new Promise<never>(() => undefined)
+      return answer(404, { error: 'no owner yet' })
     }
     if (headers.authorization !== `Bearer ${token}`) return answer(401, { error: 'unauthorized' })
     const own = options.box?.(method, path, body)

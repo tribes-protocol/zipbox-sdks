@@ -1,0 +1,35 @@
+{
+  "name": "sandbox_set_private",
+  "description": "setPrivate \u2192 PUT /sandbox/:id/private {enabled}.",
+  "call": {
+    "op": "sandbox.setPrivate",
+    "args": {
+      "id": "sbx_1",
+      "enabled": true
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "PUT",
+        "path": "/sandbox/sbx_1/private",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "content-type": "application/json"
+        },
+        "body": {
+          "enabled": true
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "privateMode": true
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": null
+  }
+}

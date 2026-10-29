@@ -138,10 +138,19 @@ async fn reconnects_resumes_and_takes_over() {
     let zb = Zipbox::builder()
         .api_key(API_KEY)
         .base_url(&api.base)
-        .reconnect_base_delay(Duration::from_millis(1))
+        .pty_base_delay(Duration::from_millis(1))
         .build()
         .unwrap();
-    let mut pty = zb.sandbox("sbx_1").pty().create(80, 24).await.unwrap();
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .create(zipbox::PtyOptions {
+            cols: Some(80),
+            rows: Some(24),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert!(pty.session_id().starts_with("bash-"));
 
     let mut events = Vec::new();
@@ -227,10 +236,15 @@ async fn refetches_once_on_401_and_stops_on_an_answered_verdict() {
     let zb = Zipbox::builder()
         .api_key(API_KEY)
         .base_url(&api.base)
-        .reconnect_base_delay(Duration::from_millis(1))
+        .pty_base_delay(Duration::from_millis(1))
         .build()
         .unwrap();
-    let mut pty = zb.sandbox("sbx_1").pty().attach("bash-x").await.unwrap();
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .attach("bash-x", zipbox::PtyOptions::default())
+        .await
+        .unwrap();
     let mut events = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = pty.next().await {

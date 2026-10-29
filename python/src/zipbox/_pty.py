@@ -101,8 +101,9 @@ class PtyState:
 
     session_id: str
     client_id: str
-    cols: int
-    rows: int
+    cols: int | None
+    rows: int | None
+    client_label: str = CLIENT_LABEL
     stopping: bool = False
     connected: bool = False
     opened_once: bool = False
@@ -121,7 +122,7 @@ def socket_url(base_url: str, state: PtyState, resume: bool) -> str:
     scheme = "wss" if parsed.scheme == "https" else "ws"
     query = (
         f"session={quote(state.session_id, safe='')}&clientId={quote(state.client_id, safe='')}"
-        f"&clientLabel={CLIENT_LABEL}"
+        f"&clientLabel={quote(state.client_label, safe='')}"
     )
     if resume:
         query += "&resume=1"
@@ -147,7 +148,11 @@ def pty_loop(core: Core, sandbox_id: str, state: PtyState) -> Generator[Any, Any
         try:
             target = yield from core.target(sandbox_id)
         except ZipboxError as error:
-            if not error.retryable:
+            # A session that was open is a live surface: a private box this device
+            # lost its tailnet path to comes back when Tailscale does, so keep trying.
+            # A first attach fails fast instead.
+            reattaching = state.opened_once and error.code == "box_private_unreachable"
+            if not error.retryable and not reattaching:
                 raise
             yield Sleep(backoff.next())
             continue
@@ -178,7 +183,8 @@ def pty_loop(core: Core, sandbox_id: str, state: PtyState) -> Generator[Any, Any
         refetched = False  # the handshake accepted the token
         try:
             try:
-                yield WsSend(frame({"t": "r", "c": state.cols, "r": state.rows}))
+                if state.cols is not None and state.rows is not None:
+                    yield WsSend(frame({"t": "r", "c": state.cols, "r": state.rows}))
                 while state.pending:
                     yield WsSend(state.pending[0])
                     state.pending.pop(0)
@@ -409,6 +415,10 @@ class Pty:
         self._state.cols, self._state.rows = cols, rows
         self._queue_or_send(frame({"t": "r", "c": cols, "r": rows}))
 
+    def takeover(self) -> None:
+        """Take the session over from another client attached to it."""
+        self._queue_or_send(frame({"t": "takeover"}))
+
     def detach(self) -> None:
         """Drop the socket and stop reconnecting; the session keeps running on the box."""
         self._state.stopping = True
@@ -603,6 +613,10 @@ class AsyncPty:
         self._state.cols, self._state.rows = cols, rows
         await self._queue_or_send(frame({"t": "r", "c": cols, "r": rows}))
 
+    async def takeover(self) -> None:
+        """Take the session over from another client attached to it."""
+        await self._queue_or_send(frame({"t": "takeover"}))
+
     async def detach(self) -> None:
         """Drop the socket and stop reconnecting; the session keeps running on the box."""
         self._state.stopping = True
@@ -630,11 +644,17 @@ class AsyncPty:
         return self._state.exit_code
 
 
-def new_state(session_id: str | None, cols: int, rows: int) -> PtyState:
-    """State for a new or re-attached session."""
+def new_state(
+    session_id: str | None,
+    cols: int | None,
+    rows: int | None,
+    client_label: str | None = None,
+) -> PtyState:
+    """State for a new or re-attached session. No size = the box's default."""
     return PtyState(
         session_id=session_id or new_session_id(),
         client_id=uuid.uuid4().hex,
         cols=cols,
         rows=rows,
+        client_label=client_label or CLIENT_LABEL,
     )

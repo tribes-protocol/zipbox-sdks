@@ -10,25 +10,26 @@ A box keeps two kinds of logs: the **system journal** (services, the agent, cron
 
 ## Read the journal
 
-`logs({ since, lines })` runs `journalctl -o short-iso --no-pager` on the box (with `--since <since>` and `-n <lines>` when given) and returns its text. `since` takes anything journalctl does: `"10 min ago"`, `"today"`, an ISO timestamp. The TypeScript SDK returns the last 200 lines when `lines` is omitted; the other SDKs and the CLI return everything in range. The Go SDK (`LogOptions.Unit`) and the CLI (`-u`) also filter by systemd unit.
+`logs({ since, lines, unit })` runs `journalctl -o short-iso --no-pager` on the box (with `--since <since>`, `-n <lines>` and `-u <unit>` when given) and returns its text; a journalctl that fails is a `conflict` error. `since` takes anything journalctl does: `"10 min ago"`, `"today"`, an ISO timestamp. Every SDK and the CLI return everything in range when `lines` is omitted, and filter by systemd unit with `unit` (CLI: `-u`).
 
 #### TypeScript
 
 ```ts
-const logs = await box.logs({ since: '10 min ago' })
+const logs = await box.logs({ since: '10 min ago', unit: 'caddy' })
 console.log(logs)
 ```
 
 #### Python
 
 ```python
-print(box.logs(since="10 min ago"))
+print(box.logs(since="10 min ago", unit="caddy"))
 ```
 
 #### Go
 
 ```go
-logs, err := box.Logs(ctx, zipbox.LogOptions{Since: "10 min ago"})
+opts := zipbox.LogOptions{Since: "10 min ago", Unit: "caddy"}
+logs, err := box.Logs(ctx, opts)
 fmt.Println(logs)
 ```
 
@@ -37,6 +38,7 @@ fmt.Println(logs)
 ```rust
 let options = zipbox::LogOptions {
     since: Some("10 min ago".into()),
+    unit: Some("caddy".into()),
     ..Default::default()
 };
 let logs = sbx.logs(options).await?;
@@ -46,7 +48,7 @@ println!("{logs}");
 #### CLI
 
 ```sh
-zipbox logs $ID --since '10 min ago'
+zipbox logs $ID --since '10 min ago' -u caddy
 ```
 
 #### curl
@@ -54,10 +56,10 @@ zipbox logs $ID --since '10 min ago'
 ```sh
 curl -N -X POST "$BASE/exec" -H "Authorization: Bearer $BOX_TOKEN" \
   -d '{"argv":["journalctl","-o","short-iso","--no-pager",
-               "--since","10 min ago"]}'
+               "--since","10 min ago","-u","caddy"]}'
 ```
 
-Need one service? Run `journalctl -u <unit>` with [exec](https://zipbox.ai/docs/commands.md) directly.
+Need more than these filters? Run `journalctl` with [exec](https://zipbox.ai/docs/commands.md) directly.
 
 ## Command output is the command log
 

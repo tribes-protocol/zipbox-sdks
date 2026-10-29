@@ -17,6 +17,11 @@ ErrorCode = Literal[
     "rate_limited",
     "box_not_running",
     "unavailable",
+    "box_key_changed",
+    "tailnet_not_connected",
+    "tailscale_unavailable_egress_lockdown",
+    "tailscale_requires_update",
+    "box_private_unreachable",
 ]
 
 DOCS_ERRORS_URL = "https://zipbox.ai/docs/errors"
@@ -92,6 +97,11 @@ _CODES: frozenset[str] = frozenset(
         "rate_limited",
         "box_not_running",
         "unavailable",
+        "box_key_changed",
+        "tailnet_not_connected",
+        "tailscale_unavailable_egress_lockdown",
+        "tailscale_requires_update",
+        "box_private_unreachable",
     }
 )
 

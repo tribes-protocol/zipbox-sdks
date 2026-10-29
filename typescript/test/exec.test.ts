@@ -89,10 +89,10 @@ describe('exec', () => {
       }
     })
     await zb.sandbox('sbx_1').logs()
-    await zb.sandbox('sbx_1').logs({ lines: 50, since: '1 hour ago' })
+    await zb.sandbox('sbx_1').logs({ lines: 50, since: '1 hour ago', unit: 'caddy' })
     expect(bodies[0]).toBe('{"argv":["journalctl","-o","short-iso","--no-pager"]}')
     expect(bodies[1]).toBe(
-      '{"argv":["journalctl","-o","short-iso","--no-pager","-n","50","--since","1 hour ago"]}'
+      '{"argv":["journalctl","-o","short-iso","--no-pager","--since","1 hour ago","-n","50","-u","caddy"]}'
     )
   })
 
@@ -121,7 +121,7 @@ describe('exec', () => {
       }
     })
     const events = []
-    for await (const event of zb.sandbox('sbx_1').commands.follow('cmd_1', { since: '0-0' })) {
+    for await (const event of zb.sandbox('sbx_1').commands.events('cmd_1', { since: '0-0' })) {
       events.push(event.type)
     }
     expect(events).toEqual(['stdout', 'exit'])

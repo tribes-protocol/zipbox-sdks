@@ -3,6 +3,7 @@ package zipbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"time"
 )
@@ -17,6 +18,7 @@ const (
 	StatusStopping     Status = "stopping"
 	StatusStopped      Status = "stopped"
 	StatusArchived     Status = "archived"
+	StatusDeleting     Status = "deleting" // signing out of its tailnet before it is destroyed
 	StatusDestroyed    Status = "destroyed"
 )
 
@@ -47,8 +49,19 @@ type Sandbox struct {
 	StatsUpdatedAt *time.Time `json:"statsUpdatedAt,omitempty"`
 	StartFailedAt  *time.Time `json:"startFailedAt,omitempty"`
 	ClaimedAt      *time.Time `json:"claimedAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	// PrivateMode is true when the box answers only devices on your tailnet.
+	PrivateMode bool `json:"privateMode"`
+	// Tailscale is the box's tailnet status; nil when it never joined one.
+	Tailscale *TailscaleStatus `json:"tailscale,omitempty"`
+	// TailscaleSupported is false when the box's ZipOS predates Tailscale
+	// (Tailscale.Connect fails with CodeTailscaleRequiresUpdate until the ZipOS
+	// update is accepted); nil until the box has reported since it booted.
+	TailscaleSupported *bool `json:"tailscaleSupported,omitempty"`
+	// AgentPublicKey is the box's own P-256 key (base64 SPKI DER) that box
+	// credentials are sealed to. Nil until the box has started; a claim re-mints it.
+	AgentPublicKey *string   `json:"agentPublicKey,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // SandboxDetail is one box as GET /sandbox/{id} returns it.
@@ -76,7 +89,8 @@ func (d SandboxDetail) MarshalJSON() ([]byte, error) {
 	return json.Marshal(p)
 }
 
-// CreateOptions configures a new box.
+// CreateOptions configures a new box. GetOrCreate takes the same options and
+// applies them only when it creates the box.
 type CreateOptions struct {
 	// Name is the box's permanent subdomain. Empty = the account's default box.
 	Name string
@@ -86,6 +100,10 @@ type CreateOptions struct {
 	SSHPublicKey string
 	// Mailbox creates the box's mailbox now. False = created the first time the box uses mail.
 	Mailbox bool
+	// Private starts the box in private mode ("tailnet only"): it is never public.
+	// A private box is not ready until it joins your tailnet, so Create returns
+	// once it is running with its key; then call Box.Tailscale.Connect.
+	Private bool
 }
 
 // SandboxesService manages boxes. Reach it as Client.Sandboxes.
@@ -98,6 +116,7 @@ type createBody struct {
 	Tier         string `json:"tier,omitempty"`
 	SSHPublicKey string `json:"sshPublicKey,omitempty"`
 	Mailbox      bool   `json:"mailbox,omitempty"`
+	Private      bool   `json:"private,omitempty"`
 }
 
 type createResponse struct {
@@ -107,32 +126,43 @@ type createResponse struct {
 
 // Create creates a box and waits until it is ready, re-reading it with
 // backoff. The wait has no deadline of its own; bound it with ctx. The request
-// carries an Idempotency-Key, so a retried create never makes two boxes.
+// carries an Idempotency-Key, so a retried create never makes two boxes. With
+// Private set it waits until the box is running with its key instead.
 func (s *SandboxesService) Create(ctx context.Context, opts CreateOptions) (*Box, error) {
 	var created createResponse
 	headers := map[string]string{"Idempotency-Key": newID()}
-	body := createBody{Name: opts.Name, Tier: opts.Tier, SSHPublicKey: opts.SSHPublicKey, Mailbox: opts.Mailbox}
+	body := createBody{Name: opts.Name, Tier: opts.Tier, SSHPublicKey: opts.SSHPublicKey, Mailbox: opts.Mailbox, Private: opts.Private}
 	if err := s.client.api(ctx, "POST", "/sandbox/identity/claim", body, &created, true, headers); err != nil {
 		return nil, err
 	}
 	return s.WaitReady(ctx, created.SandboxID)
 }
 
-// WaitReady re-reads a box with backoff until it is ready, and returns its handle.
+// awaitsTailnet reports a private box that is running with its key but has not
+// joined a tailnet: it is never ready until it joins, but the caller can seal an
+// auth key to it now.
+func awaitsTailnet(d *SandboxDetail) bool {
+	joined := d.Tailscale != nil && d.Tailscale.IPv4 != nil && *d.Tailscale.IPv4 != ""
+	return d.PrivateMode && !joined && d.Status == StatusRunning && d.AgentPublicKey != nil && *d.AgentPublicKey != ""
+}
+
+// WaitReady re-reads a box with backoff until it is ready, and returns its
+// handle. The wait has no deadline of its own; bound it with ctx. A private box
+// that has not joined a tailnet yet is returned once it is running with its key.
 func (s *SandboxesService) WaitReady(ctx context.Context, id string) (*Box, error) {
 	for attempt := 0; ; attempt++ {
 		detail, err := s.Get(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if detail.Ready {
+		if detail.Ready || awaitsTailnet(detail) {
 			box := s.client.Sandbox(id)
 			s.client.storeCreds(id, detail)
 			box.Detail = detail
 			return box, nil
 		}
 		switch detail.Status {
-		case StatusDestroyed, StatusStopped:
+		case StatusDestroyed, StatusStopped, StatusDeleting:
 			return nil, newError(CodeConflict, "box "+id+" is "+string(detail.Status)+" and will not become ready")
 		}
 		if err := sleep(ctx, jitter(s.client.ladder(attempt, s.client.pollMin, s.client.pollMax), s.client)); err != nil {
@@ -142,24 +172,36 @@ func (s *SandboxesService) WaitReady(ctx context.Context, id string) (*Box, erro
 }
 
 // GetOrCreate returns the live box with this name, starting it if it is
-// stopped, or creates it. It waits until the box is ready.
-func (s *SandboxesService) GetOrCreate(ctx context.Context, name string) (*Box, error) {
+// stopped, or creates it with opts. It waits until the box is ready; a private
+// box that has not joined a tailnet yet is returned once it is running with its
+// key. opts.Name must be empty or name (CodeInvalidRequest otherwise).
+//
+// The options apply only when a box is created. A box that already has this name
+// is returned as it is, even when it differs (another tier, not private): that is
+// not an error and nothing is resized. Check Box.Detail.Tier and call SetTier if
+// it matters.
+func (s *SandboxesService) GetOrCreate(ctx context.Context, name string, opts CreateOptions) (*Box, error) {
+	if opts.Name != "" && opts.Name != name {
+		return nil, newError(CodeInvalidRequest, "GetOrCreate("+name+") was given CreateOptions.Name "+opts.Name)
+	}
 	boxes, err := s.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, sb := range boxes {
-		if sb.Name == nil || *sb.Name != name || sb.Status == StatusDestroyed || sb.Status == StatusStopped {
+		if sb.Name == nil || *sb.Name != name || sb.Status == StatusDestroyed || sb.Status == StatusStopped || sb.Status == StatusDeleting {
 			continue
 		}
-		if sb.Status == StatusArchived || (sb.IsArchived != nil && *sb.IsArchived) {
+		// StatusStopping: a stop is still landing; Start waits it out, then starts.
+		if sb.Status == StatusArchived || sb.Status == StatusStopping {
 			if err := s.Start(ctx, sb.ID); err != nil {
 				return nil, err
 			}
 		}
 		return s.WaitReady(ctx, sb.ID)
 	}
-	return s.Create(ctx, CreateOptions{Name: name})
+	opts.Name = name
+	return s.Create(ctx, opts)
 }
 
 // List returns the account's boxes.
@@ -181,8 +223,50 @@ func (s *SandboxesService) Get(ctx context.Context, id string) (*SandboxDetail, 
 }
 
 // Start starts a stopped box. Credit-gated: insufficient_credits when dry.
+//
+// A stop is accepted at once but its disk takes seconds to minutes to land;
+// meanwhile the box reads StatusStopping and the restore answers conflict. Start
+// waits that out with backoff and starts the box once it reads StatusArchived.
+// A box that comes out of the wait already starting or running (a resize
+// restores itself, a failed archive leaves it running) is started. Any other
+// conflict is returned as it came.
 func (s *SandboxesService) Start(ctx context.Context, id string) error {
-	return s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/restore", nil, nil, false, nil)
+	waited := false
+	for {
+		err := s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/restore", nil, nil, false, nil)
+		var zerr *Error
+		if !errors.As(err, &zerr) || zerr.Code != CodeConflict {
+			return err
+		}
+		detail, getErr := s.Get(ctx, id)
+		if getErr != nil {
+			return getErr
+		}
+		if detail.Status != StatusStopping {
+			// A second conflict after a stop was waited out: the box restored itself,
+			// or it is archived and will not restore (that answer is final).
+			if waited && (detail.Status == StatusProvisioning || detail.Status == StatusRunning) {
+				return nil
+			}
+			return err
+		}
+		for attempt := 0; detail.Status == StatusStopping; attempt++ {
+			if sleepErr := sleep(ctx, jitter(s.client.ladder(attempt, s.client.pollMin, s.client.pollMax), s.client)); sleepErr != nil {
+				return sleepErr
+			}
+			if detail, getErr = s.Get(ctx, id); getErr != nil {
+				return getErr
+			}
+		}
+		waited = true
+		switch detail.Status {
+		case StatusArchived:
+		case StatusProvisioning, StatusRunning:
+			return nil
+		default:
+			return err
+		}
+	}
 }
 
 // Stop stops a box: its disk is archived and nothing is billed while stopped.
@@ -196,10 +280,21 @@ func (s *SandboxesService) Restart(ctx context.Context, id string) error {
 	return s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/reset", nil, nil, false, nil)
 }
 
-// Delete deletes a box, keeping a recoverable copy for 30 days.
-func (s *SandboxesService) Delete(ctx context.Context, id string) error {
+// DeleteOptions configures Delete.
+type DeleteOptions struct {
+	// Archive keeps a recoverable copy for 30 days. Nil = the server default (true).
+	Archive *bool
+}
+
+// Delete deletes a box. A recoverable copy is kept for 30 days unless
+// opts.Archive is false.
+func (s *SandboxesService) Delete(ctx context.Context, id string, opts DeleteOptions) error {
 	s.client.forget(id)
-	return s.client.api(ctx, "DELETE", "/sandbox/"+url.PathEscape(id), nil, nil, false, nil)
+	var body any
+	if opts.Archive != nil {
+		body = map[string]bool{"archiveBeforeDestroy": *opts.Archive}
+	}
+	return s.client.api(ctx, "DELETE", "/sandbox/"+url.PathEscape(id), body, nil, false, nil)
 }
 
 // SetTier moves a box to another tier. A running box restarts into it.

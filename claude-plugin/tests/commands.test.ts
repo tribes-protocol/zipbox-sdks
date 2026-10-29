@@ -73,3 +73,41 @@ test('/zipbox help lists the actions', async ($, on) => {
   for (const action of ['login', 'new', 'cancel', 'run', 'files', 'preview', 'screenshot'])
     expect(text).toContain(`/zipbox ${action}`)
 })
+
+test('a private box this computer can reach is probed once, then used', async ($, on) => {
+  const zb = fakeZipbox(on, { privateBox: 'answers' })
+  await start($)
+  await zipbox($, 'use dev')
+  expect((await zipbox($, 'run ls')).text).toBe('ran ls\nexit 0')
+  expect((await zipbox($, 'run ls')).text).toBe('ran ls\nexit 0')
+  expect(zb.asked.filter((line) => line.includes('/challenge'))).toEqual([
+    'GET https://dev.zbox.sh/challenge'
+  ])
+})
+
+test('a private box off this tailnet says so instead of failing to connect', async ($, on) => {
+  const zb = fakeZipbox(on, { privateBox: 'refused' })
+  await start($)
+  await zipbox($, 'use dev')
+  expect((await zipbox($, 'run ls')).text).toBe(
+    'Zipbox: dev is private: it can only be reached from devices on your tailnet. ' +
+      'Turn on Tailscale on this computer (https://tailscale.com/download).'
+  )
+  expect(zb.asked.some((line) => line.includes('/exec'))).toBe(false)
+})
+
+test('a private box that never answers fails after 5 seconds, not before', async ($, on) => {
+  const zb = fakeZipbox(on, { privateBox: 'silent' })
+  await start($)
+  await zipbox($, 'use dev')
+  let text: string | null = null
+  const pending = zipbox($, 'run ls').then((answer) => {
+    text = answer.text
+  })
+  await zb.clock.advance(4_999)
+  expect(text).toBeNull()
+  await zb.clock.advance(1)
+  await pending
+  expect(text).toContain('dev is private')
+  expect(zb.asked.some((line) => line.includes('/exec'))).toBe(false)
+})

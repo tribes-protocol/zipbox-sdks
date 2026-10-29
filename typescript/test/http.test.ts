@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { ZipboxError } from '../src/errors.js'
-import { HttpClient, isUnsentFailure } from '../src/http.js'
+import { HttpClient, isTlsFailure, isUnsentFailure } from '../src/http.js'
 import { BoxTransport, ControlPlane } from '../src/transport.js'
 import type { FetchLike } from '../src/types.js'
 
@@ -11,7 +11,13 @@ function fetchFailed(code: string): TypeError {
 }
 
 function client(fetch: FetchLike, maxRetries = 0): HttpClient {
-  return new HttpClient({ fetch, maxRetries, retryBaseDelayMs: 1, random: () => 0 })
+  return new HttpClient({
+    fetch,
+    maxRetries,
+    retryBaseDelayMs: 1,
+    retryMaxDelayMs: 30_000,
+    random: () => 0
+  })
 }
 
 describe('isUnsentFailure', () => {
@@ -33,6 +39,41 @@ describe('isUnsentFailure', () => {
     expect(isUnsentFailure(fetchFailed('UND_ERR_SOCKET'))).toBe(false)
     expect(isUnsentFailure(new Error('network error'))).toBe(false)
     expect(isUnsentFailure('nope')).toBe(false)
+  })
+})
+
+describe('HttpClient.answers', () => {
+  it('counts any HTTP response as an answer', async () => {
+    const http = client(() => Promise.resolve(new Response('no owner yet', { status: 404 })))
+    expect(await http.answers('https://box--build.zbox.sh/challenge', 5_000)).toBe(true)
+  })
+
+  it('counts a failed TLS handshake as an answer: the box is reachable, its certificate is not there yet', async () => {
+    for (const code of ['ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR', 'CERT_HAS_EXPIRED', 'EPROTO']) {
+      const http = client(() => Promise.reject(fetchFailed(code)))
+      expect(await http.answers('https://box--build.zbox.sh/challenge', 5_000)).toBe(true)
+    }
+    expect(isTlsFailure(fetchFailed('ERR_TLS_CERT_ALTNAME_INVALID'))).toBe(true)
+    expect(isTlsFailure(fetchFailed('ECONNREFUSED'))).toBe(false)
+  })
+
+  it('counts a connection that was never made as no answer', async () => {
+    for (const code of ['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']) {
+      const http = client(() => Promise.reject(fetchFailed(code)))
+      expect(await http.answers('https://box--build.zbox.sh/challenge', 5_000)).toBe(false)
+    }
+  })
+
+  it('counts the deadline as no answer', async () => {
+    const http = client(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new Error('aborted'))
+          })
+        })
+    )
+    expect(await http.answers('https://box--build.zbox.sh/challenge', 5)).toBe(false)
   })
 })
 

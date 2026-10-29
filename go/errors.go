@@ -24,6 +24,17 @@ const (
 	CodeRateLimited         ErrorCode = "rate_limited"
 	CodeBoxNotRunning       ErrorCode = "box_not_running"
 	CodeUnavailable         ErrorCode = "unavailable"
+	// CodeBoxKeyChanged: the box's key changed between reading it and sending a
+	// sealed credential (a claim re-mints it). Tailscale.Connect re-seals once.
+	CodeBoxKeyChanged ErrorCode = "box_key_changed"
+	// CodeTailnetNotConnected: private mode needs the box on a tailnet first.
+	CodeTailnetNotConnected ErrorCode = "tailnet_not_connected"
+	// CodeTailscaleUnavailableEgressLockdown: company egress lockdown blocks Tailscale on this box.
+	CodeTailscaleUnavailableEgressLockdown ErrorCode = "tailscale_unavailable_egress_lockdown"
+	// CodeTailscaleRequiresUpdate: the box's ZipOS predates Tailscale; accept the ZipOS update first.
+	CodeTailscaleRequiresUpdate ErrorCode = "tailscale_requires_update"
+	// CodeBoxPrivateUnreachable: the box is private and this device is not on its tailnet.
+	CodeBoxPrivateUnreachable ErrorCode = "box_private_unreachable"
 )
 
 const docsErrorsURL = "https://zipbox.ai/docs/errors"

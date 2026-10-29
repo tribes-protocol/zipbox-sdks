@@ -7,7 +7,7 @@ import { Zipbox } from '@zipbox/sdk'
 import { z } from 'zod'
 
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('claude-agent')
+const box = await zb.sandboxes.getOrCreate('claude-agent', { tier: 's' })
 
 const zipbox = createSdkMcpServer({
   name: 'zipbox',

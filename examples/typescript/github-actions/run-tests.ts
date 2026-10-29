@@ -7,8 +7,10 @@ const sha = process.env.GITHUB_SHA ?? 'HEAD'
 const zb = new Zipbox()
 // One box per repository, reused across runs; nothing stops it on a clock, so stop
 // it explicitly when the job is done.
+// The tier applies only the first time, when the box is created.
 const box = await zb.sandboxes.getOrCreate(
-  `ci-${repo.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`.slice(0, 63)
+  `ci-${repo.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`.slice(0, 63),
+  { tier: 'm' }
 )
 
 const script = [

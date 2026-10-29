@@ -1,0 +1,112 @@
+{
+  "name": "sandboxes_get_or_create_creates_with_options",
+  "description": "getOrCreate on a missing name creates the box with every create option on the claim body. A private box returns once it is running with its key.",
+  "call": {
+    "op": "sandboxes.getOrCreate",
+    "args": {
+      "name": "ci-runner",
+      "tier": "l",
+      "sshPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIConformance ci@zipbox",
+      "mailbox": true,
+      "private": true
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "sbx_1",
+            "name": "other-box",
+            "domain": "zbox.sh",
+            "ipv6": "2a01::1",
+            "status": "running",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": false,
+            "cpuPct": 3,
+            "memPct": 10,
+            "diskPct": 20,
+            "createdAt": "2026-10-29T00:00:00.000Z",
+            "updatedAt": "2026-10-29T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "ci-runner",
+          "tier": "l",
+          "sshPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIConformance ci@zipbox",
+          "mailbox": true,
+          "private": true
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "sandboxId": "sbx_1",
+          "name": "ci-runner",
+          "status": "provisioning",
+          "created": true
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "ci-runner",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "l",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-10-29T00:00:00.000Z",
+          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "privateMode": true,
+          "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog==",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": false,
+      "privateMode": true,
+      "tier": "l"
+    }
+  }
+}

@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 from zipbox import Zipbox
 
 zb = Zipbox()
-box = zb.sandboxes.get_or_create("langchain-agent")
+box = zb.sandboxes.get_or_create("langchain-agent", tier="s")
 
 
 @tool

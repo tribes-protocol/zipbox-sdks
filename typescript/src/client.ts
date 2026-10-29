@@ -4,6 +4,7 @@ import {
   getDetail,
   lifecycle,
   setTier,
+  startBox,
   waitUntilReady
 } from './context.js'
 import { ZipboxError } from './errors.js'
@@ -58,6 +59,7 @@ export class Sandboxes {
     if (options.tier !== undefined) body.tier = options.tier
     if (options.sshPublicKey !== undefined) body.sshPublicKey = options.sshPublicKey
     if (options.mailbox !== undefined) body.mailbox = options.mailbox
+    if (options.private !== undefined) body.private = options.private
     const response = await this.ctx.api.request({
       method: 'POST',
       path: '/sandbox/identity/claim',
@@ -72,32 +74,52 @@ export class Sandboxes {
         isRecord(value) && typeof value.sandboxId === 'string',
       'POST /sandbox/identity/claim'
     )
-    const detail = await waitUntilReady(this.ctx, claimed.sandboxId, options.signal)
-    return new Sandbox(this.ctx, claimed.sandboxId, detail)
+    return this.waitReady(claimed.sandboxId, options)
   }
 
   /**
-   * The box with this name, started if it was stopped, or a new one. Use it to
-   * reuse an environment across runs.
+   * The box with this name, started if it was stopped, or a new one created with
+   * `options`. Use it to reuse an environment across runs.
+   *
+   * The options (tier, SSH key, mailbox, private) apply only when a box is
+   * created. A box that already has this name is returned as it is, even when it
+   * differs (another tier, not private): that is not an error and nothing is
+   * resized. Check `box.tier` and call `setTier` if it matters.
    */
   async getOrCreate(
     name: string,
     options: Omit<CreateSandboxOptions, 'name'> = {}
   ): Promise<Sandbox> {
     const existing = (await this.list(options)).find(
-      (row) => row.name === name && row.status !== 'destroyed' && row.status !== 'stopped'
+      (row) =>
+        row.name === name &&
+        row.status !== 'destroyed' &&
+        row.status !== 'stopped' &&
+        row.status !== 'deleting'
     )
     if (existing === undefined) return this.create({ ...options, name })
-    if (existing.status === 'archived' || existing.isArchived === true) {
-      await lifecycle(this.ctx, existing.id, 'restore', options.signal)
+    // `stopping`: a stop is still landing; startBox waits it out, then starts.
+    if (existing.status === 'archived' || existing.status === 'stopping') {
+      await startBox(this.ctx, existing.id, options.signal)
     }
-    const detail = await waitUntilReady(this.ctx, existing.id, options.signal)
-    return new Sandbox(this.ctx, existing.id, detail)
+    return this.waitReady(existing.id, options)
   }
 
-  /** Start a stopped box. Credit-gated: `insufficient_credits` when the balance is dry. */
+  /**
+   * Re-read a box with backoff until it is ready. No deadline; pass a signal to
+   * stop waiting. A private box that has not joined a tailnet yet is returned once
+   * it is running with its key, since it is not ready until it joins.
+   */
+  async waitReady(id: string, options: CallOptions = {}): Promise<Sandbox> {
+    return new Sandbox(this.ctx, id, await waitUntilReady(this.ctx, id, options.signal))
+  }
+
+  /**
+   * Start a stopped box. A box still `stopping` is started once its stop lands.
+   * Credit-gated: `insufficient_credits` when the balance is dry.
+   */
   start(id: string, options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, id, 'restore', options.signal)
+    return startBox(this.ctx, id, options.signal)
   }
 
   /** Stop a box. Its disk is archived and nothing is billed while it is stopped. */
@@ -161,7 +183,7 @@ export class Account {
  *
  * ```ts
  * const zb = new Zipbox() // reads ZIPBOX_API_KEY
- * const box = await zb.sandboxes.getOrCreate('demo')
+ * const box = await zb.sandboxes.getOrCreate('demo', { tier: 's' })
  * console.log((await box.exec('uname -a')).stdout)
  * ```
  */
@@ -189,13 +211,24 @@ export class Zipbox {
     const random = Math.random
     const maxRetries = options.maxRetries ?? 3
     const retryBaseDelayMs = options.retryBaseDelayMs ?? 500
-    const http = new HttpClient({ fetch: fetchImpl, maxRetries, retryBaseDelayMs, random })
+    const retryMaxDelayMs = options.retryMaxDelayMs ?? 30_000
+    const http = new HttpClient({
+      fetch: fetchImpl,
+      maxRetries,
+      retryBaseDelayMs,
+      retryMaxDelayMs,
+      random
+    })
     const api = new ControlPlane(http, baseUrl, apiKey)
     this.ctx = {
       api,
       boxes: new BoxTransport(api, http),
       retryBaseDelayMs,
+      retryMaxDelayMs,
       pollIntervalMs: options.pollIntervalMs ?? 1000,
+      pollMaxIntervalMs: options.pollMaxIntervalMs ?? 10_000,
+      ptyBaseDelayMs: options.ptyBaseDelayMs ?? 500,
+      ptyMaxDelayMs: options.ptyMaxDelayMs ?? 30_000,
       random,
       WebSocket: options.WebSocket
     }

@@ -1,0 +1,47 @@
+{
+  "name": "sandbox_set_private_not_connected",
+  "description": "Turning private on while the box is not connected to a tailnet is refused with tailnet_not_connected.",
+  "call": {
+    "op": "sandbox.setPrivate",
+    "args": {
+      "id": "sbx_1",
+      "enabled": true
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "PUT",
+        "path": "/sandbox/sbx_1/private",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "content-type": "application/json"
+        },
+        "body": {
+          "enabled": true
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "tailnet_not_connected",
+            "message": "Connect the box to your tailnet before making it private.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#tailnet_not_connected"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "tailnet_not_connected",
+      "status": 409,
+      "requestId": "req_test",
+      "docsUrl": "https://zipbox.ai/docs/errors#tailnet_not_connected"
+    }
+  }
+}

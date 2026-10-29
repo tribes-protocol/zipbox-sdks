@@ -15,6 +15,7 @@ from zipbox._async_client import (
     AsyncPtyApi,
     AsyncSandbox,
     AsyncSandboxes,
+    AsyncTailscale,
     AsyncZipbox,
 )
 from zipbox._client import (
@@ -26,6 +27,7 @@ from zipbox._client import (
     PtyApi,
     Sandbox,
     Sandboxes,
+    Tailscale,
     Zipbox,
 )
 from zipbox._core import DEFAULT_API_URL, VERSION, WORKSPACE
@@ -43,6 +45,8 @@ from zipbox._models import (
     SandboxInfo,
     Signal,
     SshInfo,
+    TailscalePeer,
+    TailscaleStatus,
     Tier,
 )
 from zipbox._pty import AsyncPty, Pty
@@ -62,6 +66,7 @@ __all__ = [
     "AsyncPtyApi",
     "AsyncSandbox",
     "AsyncSandboxes",
+    "AsyncTailscale",
     "AsyncZipbox",
     "Command",
     "CommandInfo",
@@ -84,6 +89,9 @@ __all__ = [
     "Sandboxes",
     "Signal",
     "SshInfo",
+    "Tailscale",
+    "TailscalePeer",
+    "TailscaleStatus",
     "Tier",
     "Zipbox",
     "ZipboxError",

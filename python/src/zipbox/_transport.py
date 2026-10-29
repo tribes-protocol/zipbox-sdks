@@ -22,6 +22,12 @@ def _network_error(error: Exception) -> ZipboxError:
     return ZipboxError("unavailable", f"network error: {error}", retryable=True, unsent=unsent)
 
 
+def _timeout(request: HttpRequest) -> dict[str, Any]:
+    if request.timeout_s is None:
+        return {}
+    return {"timeout": httpx.Timeout(request.timeout_s)}
+
+
 class _StreamState:
     def __init__(self, response: Any, chunks: Any) -> None:
         self.response = response
@@ -42,7 +48,11 @@ class HttpxSyncTransport:
         """Perform an ``HttpRequest`` effect."""
         try:
             built = self._client.build_request(
-                request.method, request.url, headers=request.headers, content=request.body
+                request.method,
+                request.url,
+                headers=request.headers,
+                content=request.body,
+                **_timeout(request),
             )
             response = self._client.send(built, stream=request.stream)
         except httpx.TransportError as error:
@@ -95,7 +105,11 @@ class HttpxAsyncTransport:
         """Perform an ``HttpRequest`` effect."""
         try:
             built = self._client.build_request(
-                request.method, request.url, headers=request.headers, content=request.body
+                request.method,
+                request.url,
+                headers=request.headers,
+                content=request.body,
+                **_timeout(request),
             )
             response = await self._client.send(built, stream=request.stream)
         except httpx.TransportError as error:

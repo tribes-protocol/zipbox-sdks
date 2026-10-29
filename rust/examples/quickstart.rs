@@ -6,7 +6,15 @@
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> zipbox::Result<()> {
     let zb = zipbox::Zipbox::from_env()?;
-    let sandbox = zb.sandboxes().get_or_create("quickstart").await?;
+    // The options apply only when the box is created; an existing box comes back as it is.
+    let options = zipbox::CreateOptions {
+        tier: Some("s".into()),
+        ..Default::default()
+    };
+    let sandbox = zb
+        .sandboxes()
+        .get_or_create_with("quickstart", options)
+        .await?;
 
     let out = sandbox.exec("echo hello from $(hostname)").await?;
     print!("{}", out.stdout);

@@ -1,0 +1,78 @@
+{
+  "name": "tailscale_connect_egress_lockdown",
+  "description": "A company egress-lockdown box refuses Tailscale with a typed, non-retried error.",
+  "call": {
+    "op": "tailscale.connect",
+    "args": {
+      "id": "7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+      "authKey": "tskey-auth-kConformance1CNTRL-ZipboxSdkVectorNotARealKey0123456789"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "privateMode": false,
+          "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog==",
+          "tailscale": null,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "PUT",
+        "path": "/sandbox/7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21/tailscale",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "content-type": "application/json"
+        },
+        "body": {
+          "envelope": "{{ANY}}",
+          "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog=="
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "tailscale_unavailable_egress_lockdown",
+            "message": "Tailscale is not available on boxes with company egress lockdown.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#tailscale_unavailable_egress_lockdown"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "tailscale_unavailable_egress_lockdown",
+      "status": 409,
+      "requestId": "req_test",
+      "docsUrl": "https://zipbox.ai/docs/errors#tailscale_unavailable_egress_lockdown"
+    }
+  }
+}

@@ -21,7 +21,8 @@ pub struct SandboxInfo {
     /// The box's public IPv6 address (SSH goes here directly).
     #[serde(default)]
     pub ipv6: Option<String>,
-    /// `provisioning`, `running`, `stopping`, `stopped`, `archived` or `destroyed`.
+    /// `provisioning`, `running`, `stopping`, `stopped`, `archived`, `deleting` (signing out
+    /// of its tailnet before it is destroyed) or `destroyed`.
     pub status: String,
     /// The machine tier (`xs` … `xxl`).
     #[serde(default)]
@@ -65,7 +66,87 @@ pub struct SandboxInfo {
     /// When the row last changed.
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// Private ("tailnet only"): the box answers only devices on the owner's tailnet.
+    #[serde(default)]
+    pub private_mode: bool,
+    /// The box's own P-256 public key (base64 SPKI DER) that box credentials are
+    /// sealed to. `None` until the box has started; a claim re-mints it.
+    #[serde(default)]
+    pub agent_public_key: Option<String>,
+    /// The box's tailnet. `None` when it never joined one and no key is pending.
+    #[serde(default)]
+    pub tailscale: Option<TailscaleStatus>,
+    /// `Some(false)` when the box's ZipOS predates Tailscale: connecting fails with
+    /// [`crate::ErrorCode::TailscaleRequiresUpdate`] until the ZipOS update is
+    /// accepted. `None` until the box has reported since it booted.
+    #[serde(default)]
+    pub tailscale_supported: Option<bool>,
     /// Undocumented fields of the row.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A box's tailnet: its live status merged with the last known identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleStatus {
+    /// `joining`, `connected`, `needsApproval`, `needsLogin`, `stopped` or `failed`;
+    /// `None` when only the identity is known (the box is stopped).
+    #[serde(default)]
+    pub state: Option<String>,
+    /// The tailnet's name, e.g. `example.com`.
+    #[serde(default)]
+    pub tailnet: Option<String>,
+    /// The box's tailnet IPv4 (`100.x`).
+    #[serde(default)]
+    pub ipv4: Option<String>,
+    /// The box's tailnet IPv6.
+    #[serde(default)]
+    pub ipv6: Option<String>,
+    /// The box's MagicDNS name.
+    #[serde(default)]
+    pub dns_name: Option<String>,
+    /// When the node key expires (ISO-8601); `None` when expiry is off, which is
+    /// the recommended setting.
+    #[serde(default)]
+    pub key_expiry: Option<String>,
+    /// True while an auth key is on its way to the box. Dropping without the state
+    /// advancing means the key never arrived: connect again with a new one.
+    #[serde(default)]
+    pub pending: bool,
+    /// Your other devices on the tailnet (online first, at most 50); `None` while
+    /// the box is not reporting.
+    #[serde(default)]
+    pub peers: Option<Vec<TailscalePeer>>,
+    /// Undocumented fields.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// One of your other devices on the tailnet, as the box sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscalePeer {
+    /// The device's own name, e.g. `lucys-macbook`.
+    #[serde(default)]
+    pub name: String,
+    /// Its MagicDNS name.
+    #[serde(default)]
+    pub dns_name: Option<String>,
+    /// `macOS`, `linux`, `iOS`, `windows`, `android`, …
+    #[serde(default)]
+    pub os: Option<String>,
+    /// Connected to Tailscale right now.
+    #[serde(default)]
+    pub online: bool,
+    /// Its tailnet IPv4 (`100.x`).
+    #[serde(default)]
+    pub ipv4: Option<String>,
+    /// `direct` (peer to peer), `relay` (through a Tailscale DERP relay), or `None`
+    /// (no recent traffic). A string, so a later value never breaks parsing.
+    #[serde(default)]
+    pub connection: Option<String>,
+    /// Undocumented fields.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -115,7 +196,8 @@ impl std::ops::Deref for SandboxDetail {
     }
 }
 
-/// Options for [`crate::Sandboxes::create`].
+/// Options for [`crate::Sandboxes::create`]. [`crate::Sandboxes::get_or_create_with`]
+/// takes the same options and applies them only when it creates the box.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOptions {
@@ -131,6 +213,29 @@ pub struct CreateOptions {
     /// Create the box's mailbox now. `None` = created the first time the box uses mail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox: Option<bool>,
+    /// Create the box private ("tailnet only"): it is never public. A private box
+    /// is not ready until it joins your tailnet, so `create` returns once it is
+    /// running with its key; call [`crate::Tailscale::connect`] next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+}
+
+/// Options for [`crate::Sandboxes::delete_with`].
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOptions {
+    /// Keep a recoverable copy for 30 days. `None` = the server default (`true`).
+    pub archive: Option<bool>,
+}
+
+/// Options for [`crate::PtyClient::create`] and [`crate::PtyClient::attach`].
+#[derive(Debug, Clone, Default)]
+pub struct PtyOptions {
+    /// Initial width. `None` (with `rows`) = the box's default size.
+    pub cols: Option<u16>,
+    /// Initial height.
+    pub rows: Option<u16>,
+    /// Names this client in the box's session list. `None` = `zipbox-sdk`.
+    pub client_label: Option<String>,
 }
 
 /// Options for a command beyond the command line itself.
@@ -403,6 +508,8 @@ pub struct LogOptions {
     pub since: Option<String>,
     /// At most this many lines.
     pub lines: Option<u32>,
+    /// Only this systemd unit (`journalctl -u`).
+    pub unit: Option<String>,
 }
 
 /// How to SSH into the box.

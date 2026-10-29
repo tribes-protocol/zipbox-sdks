@@ -2,7 +2,7 @@
 // files, open terminals and publish ports from code.
 //
 //	c := zipbox.New("") // reads ZIPBOX_API_KEY
-//	box, err := c.Sandboxes.GetOrCreate(ctx, "demo")
+//	box, err := c.Sandboxes.GetOrCreate(ctx, "demo", zipbox.CreateOptions{Tier: "s"})
 //	res, err := box.Exec(ctx, "echo hello")
 //	fmt.Print(res.Stdout)
 //
@@ -29,7 +29,7 @@ import (
 )
 
 // Version is the SDK version, sent in the User-Agent header.
-const Version = "0.1.4"
+const Version = "0.1.5"
 
 // DefaultBaseURL is the Zipbox control plane.
 const DefaultBaseURL = "https://api.tribes.xyz"
@@ -51,6 +51,10 @@ type Client struct {
 	backoffMax  time.Duration
 	pollMin     time.Duration
 	pollMax     time.Duration
+	ptyBase     time.Duration
+	ptyMax      time.Duration
+
+	privateProbeTimeout time.Duration
 
 	mu    sync.Mutex
 	creds map[string]*boxCreds
@@ -76,16 +80,22 @@ func WithMaxRetries(n int) Option {
 	return func(c *Client) { c.maxRetries = n }
 }
 
-// WithBackoff sets the exponential backoff used between retries and PTY
-// reconnects: the first delay and the cap. Default 500ms and 30s.
+// WithBackoff sets the exponential backoff used between retries and command
+// stream reconnects: the first delay and the cap. Default 500ms and 30s.
 func WithBackoff(base, max time.Duration) Option {
 	return func(c *Client) { c.backoffBase, c.backoffMax = base, max }
 }
 
 // WithPollInterval sets how often Create re-reads a box while it boots: the
-// first delay and the cap. Default 1s and 5s.
+// first delay and the cap. Default 1s and 10s.
 func WithPollInterval(min, max time.Duration) Option {
 	return func(c *Client) { c.pollMin, c.pollMax = min, max }
+}
+
+// WithPtyBackoff sets the backoff between PTY reconnects: the first delay and
+// the cap. Default 500ms and 30s. There is no attempt ceiling.
+func WithPtyBackoff(base, max time.Duration) Option {
+	return func(c *Client) { c.ptyBase, c.ptyMax = base, max }
 }
 
 // New returns a client. An empty apiKey reads ZIPBOX_API_KEY.
@@ -105,9 +115,13 @@ func New(apiKey string, opts ...Option) *Client {
 		backoffBase: 500 * time.Millisecond,
 		backoffMax:  30 * time.Second,
 		pollMin:     time.Second,
-		pollMax:     5 * time.Second,
+		pollMax:     10 * time.Second,
+		ptyBase:     500 * time.Millisecond,
+		ptyMax:      30 * time.Second,
 		creds:       map[string]*boxCreds{},
 		rnd:         rand.New(rand.NewSource(time.Now().UnixNano())),
+
+		privateProbeTimeout: defaultPrivateProbeTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)

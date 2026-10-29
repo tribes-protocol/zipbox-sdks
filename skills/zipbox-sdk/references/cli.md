@@ -38,16 +38,17 @@ zipbox login
 
 ## Boxes
 
-| Command                                                                                  | Does                                        |
-| ---------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]` | Create a box and wait until it is ready     |
-| `zipbox sandbox list`                                                                    | Your boxes                                  |
-| `zipbox sandbox get <box>`                                                               | One box                                     |
-| `zipbox sandbox start <box>`                                                             | Start a stopped box                         |
-| `zipbox sandbox stop <box>`                                                              | Stop (disk archived, nothing billed)        |
-| `zipbox sandbox restart <box>`                                                           | Hard restart; files survive                 |
-| `zipbox sandbox tier <box> <tier>`                                                       | Resize                                      |
-| `zipbox sandbox delete <box> [--yes]`                                                    | Delete (30-day recoverable copy by default) |
+| Command                                                                                  | Does                                                            |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]` | Create a box and wait until it is ready                         |
+| `zipbox sandbox create --private [--tailscale-auth-key-file <file>]`                     | Create a box that is never public, then join it to your tailnet |
+| `zipbox sandbox list`                                                                    | Your boxes                                                      |
+| `zipbox sandbox get <box>`                                                               | One box                                                         |
+| `zipbox sandbox start <box>`                                                             | Start a stopped box; one still stopping, once its stop lands    |
+| `zipbox sandbox stop <box>`                                                              | Stop (disk archived, nothing billed)                            |
+| `zipbox sandbox restart <box>`                                                           | Hard restart; files survive                                     |
+| `zipbox sandbox tier <box> <tier>`                                                       | Resize                                                          |
+| `zipbox sandbox delete <box> [--yes]`                                                    | Delete (30-day recoverable copy by default)                     |
 
 `<box>` is a box id or its name. `sandbox` also answers to `box`; `sandbox list` to `sandbox ls`. `delete` asks for confirmation unless you pass `--yes` (`-y`).
 
@@ -97,9 +98,27 @@ Relative remote paths are under `/root/workspace`. `put` reads stdin when `<loca
 | `zipbox preview rm <box> <label>`                  | Remove a preview                                                                               |
 | `zipbox logs <box> [--since …] [-n N] [-u <unit>]` | The system journal ([Logs](https://zipbox.ai/docs/logs.md))                                                        |
 
-**SSH** goes directly to the box over IPv6 with the keys you added in **Settings → SSH keys** (or `--ssh-public-key` at create). Your network needs IPv6; if it has none, use `zipbox shell`, which runs over HTTPS.
+**SSH** goes directly to the box over IPv6 with the keys you added in **Settings → SSH keys** (or `--ssh-public-key` at create). Your network needs IPv6; if it has none, use `zipbox shell`, which runs over HTTPS. A private box takes SSH only from your tailnet: `ssh root@<name>.zbox.sh` from a tailnet device.
 
 **The desktop.** Every box has a full desktop with a browser, at zipbox.ai in the box's window. From code, the SDKs' `screenshot()` and `desktop_screenshot` on the [MCP server](https://zipbox.ai/docs/mcp.md) capture it ([Desktop](https://zipbox.ai/docs/desktop.md)).
+
+## Tailscale and private boxes
+
+| Command                                                   | Does                                                                 |
+| --------------------------------------------------------- | -------------------------------------------------------------------- |
+| `zipbox tailscale connect <box> [--auth-key-file <file>]` | Join the box to your tailnet; the key is read from the file or stdin |
+| `zipbox tailscale status <box>`                           | The box's tailnet state, addresses, MagicDNS name and key expiry     |
+| `zipbox tailscale disconnect <box>`                       | Log the box out of your tailnet                                      |
+| `zipbox private on <box>`                                 | Only devices on your tailnet can reach the box                       |
+| `zipbox private off <box>`                                | Make it public again                                                 |
+
+```sh
+zipbox tailscale connect demo --auth-key-file ./ts.key
+pbpaste | zipbox tailscale connect demo
+zipbox private on demo
+```
+
+**The auth key never goes on the command line**, where shell history, `ps` and CI logs would keep it. `connect` reads it from `--auth-key-file`, or from stdin when no file is given, and seals it on your machine to the box's own key before anything is sent. There is no `--auth-key` flag. With `--private`, `sandbox create` returns once the box is running (a private box is not reachable until it joins), then sends the key from `--tailscale-auth-key-file` if you gave one. Off your tailnet, box commands on a private box (`exec`, `files`, `shell`, `preview`, `logs`) fail fast with `box_private_unreachable`; lifecycle and `tailscale` commands work from anywhere. See [Tailscale and private boxes](https://zipbox.ai/docs/tailscale.md).
 
 ## MCP
 

@@ -5,7 +5,10 @@ import {
   getDetail,
   lifecycle,
   retryDelay,
-  setTier
+  setPrivate,
+  setTier,
+  startBox,
+  waitUntilReady
 } from './context.js'
 import { ZipboxError } from './errors.js'
 import { type Cmd, execBody, toExecEvent } from './exec.js'
@@ -13,6 +16,7 @@ import { isCommandRecord, isFileListing, isRecord, readJson } from './guards.js'
 import { resolveBoxPath, shellQuote, splitBoxPath } from './paths.js'
 import { PtyApi } from './pty.js'
 import { parseSse } from './sse.js'
+import { Tailscale } from './tailscale.js'
 import type {
   CallOptions,
   CommandEventsOptions,
@@ -121,11 +125,16 @@ export class Commands {
     return readJson(response, isCommandRecord, 'GET /exec/:id')
   }
 
-  /**
-   * Replay a command's output from a cursor and follow it until it exits. The
-   * stream ends after the `exit` event.
-   */
-  async *events(commandId: string, options: CommandEventsOptions = {}): AsyncGenerator<ExecEvent> {
+  /** A handle on a command by id, without a network call. */
+  handle(commandId: string): Command {
+    return new Command(this, commandId, null)
+  }
+
+  /** One SSE connection to a command's output: replays from a cursor, ends on exit or a drop. */
+  private async *stream(
+    commandId: string,
+    options: CommandEventsOptions
+  ): AsyncGenerator<ExecEvent> {
     const response = await this.ctx.boxes.request(this.sandboxId, {
       method: 'GET',
       path: `/exec/${encodeURIComponent(commandId)}/events${eventsQuery(options.since)}`,
@@ -136,18 +145,19 @@ export class Commands {
   }
 
   /**
-   * Follow a command to its exit, re-attaching from the last cursor whenever the
-   * stream drops. A followed command is a live surface: there is no attempt
-   * ceiling and no idle timeout. Reconnects back off exponentially (capped, with
-   * jitter) and the ladder resets only when an event arrives. It ends on `exit`,
-   * on a non-retryable error (e.g. `not_found`), or when the signal aborts.
+   * Replay a command's output from a cursor (default: the start) and follow it to
+   * its exit, re-attaching from the last cursor whenever the stream drops. A
+   * followed command is a live surface: there is no attempt ceiling and no idle
+   * timeout. Reconnects back off exponentially (capped, with jitter) and the
+   * ladder resets only when an event arrives. It ends after `exit`, on a
+   * non-retryable error (e.g. `not_found`), or when the signal aborts.
    */
-  async *follow(commandId: string, options: CommandEventsOptions = {}): AsyncGenerator<ExecEvent> {
+  async *events(commandId: string, options: CommandEventsOptions = {}): AsyncGenerator<ExecEvent> {
     let cursor = options.since
     let failures = 0
     for (;;) {
       try {
-        for await (const event of this.events(commandId, {
+        for await (const event of this.stream(commandId, {
           ...(cursor === undefined ? {} : { since: cursor }),
           ...(options.signal === undefined ? {} : { signal: options.signal })
         })) {
@@ -199,17 +209,15 @@ export class Commands {
   }
 }
 
-/** A command started with {@link Sandbox.execBackground}. */
+/** A command started with {@link Sandbox.execBackground}, or a handle from {@link Commands.handle}. */
 export class Command {
   constructor(
     private readonly commands: Commands,
-    /** The record as of the last read. */
-    public record: CommandRecord
+    /** The command id. */
+    readonly id: string,
+    /** The record as of the last read; null for a handle that has not read it. */
+    public record: CommandRecord | null
   ) {}
-
-  get id(): string {
-    return this.record.id
-  }
 
   /** Re-read the record. */
   async get(options: CallOptions = {}): Promise<CommandRecord> {
@@ -219,12 +227,12 @@ export class Command {
 
   /** Output from a cursor (default: the start), following until exit. */
   events(options: CommandEventsOptions = {}): AsyncGenerator<ExecEvent> {
-    return this.commands.follow(this.id, options)
+    return this.commands.events(this.id, options)
   }
 
   /** Wait for the command to exit and collect its whole output. */
   wait(options: CallOptions = {}): Promise<ExecResult> {
-    return collect(this.commands.follow(this.id, options))
+    return collect(this.commands.events(this.id, options))
   }
 
   /** Append bytes to stdin. */
@@ -242,8 +250,8 @@ export class Command {
     return this.commands.signal(this.id, signal, options)
   }
 
-  toJSON(): CommandRecord {
-    return this.record
+  toJSON(): CommandRecord | { id: string } {
+    return this.record ?? { id: this.id }
   }
 }
 
@@ -318,6 +326,14 @@ export class Files {
     )
   }
 
+  /** Copy a file or directory. */
+  copy(from: string, to: string, options: CallOptions = {}): Promise<void> {
+    return this.mutate(
+      { action: 'copy', path: resolveBoxPath(from), destination: resolveBoxPath(to) },
+      options
+    )
+  }
+
   /** Delete a file or directory. */
   delete(path: string, options: CallOptions = {}): Promise<void> {
     return this.mutate({ action: 'delete', path: resolveBoxPath(path) }, options)
@@ -336,7 +352,7 @@ export class Files {
   }
 
   private async mutate(
-    body: { action: 'mkdir' | 'move' | 'delete'; path: string; destination?: string },
+    body: { action: 'mkdir' | 'move' | 'copy' | 'delete'; path: string; destination?: string },
     options: CallOptions
   ): Promise<void> {
     await this.ctx.boxes.request(this.sandboxId, {
@@ -444,6 +460,8 @@ export class Sandbox {
   readonly pty: PtyApi
   /** Published ports on this box. */
   readonly preview: Preview
+  /** The box on your tailnet. */
+  readonly tailscale: Tailscale
   private detail: SandboxDetail | null
 
   constructor(
@@ -457,6 +475,7 @@ export class Sandbox {
     this.files = new Files(ctx, id)
     this.pty = new PtyApi(ctx, id)
     this.preview = new Preview(this, this.ctx)
+    this.tailscale = new Tailscale(ctx, id)
   }
 
   /** The row as last read, or null for a handle made by `zb.sandbox(id)`. */
@@ -488,9 +507,24 @@ export class Sandbox {
     return this.detail?.ipv6 ?? null
   }
 
+  /** Private mode, as of the last read. */
+  get privateMode(): boolean {
+    return this.detail?.privateMode === true
+  }
+
   /** Re-read the row. */
   async refresh(options: CallOptions = {}): Promise<SandboxDetail> {
     this.detail = await getDetail(this.ctx, this.id, options.signal)
+    return this.detail
+  }
+
+  /**
+   * Re-read the box with backoff until it is ready (no deadline; abort with the
+   * signal). A private box that has not joined a tailnet yet: until it is running
+   * with its key.
+   */
+  async waitReady(options: CallOptions = {}): Promise<SandboxDetail> {
+    this.detail = await waitUntilReady(this.ctx, this.id, options.signal)
     return this.detail
   }
 
@@ -528,7 +562,7 @@ export class Sandbox {
     if (commandId === null) {
       throw new ZipboxError({ code: 'unavailable', message: 'exec stream ended before start' })
     }
-    yield* this.commands.follow(commandId, {
+    yield* this.commands.events(commandId, {
       since: cursor,
       ...(options.signal === undefined ? {} : { signal: options.signal })
     })
@@ -542,10 +576,14 @@ export class Sandbox {
       body: { json: execBody(cmd, options, true) },
       signal: options.signal
     })
-    return new Command(this.commands, await readJson(response, isCommandRecord, 'POST /exec'))
+    const record = await readJson(response, isCommandRecord, 'POST /exec')
+    return new Command(this.commands, record.id, record)
   }
 
-  /** Run a snippet with python3, node or bash. */
+  /**
+   * Run a snippet with python3, node (as an ES module) or bash: written to a temp
+   * file, run through the login shell with `options`, then removed.
+   */
   async runCode(
     language: RunCodeLanguage,
     code: string,
@@ -558,11 +596,12 @@ export class Sandbox {
     return this.exec(`${bin} ${quoted}; status=$?; rm -f ${quoted}; exit $status`, options)
   }
 
-  /** Recent system log lines (journalctl). */
+  /** The box's system journal (journalctl). A failed journalctl is an error. */
   async logs(options: LogsOptions = {}): Promise<string> {
     const argv = ['journalctl', '-o', 'short-iso', '--no-pager']
-    if (options.lines !== undefined) argv.push('-n', String(options.lines))
     if (options.since !== undefined) argv.push('--since', options.since)
+    if (options.lines !== undefined) argv.push('-n', String(options.lines))
+    if (options.unit !== undefined) argv.push('-u', options.unit)
     return (await this.run(argv, 'logs', options)).stdout
   }
 
@@ -582,9 +621,9 @@ export class Sandbox {
     return Uint8Array.from(binary, (char) => char.charCodeAt(0))
   }
 
-  /** Start a stopped box. */
+  /** Start a stopped box. A box still `stopping` is started once its stop lands. */
   start(options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, this.id, 'restore', options.signal)
+    return startBox(this.ctx, this.id, options.signal)
   }
 
   /** Stop the box (disk archived; nothing billed while stopped). */
@@ -600,6 +639,17 @@ export class Sandbox {
   /** Move the box to another tier. */
   setTier(tier: SandboxTier, options: CallOptions = {}): Promise<void> {
     return setTier(this.ctx, this.id, tier, options.signal)
+  }
+
+  /**
+   * Make the box private (reachable only from devices on your tailnet) or public
+   * again. Turning it on needs the box connected to a tailnet
+   * (`tailnet_not_connected` otherwise). Every public way in closes: previews,
+   * custom names, terminal, IDE, desktop and SSH. Box calls from this SDK then work
+   * only from a device on that tailnet.
+   */
+  setPrivate(enabled: boolean, options: CallOptions = {}): Promise<void> {
+    return setPrivate(this.ctx, this.id, enabled, options.signal)
   }
 
   /** Delete the box. */

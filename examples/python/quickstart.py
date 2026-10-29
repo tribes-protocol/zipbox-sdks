@@ -3,7 +3,7 @@
 from zipbox import Zipbox
 
 zb = Zipbox()  # ZIPBOX_API_KEY
-box = zb.sandboxes.get_or_create("quickstart")
+box = zb.sandboxes.get_or_create("quickstart", tier="s")
 print(box.exec("echo hello from $(hostname)").stdout, end="")
 box.files.write("hello.txt", "hi from the SDK\n")
 print(box.files.read_text("hello.txt"), end="")

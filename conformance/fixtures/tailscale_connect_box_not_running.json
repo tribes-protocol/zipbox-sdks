@@ -1,0 +1,48 @@
+{
+  "name": "tailscale_connect_box_not_running",
+  "description": "A box with no agentPublicKey (not started) raises box_not_running without sending anything.",
+  "call": {
+    "op": "tailscale.connect",
+    "args": {
+      "id": "7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+      "authKey": "tskey-auth-kConformance1CNTRL-ZipboxSdkVectorNotARealKey0123456789"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopped",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "privateMode": false,
+          "agentPublicKey": null,
+          "tailscale": null,
+          "createdAt": "2026-10-19T00:00:00.000Z",
+          "updatedAt": "2026-10-19T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running"
+    }
+  }
+}

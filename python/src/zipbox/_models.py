@@ -26,6 +26,89 @@ def _opt_int(value: Any) -> int | None:
 
 
 @dataclass(frozen=True)
+class TailscalePeer:
+    """One of the owner's other devices on the tailnet, as the box sees it.
+
+    ``connection`` is ``direct`` (peer to peer), ``relay`` (through a Tailscale
+    DERP relay) or None (no recent traffic). Values this SDK does not know are kept
+    as given.
+    """
+
+    name: str
+    dns_name: str | None
+    os: str | None
+    online: bool
+    ipv4: str | None
+    connection: str | None
+    raw: dict[str, Any] = field(repr=False, compare=False)
+
+    @classmethod
+    def parse(cls, value: Any) -> TailscalePeer | None:
+        """Parse one peer; None for an entry without a name."""
+        if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+            return None
+        return cls(
+            name=value["name"],
+            dns_name=_opt_str(value.get("dnsName")),
+            os=_opt_str(value.get("os")),
+            online=value.get("online") is True,
+            ipv4=_opt_str(value.get("ipv4")),
+            connection=_opt_str(value.get("connection")),
+            raw=value,
+        )
+
+
+def _peers(value: Any) -> tuple[TailscalePeer, ...] | None:
+    if not isinstance(value, list):
+        return None
+    return tuple(peer for peer in (TailscalePeer.parse(item) for item in value) if peer is not None)
+
+
+@dataclass(frozen=True)
+class TailscaleStatus:
+    """A box's tailnet: its live status merged with the last known identity.
+
+    ``state`` is ``joining``, ``connected``, ``needsApproval``, ``needsLogin``,
+    ``stopped`` or ``failed``, or None when only the identity is known (the box is
+    stopped). ``pending`` is True while an auth key is on its way to the box; it
+    dropping without the state advancing means the key never arrived.
+    ``key_expiry`` is None when key expiry is off, which is the recommended setting.
+    ``peers`` is the owner's other devices (online first, at most 50), or None while
+    the box is not reporting.
+    """
+
+    state: str | None
+    tailnet: str | None
+    ipv4: str | None
+    ipv6: str | None
+    dns_name: str | None
+    key_expiry: str | None
+    pending: bool
+    raw: dict[str, Any] = field(repr=False, compare=False)
+    peers: tuple[TailscalePeer, ...] | None = None
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> TailscaleStatus:
+        """Parse a box's ``tailscale`` field."""
+        return cls(
+            state=_opt_str(data.get("state")),
+            tailnet=_opt_str(data.get("tailnet")),
+            ipv4=_opt_str(data.get("ipv4")),
+            ipv6=_opt_str(data.get("ipv6")),
+            dns_name=_opt_str(data.get("dnsName")),
+            key_expiry=_opt_str(data.get("keyExpiry")),
+            pending=data.get("pending") is True,
+            raw=data,
+            peers=_peers(data.get("peers")),
+        )
+
+    @classmethod
+    def parse(cls, value: Any) -> TailscaleStatus | None:
+        """Parse a nullable ``tailscale`` field."""
+        return cls.from_json(value) if isinstance(value, dict) else None
+
+
+@dataclass(frozen=True)
 class SandboxInfo:
     """One box, as ``GET /sandbox`` lists it."""
 
@@ -42,6 +125,16 @@ class SandboxInfo:
     disk_pct: float | None
     created_at: str | None
     updated_at: str | None
+    # Private ("tailnet only"): reachable only from devices on the owner's tailnet.
+    private_mode: bool
+    # The box's own P-256 public key (base64 SPKI DER) that box credentials are sealed
+    # to. None until the box has started; a claim re-mints it.
+    agent_public_key: str | None
+    tailscale: TailscaleStatus | None
+    # False when the box's ZipOS predates Tailscale (connecting raises
+    # ``tailscale_requires_update`` until the ZipOS update is accepted); None until
+    # the box has reported since it booted.
+    tailscale_supported: bool | None
     raw: dict[str, Any] = field(repr=False, compare=False)
 
     @classmethod
@@ -63,6 +156,12 @@ class SandboxInfo:
             disk_pct=_opt_num(data.get("diskPct")),
             created_at=_opt_str(data.get("createdAt")),
             updated_at=_opt_str(data.get("updatedAt")),
+            private_mode=data.get("privateMode") is True,
+            agent_public_key=_opt_str(data.get("agentPublicKey")),
+            tailscale=TailscaleStatus.parse(data.get("tailscale")),
+            tailscale_supported=data.get("tailscaleSupported")
+            if isinstance(data.get("tailscaleSupported"), bool)
+            else None,
             raw=data,
         )
 

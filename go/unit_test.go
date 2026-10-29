@@ -42,15 +42,42 @@ func TestSSEReader(t *testing.T) {
 	}
 }
 
-func TestExecStreamEndsBeforeExitIsUnavailable(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("id: 0-0\nevent: start\ndata: {\"id\":\"c\"}\n\nid: 2-0\nevent: stdout\ndata: {\"data\":\"hi\"}\n\n"))
-	s := newExecStream(body, "0-0")
-	var types []ExecEventType
-	for s.Next() {
-		types = append(types, s.Event().Type)
+// A stream that ends before its command started has nothing to re-attach to.
+func TestExecStreamEndsBeforeStartIsUnavailable(t *testing.T) {
+	s := newExecStream(context.Background(), nil, io.NopCloser(strings.NewReader("")), "0-0", "")
+	if s.Next() || !IsCode(s.Err(), CodeUnavailable) {
+		t.Fatalf("err %v", s.Err())
 	}
-	if len(types) != 2 || s.Cursor() != "2-0" || !IsCode(s.Err(), CodeUnavailable) {
-		t.Fatalf("types %v cursor %s err %v", types, s.Cursor(), s.Err())
+}
+
+// A foreground command whose stream drops after start is followed from its cursor.
+func TestExecResumesAfterADrop(t *testing.T) {
+	var base string
+	var resumed []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_1\"}\n\nid: 3-0\nevent: stdout\ndata: {\"data\":\"one\"}\n\n")
+	})
+	mux.HandleFunc("/exec/cmd_1/events", func(w http.ResponseWriter, r *http.Request) {
+		resumed = append(resumed, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "id: 6-0\nevent: stdout\ndata: {\"data\":\"two\"}\n\nid: 6-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0,\"timedOut\":false}\n\n")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	res, err := c.Sandbox("sbx_1").Exec(context.Background(), "echo one; echo two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ID != "cmd_1" || res.Stdout != "onetwo" || res.ExitCode != 0 {
+		t.Fatalf("%+v", res)
+	}
+	if len(resumed) != 1 || resumed[0] != "since=3-0" {
+		t.Fatalf("resume queries %v", resumed)
 	}
 }
 
@@ -198,7 +225,7 @@ func TestPtyReconnects(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	base = server.URL
-	c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	c := New("zb_x", WithBaseURL(server.URL), WithPtyBackoff(time.Millisecond, 2*time.Millisecond))
 	ctx := context.Background()
 	pty, err := c.Sandbox("sbx_1").Pty.Create(ctx, PtyOptions{Cols: 80, Rows: 24})
 	if err != nil {
@@ -285,12 +312,111 @@ func TestGetOrCreateStartsAnArchivingBox(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	base = server.URL
-	box, err := New("zb_x", WithBaseURL(server.URL)).Sandboxes.GetOrCreate(context.Background(), "demo")
+	box, err := New("zb_x", WithBaseURL(server.URL)).Sandboxes.GetOrCreate(context.Background(), "demo", CreateOptions{})
 	if err != nil || box.ID != "sbx_1" {
 		t.Fatalf("%v %v", box, err)
 	}
 	if len(calls) != 1 || calls[0] != "POST /sandbox/sbx_1/restore" {
 		t.Fatalf("calls %v", calls)
+	}
+}
+
+// GetOrCreate creates a missing box with every create option on the claim.
+func TestGetOrCreateSendsEveryCreateOptionOnTheClaim(t *testing.T) {
+	var base string
+	var claim map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sandbox", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `[]`)
+	})
+	mux.HandleFunc("/sandbox/identity/claim", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&claim); err != nil {
+			t.Error(err)
+		}
+		io.WriteString(w, `{"sandboxId":"sbx_1","created":true}`)
+	})
+	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	opts := CreateOptions{Tier: "l", SSHPublicKey: "ssh-ed25519 AAAAtest", Mailbox: true, Private: true}
+	box, err := New("zb_x", WithBaseURL(server.URL)).Sandboxes.GetOrCreate(context.Background(), "ci-runner", opts)
+	if err != nil || box.ID != "sbx_1" {
+		t.Fatalf("%v %v", box, err)
+	}
+	want := map[string]any{"name": "ci-runner", "tier": "l", "sshPublicKey": "ssh-ed25519 AAAAtest", "mailbox": true, "private": true}
+	if fmt.Sprint(claim) != fmt.Sprint(want) {
+		t.Fatalf("claim body %v, want %v", claim, want)
+	}
+}
+
+// The options apply only on create: a box that already has the name is returned
+// as it is, with no claim and no tier change.
+func TestGetOrCreateReturnsAnExistingBoxAsItIs(t *testing.T) {
+	var base string
+	var unexpected []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		unexpected = append(unexpected, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/sandbox", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `[{"id":"sbx_1","name":"ci-runner","status":"running","tier":"s","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}]`)
+	})
+	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	box, err := New("zb_x", WithBaseURL(server.URL)).Sandboxes.GetOrCreate(context.Background(), "ci-runner", CreateOptions{Tier: "l"})
+	if err != nil || box.ID != "sbx_1" {
+		t.Fatalf("%v %v", box, err)
+	}
+	if len(unexpected) != 0 {
+		t.Fatalf("unexpected calls %v", unexpected)
+	}
+}
+
+func TestGetOrCreateRejectsADifferentOptionsName(t *testing.T) {
+	_, err := New("zb_x", WithBaseURL("http://127.0.0.1:1")).Sandboxes.GetOrCreate(context.Background(), "ci-runner", CreateOptions{Name: "other"})
+	if !IsCode(err, CodeInvalidRequest) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+// A closed stream stays closed: a drop after Close is not re-attached.
+func TestExecStreamCloseStopsTheResume(t *testing.T) {
+	var base string
+	var resumed int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_1\"}\n\nid: 3-0\nevent: stdout\ndata: {\"data\":\"one\"}\n\n")
+	})
+	mux.HandleFunc("/exec/cmd_1/events", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&resumed, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "id: 6-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0,\"timedOut\":false}\n\n")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	stream, err := c.Sandbox("sbx_1").ExecStream(context.Background(), "echo one; sleep 60")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Next() || stream.Event().Type != EventStart || !stream.Next() || stream.Event().Type != EventStdout {
+		t.Fatalf("expected start and stdout, got %+v err %v", stream.Event(), stream.Err())
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stream.Next() || !IsCode(stream.Err(), CodeUnavailable) {
+		t.Fatalf("Next after Close: %+v err %v", stream.Event(), stream.Err())
+	}
+	if n := atomic.LoadInt32(&resumed); n != 0 {
+		t.Fatalf("re-attached %d times after Close", n)
 	}
 }
 

@@ -28,6 +28,9 @@ class HttpRequest:
     headers: dict[str, str] = field(repr=False)  # carries the API key or box token
     body: bytes | None = None
     stream: bool = False
+    # A whole-request deadline. Only the private-box reachability probe sets one;
+    # every other request runs with no deadline.
+    timeout_s: float | None = None
 
 
 @dataclass

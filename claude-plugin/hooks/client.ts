@@ -91,6 +91,7 @@ export function signedIn(): Account | null {
 export function forget() {
   account = null
   boxes.clear()
+  reached.clear()
 }
 
 /** The message a refusal carries, in the control plane's envelope or a box's. */
@@ -132,7 +133,39 @@ export async function api<T>(
 }
 
 export type BoxInfo = { id: string; name?: string | null; status: string; tier?: string | null }
-type BoxDetail = BoxInfo & { ready: boolean; baseUrl?: string | null; boxToken?: string | null }
+type BoxDetail = BoxInfo & {
+  ready: boolean
+  baseUrl?: string | null
+  boxToken?: string | null
+  privateMode?: boolean | null
+}
+
+/** How long a private box gets to answer before this computer counts as off its tailnet. */
+const PRIVATE_PROBE_MS = 5_000
+/** Private boxes this window has reached once; nothing is re-probed after that. */
+const reached = new Set<string>()
+
+/**
+ * Whether anything answers at `url` within the probe deadline. Any HTTP answer
+ * counts. A private box's name points at its tailnet address, which off the
+ * tailnet is not routed, so without the deadline a call would hang instead of
+ * failing.
+ */
+function answers($: EngineInterface, url: string): Promise<boolean> {
+  return new Promise((done) => {
+    const timer = $.clock.after(PRIVATE_PROBE_MS, () => done(false))
+    void $.http.fetch(url).then(
+      () => {
+        timer.cancel()
+        done(true)
+      },
+      () => {
+        timer.cancel()
+        done(false)
+      }
+    )
+  })
+}
 
 /** The account's boxes. */
 export function listBoxes($: EngineInterface): Promise<BoxInfo[]> {
@@ -144,6 +177,14 @@ async function resolve($: EngineInterface, id: string): Promise<Box> {
   if (!detail.ready || !detail.baseUrl || !detail.boxToken)
     throw new ZipboxError(`${detail.name ?? id} is not running. Start it at ${WEB_URL}.`)
   const box = { baseUrl: detail.baseUrl.replace(/\/+$/, ''), token: detail.boxToken }
+  if (detail.privateMode === true && !reached.has(id)) {
+    if (!(await answers($, `${box.baseUrl}/challenge`)))
+      throw new ZipboxError(
+        `${detail.name ?? id} is private: it can only be reached from devices on your tailnet. ` +
+          'Turn on Tailscale on this computer (https://tailscale.com/download).'
+      )
+    reached.add(id)
+  }
   boxes.set(id, box)
   return box
 }

@@ -50,16 +50,92 @@ pub(crate) struct Inner {
     pub api_key: String,
     pub max_retries: u32,
     pub retry_base_delay: Duration,
+    pub retry_max_delay: Duration,
     pub poll_interval: Duration,
-    pub reconnect_base_delay: Duration,
+    pub poll_max_interval: Duration,
+    pub pty_base_delay: Duration,
+    pub pty_max_delay: Duration,
     pub boxes: Mutex<HashMap<String, BoxAccess>>,
 }
 
+/// How long a private box's reachability probe may take before the box counts as
+/// off this device's tailnet. A probe is a one-off check, not a live surface.
+pub(crate) const PRIVATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What a box needs: its origin and the token it accepts.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct BoxAccess {
     pub base_url: String,
     pub token: String,
+    /// The box's name, for messages.
+    pub name: String,
+    /// Private ("tailnet only"): probed before the first call from this client.
+    pub private: bool,
+    /// A private box this client has reached at least once.
+    pub reachable: bool,
+}
+
+impl std::fmt::Debug for BoxAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxAccess")
+            .field("base_url", &self.base_url)
+            .field("name", &self.name)
+            .field("private", &self.private)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoxAccess {
+    fn from_detail(detail: &SandboxDetail) -> Option<BoxAccess> {
+        match (detail.ready, &detail.base_url, &detail.box_token) {
+            (true, Some(base), Some(token)) => Some(BoxAccess {
+                base_url: base.trim_end_matches('/').to_string(),
+                token: token.clone(),
+                name: detail
+                    .info
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| detail.info.id.clone()),
+                private: detail.info.private_mode,
+                reachable: false,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a failed probe still shows the box answered. A TLS handshake that failed
+/// is an answer: the box is reachable and only lacks its certificate yet, which the
+/// box call itself waits out. Off the tailnet nothing answers: the connect times
+/// out, or the OS refuses to route or connect it.
+fn answered(err: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    if err.is_timeout() {
+        return false;
+    }
+    let mut source = std::error::Error::source(err);
+    while let Some(inner) = source {
+        if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+            return !matches!(
+                io.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::HostUnreachable
+                    | ErrorKind::TimedOut
+                    | ErrorKind::AddrNotAvailable
+            );
+        }
+        source = inner.source();
+    }
+    false
+}
+
+/// What a box-direct call on a private box says when this device is off its tailnet.
+pub(crate) fn private_unreachable_message(name: &str) -> String {
+    format!(
+        "{name} is private: it can only be reached from devices on your tailnet. \
+         Turn on Tailscale on this device (https://tailscale.com/download)."
+    )
 }
 
 /// A request body.
@@ -76,8 +152,11 @@ pub struct ZipboxBuilder {
     base_url: Option<String>,
     max_retries: u32,
     retry_base_delay: Duration,
+    retry_max_delay: Duration,
     poll_interval: Duration,
-    reconnect_base_delay: Duration,
+    poll_max_interval: Duration,
+    pty_base_delay: Duration,
+    pty_max_delay: Duration,
     http: Option<reqwest::Client>,
 }
 
@@ -88,8 +167,11 @@ impl Default for ZipboxBuilder {
             base_url: None,
             max_retries: 3,
             retry_base_delay: Duration::from_millis(500),
+            retry_max_delay: Duration::from_secs(30),
             poll_interval: Duration::from_secs(1),
-            reconnect_base_delay: Duration::from_millis(500),
+            poll_max_interval: Duration::from_secs(10),
+            pty_base_delay: Duration::from_millis(500),
+            pty_max_delay: Duration::from_secs(30),
             http: None,
         }
     }
@@ -120,15 +202,33 @@ impl ZipboxBuilder {
         self
     }
 
+    /// The cap of the retry backoff. Default 30 s.
+    pub fn retry_max_delay(mut self, d: Duration) -> Self {
+        self.retry_max_delay = d;
+        self
+    }
+
     /// The first rung of the poll that waits for a new box to be ready. Default 1 s.
     pub fn poll_interval(mut self, d: Duration) -> Self {
         self.poll_interval = d;
         self
     }
 
-    /// The first rung of the PTY reconnect ladder. Default 500 ms (cap 30 s).
-    pub fn reconnect_base_delay(mut self, d: Duration) -> Self {
-        self.reconnect_base_delay = d;
+    /// The cap of that poll. Default 10 s.
+    pub fn poll_max_interval(mut self, d: Duration) -> Self {
+        self.poll_max_interval = d;
+        self
+    }
+
+    /// The first rung of the PTY reconnect ladder. Default 500 ms.
+    pub fn pty_base_delay(mut self, d: Duration) -> Self {
+        self.pty_base_delay = d;
+        self
+    }
+
+    /// The cap of the PTY reconnect ladder. Default 30 s; there is no attempt limit.
+    pub fn pty_max_delay(mut self, d: Duration) -> Self {
+        self.pty_max_delay = d;
         self
     }
 
@@ -170,8 +270,11 @@ impl ZipboxBuilder {
                 api_key,
                 max_retries: self.max_retries,
                 retry_base_delay: self.retry_base_delay,
+                retry_max_delay: self.retry_max_delay,
                 poll_interval: self.poll_interval,
-                reconnect_base_delay: self.reconnect_base_delay,
+                poll_max_interval: self.poll_max_interval,
+                pty_base_delay: self.pty_base_delay,
+                pty_max_delay: self.pty_max_delay,
                 boxes: Mutex::new(HashMap::new()),
             }),
         })
@@ -257,40 +360,87 @@ impl Zipbox {
     }
 
     pub(crate) fn remember(&self, detail: &SandboxDetail) {
-        if let (true, Some(base), Some(token)) = (detail.ready, &detail.base_url, &detail.box_token)
-        {
-            self.inner.boxes.lock().expect("box cache").insert(
-                detail.info.id.clone(),
-                BoxAccess {
-                    base_url: base.trim_end_matches('/').to_string(),
-                    token: token.clone(),
-                },
-            );
+        if let Some(mut access) = BoxAccess::from_detail(detail) {
+            let mut boxes = self.inner.boxes.lock().expect("box cache");
+            // Reachability survives a token refresh, never a move or a privacy change.
+            access.reachable = boxes.get(&detail.info.id).is_some_and(|previous| {
+                previous.reachable && previous.base_url == access.base_url && access.private
+            });
+            boxes.insert(detail.info.id.clone(), access);
         }
     }
 
     // ---- box data plane ------------------------------------------------
 
-    pub(crate) async fn box_access(&self, id: &str, refresh: bool) -> Result<BoxAccess> {
-        if !refresh {
-            if let Some(access) = self.inner.boxes.lock().expect("box cache").get(id) {
-                return Ok(access.clone());
+    fn mark_reachable(&self, id: &str, access: &BoxAccess) {
+        if let Some(cached) = self.inner.boxes.lock().expect("box cache").get_mut(id) {
+            if cached.base_url == access.base_url {
+                cached.reachable = true;
             }
         }
-        self.inner.boxes.lock().expect("box cache").remove(id);
-        let detail = self.detail(id).await?;
-        match (detail.ready, detail.base_url, detail.box_token) {
-            (true, Some(base_url), Some(token)) => Ok(BoxAccess {
-                base_url: base_url.trim_end_matches('/').to_string(),
-                token,
-            }),
-            _ => Err(Error::new(
-                ErrorCode::BoxNotRunning,
-                format!(
-                    "box {id} is not running (status {}); start it and wait until it is ready",
-                    detail.info.status
-                ),
-            )),
+    }
+
+    pub(crate) async fn box_access(&self, id: &str, refresh: bool) -> Result<BoxAccess> {
+        let cached = if refresh {
+            None
+        } else {
+            self.inner.boxes.lock().expect("box cache").get(id).cloned()
+        };
+        let access = match cached {
+            Some(access) => access,
+            None => {
+                self.inner.boxes.lock().expect("box cache").remove(id);
+                let detail = self.detail(id).await?;
+                BoxAccess::from_detail(&detail).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::BoxNotRunning,
+                        format!(
+                            "box {id} is not running (status {}); start it and wait until it is ready",
+                            detail.info.status
+                        ),
+                    )
+                })?
+            }
+        };
+        if access.private && !access.reachable {
+            self.probe_private(id, &access, PRIVATE_PROBE_TIMEOUT)
+                .await?;
+        }
+        Ok(access)
+    }
+
+    /// Checks a private box answers from here before calling it.
+    ///
+    /// A private box's name resolves to its tailnet address, which off the tailnet
+    /// does not refuse a connection, it swallows it. Any HTTP answer from
+    /// `/challenge` means this device reaches the box, and so does a failed TLS
+    /// handshake (see [`answered`]); a connection that was never made within the
+    /// deadline means it does not, and the call fails now instead of hanging.
+    async fn probe_private(&self, id: &str, access: &BoxAccess, deadline: Duration) -> Result<()> {
+        let probe = self
+            .inner
+            .http
+            .get(format!("{}/challenge", access.base_url))
+            .timeout(deadline)
+            .send()
+            .await;
+        match probe {
+            Ok(_) => {
+                self.mark_reachable(id, access);
+                Ok(())
+            }
+            Err(err) if answered(&err) => {
+                self.mark_reachable(id, access);
+                Ok(())
+            }
+            Err(err) => {
+                let mut out = Error::new(
+                    ErrorCode::BoxPrivateUnreachable,
+                    private_unreachable_message(&access.name),
+                );
+                out.source = Some(Box::new(err));
+                Err(out)
+            }
         }
     }
 
@@ -366,8 +516,9 @@ impl Zipbox {
         extra: HeaderMap,
         retry: bool,
     ) -> Result<Response> {
-        let mut backoff = Backoff::new(self.inner.retry_base_delay, Duration::from_secs(30));
-        let mut unsent_backoff = Backoff::new(self.inner.retry_base_delay, Duration::from_secs(30));
+        let mut backoff = Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
+        let mut unsent_backoff =
+            Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
         let mut attempt = 0u32;
         loop {
             let mut req = self
@@ -463,8 +614,95 @@ pub(crate) fn encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode, key_not_received};
+    use super::{encode, key_not_received, BoxAccess, Zipbox, PRIVATE_PROBE_TIMEOUT};
     use crate::error::{Error, ErrorCode};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_private_probe_is_bounded_at_five_seconds() {
+        assert_eq!(PRIVATE_PROBE_TIMEOUT, Duration::from_secs(5));
+    }
+
+    // A tailnet address off the tailnet swallows the request: the deadline, not
+    // the network, is what ends the probe. Shortened here; the production bound is
+    // PRIVATE_PROBE_TIMEOUT.
+    #[tokio::test]
+    async fn the_deadline_ends_a_probe_that_never_answers() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let zb = Zipbox::new("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT").unwrap();
+        let access = BoxAccess {
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: "bt".into(),
+            name: "build".into(),
+            private: true,
+            reachable: false,
+        };
+        let deadline = Duration::from_millis(300);
+        let started = Instant::now();
+        let err = zb
+            .probe_private("sbx_1", &access, deadline)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(err.code, ErrorCode::BoxPrivateUnreachable);
+        assert!(
+            elapsed >= deadline,
+            "ended before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the deadline did not bound it"
+        );
+        drop(silent);
+    }
+
+    // A box whose certificate is not installed yet fails the TLS handshake. It
+    // answered, so it is reachable: a plain-HTTP listener behind an https:// URL
+    // makes rustls fail the same way.
+    #[tokio::test]
+    async fn a_failed_tls_handshake_counts_as_an_answer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+            }
+        });
+        let zb = Zipbox::new("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT").unwrap();
+        let access = BoxAccess {
+            base_url: format!("https://127.0.0.1:{port}"),
+            token: "bt".into(),
+            name: "build".into(),
+            private: true,
+            reachable: false,
+        };
+        zb.probe_private("sbx_1", &access, Duration::from_secs(5))
+            .await
+            .expect("a TLS failure is an answer, not an unreachable box");
+    }
+
+    // Nothing listens: the connect is refused, which is what "unreachable" means here.
+    #[tokio::test]
+    async fn a_refused_connection_is_unreachable() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let zb = Zipbox::new("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT").unwrap();
+        let access = BoxAccess {
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: "bt".into(),
+            name: "build".into(),
+            private: true,
+            reachable: false,
+        };
+        let err = zb
+            .probe_private("sbx_1", &access, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BoxPrivateUnreachable);
+    }
 
     #[test]
     fn encodes_paths_for_queries() {

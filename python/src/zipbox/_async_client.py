@@ -24,6 +24,7 @@ from zipbox._models import (
     SandboxInfo,
     Signal,
     SshInfo,
+    TailscaleStatus,
     Tier,
 )
 from zipbox._pty import AsyncPty, new_state
@@ -112,15 +113,23 @@ class AsyncSandboxes:
         tier: Tier | None = None,
         ssh_public_key: str | None = None,
         mailbox: bool | None = None,
+        private: bool | None = None,
     ) -> AsyncSandbox:
         """Create a box and wait until it is ready (no deadline).
 
         ``mailbox=True`` creates the box's mailbox now; by default it is created
-        the first time the box uses mail.
+        the first time the box uses mail. ``private=True`` creates it private
+        ("tailnet only"): it is never public, and a private box is not ready until
+        it joins your tailnet, so this returns once it is running with its key. Call
+        ``box.tailscale.connect(auth_key)`` next.
         """
         detail = await self._client._run(
             self._client._core.create(
-                name=name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+                name=name,
+                tier=tier,
+                ssh_public_key=ssh_public_key,
+                mailbox=mailbox,
+                private=private,
             )
         )
         return AsyncSandbox(self._client, detail.id, detail)
@@ -132,11 +141,23 @@ class AsyncSandboxes:
         tier: Tier | None = None,
         ssh_public_key: str | None = None,
         mailbox: bool | None = None,
+        private: bool | None = None,
     ) -> AsyncSandbox:
-        """Return the live box named ``name`` (starting it if stopped), or create it."""
+        """Return the live box named ``name`` (starting it if stopped), or create it with
+        these options.
+
+        The options apply only when a box is created. A box that already has this name
+        is returned as it is, even when it differs (another tier, not private): that is
+        not an error and nothing is resized. Check ``box.info.tier`` and call
+        ``set_tier`` if it matters.
+        """
         detail = await self._client._run(
             self._client._core.get_or_create(
-                name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+                name,
+                tier=tier,
+                ssh_public_key=ssh_public_key,
+                mailbox=mailbox,
+                private=private,
             )
         )
         return AsyncSandbox(self._client, detail.id, detail)
@@ -151,7 +172,7 @@ class AsyncSandboxes:
         return AsyncSandbox(self._client, sandbox_id, detail)
 
     async def start(self, sandbox_id: str) -> None:
-        """Start a stopped box (402 ``insufficient_credits`` when the account is dry)."""
+        """Start a stopped box, or a ``stopping`` one once its stop lands (402 when dry)."""
         await self._client._run(self._client._core.start(sandbox_id))
 
     async def stop(self, sandbox_id: str) -> None:
@@ -162,13 +183,19 @@ class AsyncSandboxes:
         """Hard-restart a running box; files survive."""
         await self._client._run(self._client._core.lifecycle(sandbox_id, "reset"))
 
-    async def delete(self, sandbox_id: str) -> None:
-        """Delete a box (a recoverable copy is kept for 30 days)."""
-        await self._client._run(self._client._core.delete(sandbox_id))
+    async def delete(self, sandbox_id: str, *, archive: bool | None = None) -> None:
+        """Delete a box. A recoverable copy is kept for 30 days unless ``archive=False``."""
+        await self._client._run(self._client._core.delete(sandbox_id, archive))
 
     async def set_tier(self, sandbox_id: str, tier: Tier) -> None:
         """Move a box to another tier."""
         await self._client._run(self._client._core.lifecycle(sandbox_id, "tier", {"tier": tier}))
+
+    async def wait_ready(self, sandbox_id: str) -> AsyncSandbox:
+        """Block until the box is ready (no deadline). A private box: until it is
+        running with its key, since it is not ready until it joins your tailnet."""
+        detail = await self._client._run(self._client._core.wait_ready(sandbox_id))
+        return AsyncSandbox(self._client, sandbox_id, detail)
 
 
 class AsyncSandbox:
@@ -182,6 +209,7 @@ class AsyncSandbox:
         self.files = AsyncFiles(client, sandbox_id)
         self.pty = AsyncPtyApi(client, sandbox_id)
         self.preview = AsyncPreviews(client, sandbox_id)
+        self.tailscale = AsyncTailscale(client, sandbox_id)
 
     def __repr__(self) -> str:
         status = self.info.status if self.info else "?"
@@ -237,13 +265,29 @@ class AsyncSandbox:
         info = await self._client._run(self._client._core.exec_background(self.id, body))
         return AsyncCommand(self._client, self.id, info.id, info)
 
-    async def run_code(self, language: Language, code: str) -> ExecResult:
-        """Run a snippet with ``python3``, ``node`` or ``bash``."""
-        return await self._client._run(self._client._core.run_code(self.id, language, code))
+    async def run_code(
+        self,
+        language: Language,
+        code: str,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_ms: int | None = None,
+        user: str | None = None,
+    ) -> ExecResult:
+        """Run a snippet with ``python3``, ``node`` (as an ES module) or ``bash``: written
+        to a temp file, run through the login shell with these options, then removed."""
+        options = {"cwd": cwd, "env": env, "timeout_ms": timeout_ms, "user": user}
+        return await self._client._run(
+            self._client._core.run_code(self.id, language, code, options)
+        )
 
-    async def logs(self, since: str | None = None, lines: int | None = None) -> str:
-        """The box's system journal (``journalctl --since``)."""
-        return await self._client._run(self._client._core.logs(self.id, since, lines))
+    async def logs(
+        self, since: str | None = None, lines: int | None = None, unit: str | None = None
+    ) -> str:
+        """The box's system journal (``journalctl``): since a time, the last ``lines``,
+        one systemd ``unit``. A failed journalctl raises ``conflict``."""
+        return await self._client._run(self._client._core.logs(self.id, since, lines, unit))
 
     async def ssh_info(self) -> SshInfo:
         """The direct IPv6 SSH command for this box."""
@@ -265,16 +309,26 @@ class AsyncSandbox:
         """Hard-restart this box."""
         await self._client.sandboxes.restart(self.id)
 
-    async def delete(self) -> None:
-        """Delete this box."""
-        await self._client.sandboxes.delete(self.id)
+    async def delete(self, *, archive: bool | None = None) -> None:
+        """Delete this box (``archive=False`` skips the recoverable copy)."""
+        await self._client.sandboxes.delete(self.id, archive=archive)
 
     async def set_tier(self, tier: Tier) -> None:
         """Move this box to another tier."""
         await self._client.sandboxes.set_tier(self.id, tier)
 
+    async def set_private(self, enabled: bool) -> None:
+        """Make the box private ("tailnet only") or public again.
+
+        Turning it on needs the box connected to your tailnet (``tailnet_not_connected``
+        otherwise). A private box answers only devices on your tailnet; box calls from
+        anywhere else raise ``box_private_unreachable``.
+        """
+        await self._client._run(self._client._core.set_private(self.id, enabled))
+
     async def wait_ready(self) -> SandboxDetail:
-        """Block until the box is ready (no deadline)."""
+        """Block until the box is ready (no deadline). A private box: until it is
+        running with its key, since it is not ready until it joins your tailnet."""
         self.info = await self._client._run(self._client._core.wait_ready(self.id))
         return self.info
 
@@ -395,6 +449,10 @@ class AsyncFiles:
         """Move or rename."""
         await self._client._run(self._client._core.mutate(self._sandbox_id, "move", src, dst))
 
+    async def copy(self, src: str, dst: str) -> None:
+        """Copy a file or directory."""
+        await self._client._run(self._client._core.mutate(self._sandbox_id, "copy", src, dst))
+
     async def delete(self, path: str) -> None:
         """Delete a file or directory."""
         await self._client._run(self._client._core.mutate(self._sandbox_id, "delete", path))
@@ -416,17 +474,31 @@ class AsyncPtyApi:
         self._client = client
         self._sandbox_id = sandbox_id
 
-    async def create(self, *, cols: int = 80, rows: int = 24) -> AsyncPty:
-        """Open a new bash session; returns once the socket is up."""
-        return await self.attach(None, cols=cols, rows=rows)
+    async def create(
+        self,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+        client_label: str | None = None,
+    ) -> AsyncPty:
+        """Open a new bash session; returns once the socket is up. No size = the box's
+        default; ``client_label`` names this client in the box's session list."""
+        return await self.attach(None, cols=cols, rows=rows, client_label=client_label)
 
-    async def attach(self, session_id: str | None, *, cols: int = 80, rows: int = 24) -> AsyncPty:
+    async def attach(
+        self,
+        session_id: str | None,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+        client_label: str | None = None,
+    ) -> AsyncPty:
         """Re-attach a session by id (its screen is replayed)."""
         pty = AsyncPty(
             self._client._core,
             self._client._transport,
             self._sandbox_id,
-            new_state(session_id, cols, rows),
+            new_state(session_id, cols, rows, client_label),
         )
         return await pty._start()
 
@@ -443,8 +515,38 @@ class AsyncPreviews:
         return await self._client._run(self._client._core.preview(self._sandbox_id, port, label))
 
     async def remove(self, label: str) -> None:
-        """Stop serving a preview."""
+        """Stop serving a preview, by its label (or full host)."""
         await self._client._run(self._client._core.unpreview(self._sandbox_id, label))
+
+
+class AsyncTailscale:
+    """The box's tailnet: ``box.tailscale``.
+
+    The auth key is sealed on this machine to the box's own key and opened only
+    inside the box; Zipbox relays ciphertext and never sees the key.
+    """
+
+    def __init__(self, client: AsyncZipbox, sandbox_id: str) -> None:
+        self._client = client
+        self._sandbox_id = sandbox_id
+
+    def __repr__(self) -> str:
+        return f"AsyncTailscale(sandbox_id={self._sandbox_id!r})"
+
+    async def status(self) -> TailscaleStatus | None:
+        """The tailnet status, or None when the box never joined one."""
+        return await self._client._run(self._client._core.tailscale_status(self._sandbox_id))
+
+    async def connect(self, auth_key: str) -> None:
+        """Join your tailnet with a one-off auth key (tailscale.com admin → Keys).
+
+        Returns once the box has accepted the key; follow ``status()`` for the join.
+        """
+        await self._client._run(self._client._core.tailscale_connect(self._sandbox_id, auth_key))
+
+    async def disconnect(self) -> None:
+        """Leave the tailnet: the box logs out and forgets its node."""
+        await self._client._run(self._client._core.tailscale_disconnect(self._sandbox_id))
 
 
 class AsyncAccount:

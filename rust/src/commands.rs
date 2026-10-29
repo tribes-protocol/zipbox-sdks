@@ -1,7 +1,6 @@
 //! Commands on a box: inspect, follow, feed stdin, signal.
 
-use std::time::Duration;
-
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use reqwest::Method;
 use serde::Deserialize;
@@ -9,9 +8,9 @@ use serde::Deserialize;
 use crate::backoff::Backoff;
 use crate::client::{encode, json_body, Body};
 use crate::error::{Error, Result};
-use crate::sandbox::Sandbox;
+use crate::sandbox::{collect, Sandbox};
 use crate::sse::sse_stream;
-use crate::types::{ExecEvent, ExecRecord, OutputStream, Signal};
+use crate::types::{ExecEvent, ExecRecord, ExecResult, OutputStream, Signal};
 
 /// Commands on a box by id, from [`Sandbox::commands`].
 #[derive(Debug, Clone)]
@@ -46,7 +45,8 @@ impl Commands {
     }
 
     /// Replays a command's events from `since` (a cursor from an earlier event;
-    /// `None` = from the start) and follows it until it exits.
+    /// `None` = from the start) and follows it until it exits, re-attaching from the
+    /// last cursor whenever the stream drops (see [`Command::events`]).
     pub async fn events(
         &self,
         command_id: &str,
@@ -58,6 +58,11 @@ impl Commands {
     /// Appends bytes to a command's stdin (started with `stdin: true`).
     pub async fn stdin(&self, command_id: &str, data: impl Into<Vec<u8>>) -> Result<()> {
         self.command(command_id).stdin(data).await
+    }
+
+    /// Closes a command's stdin (EOF).
+    pub async fn close_stdin(&self, command_id: &str) -> Result<()> {
+        self.command(command_id).close_stdin().await
     }
 
     /// Sends a signal.
@@ -106,11 +111,34 @@ impl Command {
             .await
     }
 
-    /// Replays events from `since` and follows the command until it exits.
+    /// Replays events from `since` (`None` = from the start) and follows the
+    /// command until it exits. A followed command is a live surface: a dropped
+    /// stream re-attaches from the last cursor with backoff and no attempt limit,
+    /// and the ladder resets only when an event arrives. The stream ends after
+    /// `exit` or on an answered error (e.g. `not_found`), which is its last item.
     pub async fn events(
         &self,
         since: Option<&str>,
     ) -> Result<impl Stream<Item = Result<ExecEvent>> + Send + 'static> {
+        // The first attach's answered error is the caller's; a transient one is
+        // retried by the follow loop like any later drop.
+        let current = match self.connect(since).await {
+            Ok(stream) => Some(stream),
+            Err(err) if err.retryable => None,
+            Err(err) => return Err(err),
+        };
+        let inner = &self.sandbox.client.inner;
+        let follow = Follow {
+            command: self.clone(),
+            cursor: since.map(str::to_string),
+            backoff: Backoff::new(inner.retry_base_delay, inner.retry_max_delay),
+            current,
+            done: false,
+        };
+        Ok(futures::stream::unfold(follow, Follow::step))
+    }
+
+    async fn connect(&self, since: Option<&str>) -> Result<BoxStream<'static, Result<ExecEvent>>> {
         let path = match since {
             Some(cursor) => format!("/exec/{}/events?since={}", encode(&self.id), encode(cursor)),
             None => format!("/exec/{}/events", encode(&self.id)),
@@ -126,39 +154,16 @@ impl Command {
                 Some("text/event-stream"),
             )
             .await?;
-        Ok(exec_events(resp))
+        Ok(exec_events(resp).boxed())
     }
 
-    /// Waits for the command to exit and returns its final record. A dropped
+    /// Waits for the command to exit and returns everything it printed. A dropped
     /// connection re-attaches from the last cursor with backoff, without limit:
     /// a command runs until it ends.
-    pub async fn wait(&self) -> Result<ExecRecord> {
-        let mut cursor: Option<String> = None;
-        let base = self.sandbox.client.inner.retry_base_delay;
-        let mut backoff = Backoff::new(base, Duration::from_secs(30));
-        loop {
-            match self.events(cursor.as_deref()).await {
-                Ok(stream) => {
-                    let mut stream = Box::pin(stream);
-                    while let Some(event) = stream.next().await {
-                        match event {
-                            Ok(event) => {
-                                backoff.reset();
-                                cursor = Some(event.cursor().to_string());
-                                if matches!(event, ExecEvent::Exit { .. }) {
-                                    return self.get().await;
-                                }
-                            }
-                            Err(err) if err.code.is_retryable() => break,
-                            Err(err) => return Err(err),
-                        }
-                    }
-                }
-                Err(err) if err.code.is_retryable() => {}
-                Err(err) => return Err(err),
-            }
-            tokio::time::sleep(backoff.next_delay()).await;
-        }
+    pub async fn wait(&self) -> Result<ExecResult> {
+        let mut result = collect(self.events(None).await?).await?;
+        result.id = self.id.clone();
+        Ok(result)
     }
 
     /// Appends bytes to stdin (the command must have been started with
@@ -206,6 +211,54 @@ impl Command {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// A followed command stream: the open connection, if any, and where to resume.
+struct Follow {
+    command: Command,
+    cursor: Option<String>,
+    backoff: Backoff,
+    current: Option<BoxStream<'static, Result<ExecEvent>>>,
+    done: bool,
+}
+
+impl Follow {
+    async fn step(mut self) -> Option<(Result<ExecEvent>, Follow)> {
+        if self.done {
+            return None;
+        }
+        loop {
+            if let Some(stream) = self.current.as_mut() {
+                let next = stream.next().await;
+                match next {
+                    Some(Ok(event)) => {
+                        self.backoff.reset();
+                        self.cursor = Some(event.cursor().to_string());
+                        self.done = matches!(event, ExecEvent::Exit { .. });
+                        return Some((Ok(event), self));
+                    }
+                    Some(Err(err)) if !err.retryable => {
+                        self.done = true;
+                        return Some((Err(err), self));
+                    }
+                    // A drop, or a stream that ended without `exit`: resume.
+                    Some(Err(_)) | None => self.current = None,
+                }
+                tokio::time::sleep(self.backoff.next_delay()).await;
+            }
+            let connected = self.command.connect(self.cursor.as_deref()).await;
+            match connected {
+                Ok(stream) => self.current = Some(stream),
+                Err(err) if err.retryable => {
+                    tokio::time::sleep(self.backoff.next_delay()).await;
+                }
+                Err(err) => {
+                    self.done = true;
+                    return Some((Err(err), self));
+                }
+            }
+        }
     }
 }
 

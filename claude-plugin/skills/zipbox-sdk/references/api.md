@@ -59,7 +59,7 @@ Open a box (created and booted the first time) and run a command in it.
 ```ts
 import { Zipbox } from '@zipbox/sdk'
 
-const box = await new Zipbox().sandboxes.getOrCreate('hello')
+const box = await new Zipbox().sandboxes.getOrCreate('hello', { tier: 's' })
 const result = await box.exec('uname -a')
 console.log(result.stdout)
 ```
@@ -69,7 +69,7 @@ console.log(result.stdout)
 ```python
 from zipbox import Zipbox
 
-box = Zipbox().sandboxes.get_or_create("hello")
+box = Zipbox().sandboxes.get_or_create("hello", tier="s")
 print(box.exec("uname -a").stdout)
 ```
 
@@ -77,7 +77,7 @@ print(box.exec("uname -a").stdout)
 
 ```go
 c := zipbox.New("") // "" reads ZIPBOX_API_KEY
-box, _ := c.Sandboxes.GetOrCreate(ctx, "hello")
+box, _ := c.Sandboxes.GetOrCreate(ctx, "hello", zipbox.CreateOptions{Tier: "s"})
 res, _ := box.Exec(ctx, "uname -a")
 fmt.Println(res.Stdout)
 ```
@@ -86,7 +86,11 @@ fmt.Println(res.Stdout)
 
 ```rust
 let zb = zipbox::Zipbox::from_env()?;
-let sbx = zb.sandboxes().get_or_create("hello").await?;
+let opts = zipbox::CreateOptions {
+    tier: Some("s".into()),
+    ..Default::default()
+};
+let sbx = zb.sandboxes().get_or_create_with("hello", opts).await?;
 println!("{}", sbx.exec("uname -a").await?.stdout);
 ```
 

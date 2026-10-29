@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -107,28 +108,117 @@ type ExecEvent struct {
 //
 //	for stream.Next() { ev := stream.Event() … }
 //	if err := stream.Err(); err != nil { … }
+//
+// A stream that drops once its command has started re-attaches from the last
+// cursor by itself: a followed command is a live surface, so there is no attempt
+// ceiling, the backoff is capped and jittered (WithBackoff), and the ladder
+// resets only when an event arrives. Only an answered error, ctx or Close ends it.
 type ExecStream struct {
-	body   io.Closer
+	ctx    context.Context
+	box    *Box
 	sse    *sseReader
 	ev     ExecEvent
 	err    error
 	done   bool
 	cursor string
+	// mu guards body and closed: Close may run while Next is blocked in a read.
+	mu     sync.Mutex
+	body   io.Closer
+	closed bool
+	// commandID is the command the stream follows; empty until a foreground
+	// command's start event, and a stream without one cannot re-attach.
+	commandID string
+	failures  int
 }
 
-func newExecStream(body io.ReadCloser, cursor string) *ExecStream {
-	return &ExecStream{body: body, sse: newSSEReader(body), cursor: cursor}
+func newExecStream(ctx context.Context, box *Box, body io.ReadCloser, cursor, commandID string) *ExecStream {
+	s := &ExecStream{ctx: ctx, box: box, cursor: cursor, commandID: commandID}
+	s.attach(body)
+	return s
 }
 
-// Next advances to the next event. It returns false after the exit event, at
-// the end of the stream, or on an error (see Err).
+// attach makes body the current connection. A body handed to a stream that was
+// closed meanwhile is closed at once and not attached.
+func (s *ExecStream) attach(body io.ReadCloser) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.body, s.sse = nil, nil
+	if body == nil {
+		return true
+	}
+	if s.closed {
+		body.Close()
+		return false
+	}
+	s.body, s.sse = body, newSSEReader(body)
+	return true
+}
+
+func (s *ExecStream) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// reattach re-opens the command's events from the cursor, with backoff, until
+// one opens or an answered error ends the stream. A Close ends it too.
+func (s *ExecStream) reattach() bool {
+	s.mu.Lock()
+	if s.body != nil {
+		s.body.Close()
+	}
+	s.body, s.sse = nil, nil
+	s.mu.Unlock()
+	for {
+		if s.isClosed() {
+			s.err = errStreamClosed
+			return false
+		}
+		if err := sleep(s.ctx, s.box.client.backoff(s.failures)); err != nil {
+			s.err = err
+			return false
+		}
+		s.failures++
+		body, err := s.box.Commands.open(s.ctx, s.commandID, s.cursor)
+		if err == nil {
+			if !s.attach(body) {
+				s.err = errStreamClosed
+				return false
+			}
+			return true
+		}
+		if !retryable(err) {
+			s.err = err
+			return false
+		}
+	}
+}
+
+var errStreamClosed = newError(CodeUnavailable, "the event stream was closed before the command exited")
+
+// Next advances to the next event. It returns false after the exit event, or
+// on an error that ends the stream (see Err).
 func (s *ExecStream) Next() bool {
 	if s.done || s.err != nil {
 		return false
 	}
 	for {
+		if s.sse == nil {
+			if !s.reattach() {
+				return false
+			}
+		}
 		raw, err := s.sse.next()
 		if err != nil {
+			if s.isClosed() {
+				s.err = errStreamClosed
+				return false
+			}
+			if s.commandID != "" && s.ctx.Err() == nil {
+				// A drop after the command started: resume from the cursor.
+				s.sse = nil
+				continue
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				s.err = newError(CodeUnavailable, "the event stream ended before the command exited")
 			} else {
@@ -157,11 +247,20 @@ func (s *ExecStream) Next() bool {
 		}
 		s.cursor = ev.Cursor
 		s.ev = ev
+		s.failures = 0
+		if ev.Type == EventStart && s.commandID == "" {
+			s.commandID = ev.ID
+		}
 		if ev.Type == EventExit {
 			s.done = true
 		}
 		return true
 	}
+}
+
+func retryable(err error) bool {
+	var zerr *Error
+	return errors.As(err, &zerr) && zerr.Retryable
 }
 
 // Event returns the current event.
@@ -173,9 +272,20 @@ func (s *ExecStream) Err() error { return s.err }
 // Cursor is the resume cursor after the last event read.
 func (s *ExecStream) Cursor() string { return s.cursor }
 
-// Close releases the stream. Closing the stream of a foreground Exec before it
-// exits makes the box kill the command.
-func (s *ExecStream) Close() error { return s.body.Close() }
+// Close releases the stream and stops it re-attaching; a Next in flight returns
+// false. Closing the stream of a foreground Exec before it exits makes the box
+// kill the command.
+func (s *ExecStream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	if s.body == nil {
+		return nil
+	}
+	err := s.body.Close()
+	s.body = nil
+	return err
+}
 
 // collect drains a stream into a result. It stops at the exit event.
 type collector struct {
@@ -244,6 +354,11 @@ func (b *Box) ExecStream(ctx context.Context, cmd string, opts ...ExecOption) (*
 	return b.stream(ctx, &execRequest{Cmd: cmd}, opts)
 }
 
+// ExecStreamArgv is ExecStream for argv spawned directly, without a shell.
+func (b *Box) ExecStreamArgv(ctx context.Context, argv []string, opts ...ExecOption) (*ExecStream, error) {
+	return b.stream(ctx, &execRequest{Argv: argv}, opts)
+}
+
 func (b *Box) stream(ctx context.Context, req *execRequest, opts []ExecOption) (*ExecStream, error) {
 	for _, opt := range opts {
 		opt(req)
@@ -261,7 +376,7 @@ func (b *Box) stream(ctx context.Context, req *execRequest, opts []ExecOption) (
 	if err != nil {
 		return nil, err
 	}
-	return newExecStream(resp.Body, "0-0"), nil
+	return newExecStream(ctx, b, resp.Body, "0-0", ""), nil
 }
 
 // ExecBackground starts cmd through `bash -lc` and returns as soon as it is
@@ -269,7 +384,15 @@ func (b *Box) stream(ctx context.Context, req *execRequest, opts []ExecOption) (
 // survives a restart of the box's agent. Follow it with Command.Wait or
 // Command.Events.
 func (b *Box) ExecBackground(ctx context.Context, cmd string, opts ...ExecOption) (*Command, error) {
-	req := &execRequest{Cmd: cmd, Background: true}
+	return b.background(ctx, &execRequest{Cmd: cmd, Background: true}, opts)
+}
+
+// ExecBackgroundArgv is ExecBackground for argv spawned directly, without a shell.
+func (b *Box) ExecBackgroundArgv(ctx context.Context, argv []string, opts ...ExecOption) (*Command, error) {
+	return b.background(ctx, &execRequest{Argv: argv, Background: true}, opts)
+}
+
+func (b *Box) background(ctx context.Context, req *execRequest, opts []ExecOption) (*Command, error) {
 	for _, opt := range opts {
 		opt(req)
 	}
@@ -290,16 +413,17 @@ const (
 	Bash   Language = "bash"
 )
 
-// RunCode writes code to a temporary file on the box and runs it with python3,
-// node or bash. It is sugar over Files.Write and ExecArgv.
+// RunCode writes code to a temporary file on the box, runs it with python3, node
+// (as an ES module) or bash through the login shell, then removes it. It is
+// sugar over Files.Write and Exec.
 func (b *Box) RunCode(ctx context.Context, lang Language, code string, opts ...ExecOption) (*ExecResult, error) {
 	var interpreter, ext string
 	switch lang {
 	case Python:
 		interpreter, ext = "python3", ".py"
-	case Node, "javascript", "js":
-		interpreter, ext = "node", ".js"
-	case Bash, "sh":
+	case Node:
+		interpreter, ext = "node", ".mjs"
+	case Bash:
 		interpreter, ext = "bash", ".sh"
 	default:
 		return nil, newError(CodeInvalidRequest, "unsupported language "+string(lang)+" (python, node, bash)")
@@ -308,8 +432,8 @@ func (b *Box) RunCode(ctx context.Context, lang Language, code string, opts ...E
 	if err := b.Files.Write(ctx, file, strings.NewReader(code)); err != nil {
 		return nil, err
 	}
-	script := `"$0" "$1"; status=$?; rm -f -- "$1"; exit $status`
-	return b.ExecArgv(ctx, []string{"bash", "-c", script, interpreter, file}, opts...)
+	script := interpreter + " '" + file + "'; status=$?; rm -f '" + file + "'; exit $status"
+	return b.Exec(ctx, script, opts...)
 }
 
 // Signal names a command can be sent.
@@ -386,37 +510,21 @@ func (c *Command) Signal(ctx context.Context, sig Signal) error {
 // A dropped stream is resumed from its cursor with backoff, without limit;
 // only an answered error (not_found, unauthorized, …) or ctx ends the wait.
 func (c *Command) Wait(ctx context.Context) (*ExecResult, error) {
-	var col collector
-	col.result.ID = c.ID
-	cursor := ""
-	failures := 0
-	for {
-		stream, err := c.box.Commands.Events(ctx, c.ID, cursor)
-		if err == nil {
-			for stream.Next() {
-				failures = 0
-				col.add(stream.Event())
-			}
-			cursor = stream.Cursor()
-			err = stream.Err()
-			stream.Close()
-			if col.exited {
-				res := col.done()
-				res.ID = c.ID
-				return res, nil
-			}
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err != nil && !IsCode(err, CodeUnavailable) && !IsCode(err, CodeRateLimited) && !IsCode(err, CodeBoxNotRunning) {
-			return nil, err
-		}
-		if err := sleep(ctx, c.box.client.backoff(failures)); err != nil {
-			return nil, err
-		}
-		failures++
+	stream, err := c.box.Commands.Events(ctx, c.ID, "")
+	if err != nil {
+		return nil, err
 	}
+	defer stream.Close()
+	var col collector
+	for stream.Next() {
+		col.add(stream.Event())
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	res := col.done()
+	res.ID = c.ID
+	return res, nil
 }
 
 // CommandsService manages a box's commands. Reach it as Box.Commands.
@@ -445,8 +553,23 @@ func (s *CommandsService) List(ctx context.Context) ([]CommandRecord, error) {
 }
 
 // Events replays a command's events after since ("" = from the start) and
-// follows it until it exits.
+// follows it until it exits, re-attaching from the last cursor whenever the
+// stream drops (see ExecStream). An answered error on the first attach is
+// returned here.
 func (s *CommandsService) Events(ctx context.Context, id, since string) (*ExecStream, error) {
+	cursor := since
+	if cursor == "" {
+		cursor = "0-0"
+	}
+	body, err := s.open(ctx, id, since)
+	if err != nil && !retryable(err) {
+		return nil, err
+	}
+	return newExecStream(ctx, s.box, body, cursor, id), nil
+}
+
+// open is one connection to a command's events after since.
+func (s *CommandsService) open(ctx context.Context, id, since string) (io.ReadCloser, error) {
 	query := url.Values{}
 	if since != "" {
 		query.Set("since", since)
@@ -460,11 +583,7 @@ func (s *CommandsService) Events(ctx context.Context, id, since string) (*ExecSt
 	if err != nil {
 		return nil, err
 	}
-	cursor := since
-	if cursor == "" {
-		cursor = "0-0"
-	}
-	return newExecStream(resp.Body, cursor), nil
+	return resp.Body, nil
 }
 
 // Stdin appends r's bytes to a command's stdin.

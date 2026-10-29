@@ -18,7 +18,8 @@ func main() {
 	ctx := context.Background()
 	c := zipbox.New("")
 
-	box, err := c.Sandboxes.GetOrCreate(ctx, "quickstart")
+	// The options apply only when the box is created; an existing box comes back as it is.
+	box, err := c.Sandboxes.GetOrCreate(ctx, "quickstart", zipbox.CreateOptions{Tier: "s"})
 	if err != nil {
 		log.Fatal(err)
 	}

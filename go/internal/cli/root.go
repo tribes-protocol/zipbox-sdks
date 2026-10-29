@@ -172,6 +172,8 @@ func (a *app) rootCommand() *cobra.Command {
 		a.shellCommand(),
 		a.sshCommand(),
 		a.previewCommand(),
+		a.tailscaleCommand(),
+		a.privateCommand(),
 		a.logsCommand(),
 		a.docsCommand(),
 		a.mcpCommand(),

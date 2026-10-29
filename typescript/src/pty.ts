@@ -6,8 +6,6 @@ import type { PtyCreateOptions, WebSocketConstructor, WebSocketLike } from './ty
 
 const SUBPROTOCOL = 'tribes.session'
 const CLIENT_LABEL = 'zipbox-sdk'
-const RECONNECT_BASE_MS = 500
-const RECONNECT_CAP_MS = 30_000
 const PING_INTERVAL_MS = 30_000
 const OPEN = 1
 // microvmd's terminal close codes (apps/microvmd/src/types/TerminalProtocol.ts).
@@ -56,8 +54,9 @@ export class PtyApi {
 
   private async open(sessionId: string, owned: boolean, options: PtyCreateOptions): Promise<Pty> {
     const ctor = websocketCtor(this.ctx)
-    // Surface box_not_running/unauthorized now rather than as a silent reconnect loop.
-    await this.ctx.boxes.resolve(this.sandboxId)
+    // Surface box_not_running/unauthorized/box_private_unreachable now rather than
+    // as a silent reconnect loop.
+    await this.ctx.boxes.reach(this.sandboxId)
     const pty = new Pty({
       ctx: this.ctx,
       sandboxId: this.sandboxId,
@@ -82,7 +81,7 @@ interface PtyParams {
 
 /**
  * A live terminal. Drops reconnect by themselves with exponential backoff (cap
- * 30 s, jitter) and no attempt ceiling; the ladder resets only when a frame
+ * `ptyMaxDelayMs`, default 30 s, jitter) and no attempt ceiling; the ladder resets only when a frame
  * arrives. Input written while disconnected is sent on reconnect.
  */
 export class Pty {
@@ -94,6 +93,7 @@ export class Pty {
   private readonly sandboxId: string
   private readonly owned: boolean
   private readonly ctor: WebSocketConstructor
+  private readonly clientLabel: string
   private ws: WebSocketLike | null = null
   private cols: number | null
   private rows: number | null
@@ -114,6 +114,7 @@ export class Pty {
     this.sessionId = params.sessionId
     this.owned = params.owned
     this.ctor = params.ctor
+    this.clientLabel = params.options.clientLabel ?? CLIENT_LABEL
     this.cols = params.options.cols ?? null
     this.rows = params.options.rows ?? null
   }
@@ -195,7 +196,7 @@ export class Pty {
     const url = new URL(`${box.baseUrl}/`.replace(/^http/, 'ws'))
     url.searchParams.set('session', this.sessionId)
     url.searchParams.set('clientId', this.clientId)
-    url.searchParams.set('clientLabel', CLIENT_LABEL)
+    url.searchParams.set('clientLabel', this.clientLabel)
     if (this.connectedOnce) url.searchParams.set('resume', '1')
     let ws: WebSocketLike
     try {
@@ -271,8 +272,8 @@ export class Pty {
     if (this.ended || this.reconnectTimer !== null) return
     const delay = backoffDelay({
       attempt: this.attempt,
-      baseMs: RECONNECT_BASE_MS,
-      capMs: RECONNECT_CAP_MS,
+      baseMs: this.ctx.ptyBaseDelayMs,
+      capMs: this.ctx.ptyMaxDelayMs,
       random: this.ctx.random()
     })
     this.attempt++

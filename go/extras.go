@@ -17,7 +17,7 @@ type PreviewService struct {
 
 // Preview is a published port.
 type Preview struct {
-	// URL is the public HTTPS address, e.g. https://web.demo.zbox.sh.
+	// URL is the HTTPS address, e.g. https://web.demo.zbox.sh.
 	URL string `json:"url"`
 	// Label is the subdomain label.
 	Label string `json:"label"`
@@ -26,8 +26,8 @@ type Preview struct {
 }
 
 // Create publishes 127.0.0.1:port on the box at https://<label>.<box host>.
-// An empty label is "p<port>". Previews are public: anyone with the URL can
-// reach the port.
+// An empty label is "p<port>". On a public box anyone with the URL can reach
+// the port; on a private box, only devices on the owner's tailnet.
 func (s *PreviewService) Create(ctx context.Context, port int, label string) (*Preview, error) {
 	if label == "" {
 		label = "p" + strconv.Itoa(port)
@@ -51,7 +51,7 @@ func (s *PreviewService) Create(ctx context.Context, port int, label string) (*P
 				break
 			}
 			if res.ExitCode != 75 {
-				return nil, newError(CodeInvalidRequest, "tribes-caddy add failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
+				return nil, newError(CodeConflict, "tribes-caddy add failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
 			}
 			lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
 			var pending struct {
@@ -70,18 +70,22 @@ func (s *PreviewService) Create(ctx context.Context, port int, label string) (*P
 	return &Preview{URL: "https://" + fqdn, Label: label, Host: fqdn}, nil
 }
 
-// Remove unpublishes a preview by label.
+// Remove unpublishes a preview by its label (or full host).
 func (s *PreviewService) Remove(ctx context.Context, label string) error {
 	host, err := s.box.host(ctx)
 	if err != nil {
 		return err
 	}
-	res, err := s.box.ExecArgv(ctx, []string{"tribes-caddy", "rm", label + "." + host})
+	fqdn := label
+	if !strings.HasSuffix(label, "."+host) {
+		fqdn = label + "." + host
+	}
+	res, err := s.box.ExecArgv(ctx, []string{"tribes-caddy", "rm", fqdn})
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return newError(CodeInvalidRequest, "tribes-caddy rm failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
+		return newError(CodeConflict, "tribes-caddy rm failed: "+strings.TrimSpace(res.Stderr+res.Stdout))
 	}
 	return nil
 }
@@ -114,7 +118,7 @@ func (b *Box) Logs(ctx context.Context, opts LogOptions) (string, error) {
 		return "", err
 	}
 	if res.ExitCode != 0 {
-		return "", newError(CodeUnavailable, "journalctl failed: "+strings.TrimSpace(res.Stderr))
+		return "", newError(CodeConflict, "journalctl failed: "+strings.TrimSpace(res.Stderr))
 	}
 	return res.Stdout, nil
 }

@@ -106,6 +106,16 @@ impl Files {
         .await
     }
 
+    /// Copies `path` to `destination`.
+    pub async fn copy(&self, path: &str, destination: &str) -> Result<()> {
+        self.mutate(serde_json::json!({
+            "action": "copy",
+            "path": resolve_path(path),
+            "destination": resolve_path(destination),
+        }))
+        .await
+    }
+
     /// Deletes a file or directory.
     pub async fn delete(&self, path: &str) -> Result<()> {
         self.mutate(serde_json::json!({ "action": "delete", "path": resolve_path(path) }))

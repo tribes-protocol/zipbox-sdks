@@ -121,7 +121,7 @@ curl -N -X POST "$BASE/exec" -H "Authorization: Bearer $BOX_TOKEN" \
 
 ## Background commands
 
-A background command keeps running whether or not anyone is attached: across your client disconnecting, and across a restart of the agent on the box. Its output is spooled on the box, so you can re-attach from any cursor (`0-0` replays everything).
+A background command keeps running whether or not anyone is attached: across your client disconnecting, and across a restart of the agent on the box. Its output is spooled on the box, so you can re-attach from any cursor (`0-0` replays everything). Every SDK's `commands.events` follows the command to its exit and re-attaches from the last cursor by itself if the stream drops, with capped backoff and no attempt limit; so does a foreground `exec` stream that drops after its command started.
 
 #### TypeScript
 
@@ -231,31 +231,36 @@ curl -X POST "$BASE/exec/$CMD/signal" -H "Authorization: Bearer $BOX_TOKEN" \
 
 ## Run code
 
-`runCode(language, code)` writes the code to a temporary file and runs it with `python3`, `node` or `bash`. It returns the same result as `exec`.
+`runCode(language, code, options)` writes the code to a temporary file, runs it with `python3`, `node` (as an ES module) or `bash` through the login shell, and removes the file. It takes the `exec` options (`cwd`, `env`, `user`, `timeoutMs`) and returns the same result as `exec`.
 
 #### TypeScript
 
 ```ts
-const out = await box.runCode('python', 'print(2 ** 10)')
+const out = await box.runCode('python', 'print(2 ** 10)', { cwd: 'app' })
 ```
 
 #### Python
 
 ```python
-out = box.run_code("python", "print(2 ** 10)")
+out = box.run_code("python", "print(2 ** 10)", cwd="app")
 ```
 
 #### Go
 
 ```go
-out, err := box.RunCode(ctx, zipbox.Python, "print(2 ** 10)")
+inApp := zipbox.WithCwd("app")
+out, err := box.RunCode(ctx, zipbox.Python, "print(2 ** 10)", inApp)
 ```
 
 #### Rust
 
 ```rust
+let in_app = zipbox::ExecOptions {
+    cwd: Some("app".into()),
+    ..Default::default()
+};
 let out = sbx
-    .run_code(zipbox::Language::Python, "print(2 ** 10)")
+    .run_code_with(zipbox::Language::Python, "print(2 ** 10)", in_app)
     .await?;
 ```
 

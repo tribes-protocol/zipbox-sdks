@@ -39,7 +39,12 @@ _ = pty.Resize(160, 48)
 #### Rust
 
 ```rust
-let pty = sbx.pty().create(120, 40).await?;
+let size = zipbox::PtyOptions {
+    cols: Some(120),
+    rows: Some(40),
+    ..Default::default()
+};
+let pty = sbx.pty().create(size).await?;
 pty.write("htop\r")?;
 pty.resize(160, 48)?;
 ```
@@ -63,9 +68,9 @@ Input is raw terminal input: send `\r` for Enter, and control characters as byte
 
 ## Reconnect
 
-A dropped terminal reconnects by itself, with exponential backoff (capped at 30 seconds, with jitter) and no attempt limit; the backoff resets only once output arrives again. Nothing closes a terminal on a timer.
+A dropped terminal reconnects by itself, with exponential backoff (capped at 30 seconds by default, with jitter; every SDK's client sets the first delay and the cap) and no attempt limit; the backoff resets only once output arrives again. Nothing closes a terminal on a timer.
 
-To pick up a session from another process, `attach(sessionId)` it: the shell, its running programs and the screen are all still there.
+To pick up a session from another process, `attach(sessionId)` it: the shell, its running programs and the screen are all still there. `attach` takes the same options as `create` (size and client label); without a size it leaves the terminal as it is. If another client holds the session, `takeover()` moves it to yours.
 
 ## Sessions and the dashboard
 

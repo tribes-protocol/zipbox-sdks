@@ -135,7 +135,7 @@ func matchRequest(ex exchange, r *http.Request, body []byte) string {
 			return fmt.Sprintf("body is not JSON: %q", body)
 		}
 		_ = json.Unmarshal(want.Body, &wantBody)
-		if !reflect.DeepEqual(gotBody, wantBody) {
+		if !bodyMatches(wantBody, gotBody) {
 			return fmt.Sprintf("body %s, want %s", body, want.Body)
 		}
 	}
@@ -143,6 +143,41 @@ func matchRequest(ex exchange, r *http.Request, body []byte) string {
 		return fmt.Sprintf("body %q, want %q", body, *want.BodyText)
 	}
 	return ""
+}
+
+// bodyMatches is deep equality where the string "{{ANY}}" in want matches any
+// non-null value (a freshly sealed envelope, for one).
+func bodyMatches(want, got any) bool {
+	switch w := want.(type) {
+	case string:
+		if w == "{{ANY}}" {
+			return got != nil
+		}
+	case map[string]any:
+		g, ok := got.(map[string]any)
+		if !ok || len(g) != len(w) {
+			return false
+		}
+		for k, v := range w {
+			gv, present := g[k]
+			if !present || !bodyMatches(v, gv) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		g, ok := got.([]any)
+		if !ok || len(g) != len(w) {
+			return false
+		}
+		for i := range w {
+			if !bodyMatches(w[i], g[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(want, got)
 }
 
 func str(args map[string]any, key string) string {
@@ -155,6 +190,10 @@ func boolArg(args map[string]any, key string) bool {
 	return v
 }
 
+func createOptions(args map[string]any) CreateOptions {
+	return CreateOptions{Name: str(args, "name"), Tier: str(args, "tier"), SSHPublicKey: str(args, "sshPublicKey"), Mailbox: boolArg(args, "mailbox"), Private: boolArg(args, "private")}
+}
+
 // invoke maps a fixture op onto the Go SDK and returns its result as JSON-ready data.
 func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any, error) {
 	id := str(args, "id")
@@ -165,7 +204,21 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 	case "sandboxes.get":
 		return c.Sandboxes.Get(ctx, id)
 	case "sandboxes.create":
-		b, err := c.Sandboxes.Create(ctx, CreateOptions{Name: str(args, "name"), Tier: str(args, "tier"), SSHPublicKey: str(args, "sshPublicKey"), Mailbox: boolArg(args, "mailbox")})
+		b, err := c.Sandboxes.Create(ctx, createOptions(args))
+		if err != nil {
+			return nil, err
+		}
+		return b.Detail, nil
+	case "sandboxes.getOrCreate":
+		opts := createOptions(args)
+		opts.Name = ""
+		b, err := c.Sandboxes.GetOrCreate(ctx, str(args, "name"), opts)
+		if err != nil {
+			return nil, err
+		}
+		return b.Detail, nil
+	case "sandboxes.waitReady":
+		b, err := c.Sandboxes.WaitReady(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +232,11 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 	case "sandboxes.setTier":
 		return nil, c.Sandboxes.SetTier(ctx, id, str(args, "tier"))
 	case "sandboxes.delete":
-		return nil, c.Sandboxes.Delete(ctx, id)
+		var opts DeleteOptions
+		if archive, ok := args["archive"].(bool); ok {
+			opts.Archive = &archive
+		}
+		return nil, c.Sandboxes.Delete(ctx, id, opts)
 	case "sandbox.exec":
 		return box.Exec(ctx, str(args, "cmd"))
 	case "sandbox.execBackground":
@@ -198,6 +255,15 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 			return nil, err
 		}
 		return map[string]any{"events": events}, nil
+	case "commands.closeStdin":
+		return nil, box.Commands.CloseStdin(ctx, str(args, "commandId"))
+	case "sandbox.logs":
+		lines, _ := args["lines"].(float64)
+		logs, err := box.Logs(ctx, LogOptions{Since: str(args, "since"), Lines: int(lines), Unit: str(args, "unit")})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"text": logs}, nil
 	case "commands.signal":
 		return nil, box.Commands.Signal(ctx, str(args, "commandId"), Signal(str(args, "signal")))
 	case "files.read":
@@ -216,6 +282,8 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 		return nil, box.Files.Mkdir(ctx, str(args, "path"))
 	case "files.move":
 		return nil, box.Files.Move(ctx, str(args, "path"), str(args, "destination"))
+	case "files.copy":
+		return nil, box.Files.Copy(ctx, str(args, "path"), str(args, "destination"))
 	case "files.delete":
 		return nil, box.Files.Delete(ctx, str(args, "path"))
 	case "preview.create":
@@ -225,6 +293,14 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 		return c.Account.Balance(ctx)
 	case "account.whoami":
 		return c.Account.WhoAmI(ctx)
+	case "sandbox.setPrivate":
+		return nil, box.SetPrivate(ctx, boolArg(args, "enabled"))
+	case "tailscale.status":
+		return box.Tailscale.Status(ctx)
+	case "tailscale.connect":
+		return nil, box.Tailscale.Connect(ctx, str(args, "authKey"))
+	case "tailscale.disconnect":
+		return nil, box.Tailscale.Disconnect(ctx)
 	}
 	return nil, fmt.Errorf("unknown op %s", op)
 }

@@ -27,6 +27,17 @@ pub enum ErrorCode {
     BoxNotRunning,
     /// The service is temporarily unavailable (5xx, network failure).
     Unavailable,
+    /// The box's key changed (a claim re-minted it) between reading it and sealing
+    /// to it. [`crate::Tailscale::connect`] re-reads and re-seals once by itself.
+    BoxKeyChanged,
+    /// The box must be connected to a tailnet before it can be made private.
+    TailnetNotConnected,
+    /// Tailscale cannot run on a box with company egress lockdown.
+    TailscaleUnavailableEgressLockdown,
+    /// The box's ZipOS predates Tailscale: accept the ZipOS software update first.
+    TailscaleRequiresUpdate,
+    /// The box is private and this device is not on its tailnet.
+    BoxPrivateUnreachable,
 }
 
 impl ErrorCode {
@@ -42,6 +53,13 @@ impl ErrorCode {
             ErrorCode::RateLimited => "rate_limited",
             ErrorCode::BoxNotRunning => "box_not_running",
             ErrorCode::Unavailable => "unavailable",
+            ErrorCode::BoxKeyChanged => "box_key_changed",
+            ErrorCode::TailnetNotConnected => "tailnet_not_connected",
+            ErrorCode::TailscaleUnavailableEgressLockdown => {
+                "tailscale_unavailable_egress_lockdown"
+            }
+            ErrorCode::TailscaleRequiresUpdate => "tailscale_requires_update",
+            ErrorCode::BoxPrivateUnreachable => "box_private_unreachable",
         }
     }
 
@@ -56,6 +74,13 @@ impl ErrorCode {
             "conflict" => ErrorCode::Conflict,
             "rate_limited" => ErrorCode::RateLimited,
             "box_not_running" => ErrorCode::BoxNotRunning,
+            "box_key_changed" => ErrorCode::BoxKeyChanged,
+            "tailnet_not_connected" => ErrorCode::TailnetNotConnected,
+            "tailscale_unavailable_egress_lockdown" => {
+                ErrorCode::TailscaleUnavailableEgressLockdown
+            }
+            "tailscale_requires_update" => ErrorCode::TailscaleRequiresUpdate,
+            "box_private_unreachable" => ErrorCode::BoxPrivateUnreachable,
             _ => ErrorCode::Unavailable,
         }
     }
@@ -241,5 +266,19 @@ mod tests {
         assert_eq!(legacy.code, ErrorCode::NotFound);
         assert_eq!(legacy.message, "no such file");
         assert_eq!(legacy.docs_url, "https://zipbox.ai/docs/errors#not_found");
+    }
+
+    #[test]
+    fn tailscale_codes_round_trip_and_are_not_retried() {
+        for code in [
+            ErrorCode::BoxKeyChanged,
+            ErrorCode::TailnetNotConnected,
+            ErrorCode::TailscaleUnavailableEgressLockdown,
+            ErrorCode::TailscaleRequiresUpdate,
+            ErrorCode::BoxPrivateUnreachable,
+        ] {
+            assert_eq!(ErrorCode::parse(code.as_str()), code);
+            assert!(!code.is_retryable());
+        }
     }
 }

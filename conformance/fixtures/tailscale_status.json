@@ -1,0 +1,74 @@
+{
+  "name": "tailscale_status",
+  "description": "tailscale.status \u2192 GET /sandbox/:id/tailscale; returns the tailnet status, with the owner's other devices.",
+  "call": {
+    "op": "tailscale.status",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1/tailscale",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "tailscale": {
+            "state": "connected",
+            "tailnet": "example.com",
+            "ipv4": "100.101.32.7",
+            "ipv6": "fd7a:115c:a1e0::1",
+            "dnsName": "demo.tail1234.ts.net",
+            "keyExpiry": null,
+            "pending": false,
+            "peers": [
+              {
+                "name": "lucys-macbook",
+                "dnsName": "lucys-macbook.tail1234.ts.net",
+                "os": "macOS",
+                "online": true,
+                "ipv4": "100.64.0.2",
+                "connection": "direct"
+              },
+              {
+                "name": "pixel",
+                "online": false,
+                "futureField": 1
+              }
+            ]
+          },
+          "privateMode": false,
+          "supported": true
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "state": "connected",
+      "tailnet": "example.com",
+      "ipv4": "100.101.32.7",
+      "dnsName": "demo.tail1234.ts.net",
+      "pending": false,
+      "peers": [
+        {
+          "name": "lucys-macbook",
+          "dnsName": "lucys-macbook.tail1234.ts.net",
+          "online": true,
+          "ipv4": "100.64.0.2",
+          "connection": "direct"
+        },
+        {
+          "name": "pixel",
+          "online": false
+        }
+      ]
+    }
+  }
+}

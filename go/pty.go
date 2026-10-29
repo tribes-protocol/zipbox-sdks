@@ -239,7 +239,7 @@ func (p *Pty) run(conn *websocket.Conn) {
 		}
 		p.markDead(conn)
 		for {
-			if err := sleep(p.ctx, p.box.client.backoff(failures)); err != nil {
+			if err := sleep(p.ctx, jitter(p.box.client.ladder(failures, p.box.client.ptyBase, p.box.client.ptyMax), p.box.client)); err != nil {
 				return
 			}
 			failures++
@@ -354,6 +354,11 @@ func (p *Pty) Resize(cols, rows int) error {
 	p.cols, p.rows = cols, rows
 	p.mu.Unlock()
 	return p.sendFrame(map[string]any{"t": "r", "c": cols, "r": rows})
+}
+
+// Takeover takes the session over from another client attached to it.
+func (p *Pty) Takeover() error {
+	return p.sendFrame(map[string]string{"t": "takeover"})
 }
 
 func (p *Pty) sendFrame(frame any) error {

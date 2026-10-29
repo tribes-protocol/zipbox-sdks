@@ -1,0 +1,30 @@
+{
+  "description": "Box envelope (ECIES to a box) conformance vector. Every SDK seals `plaintext` to `recipient.agentPublicKey` under `info`, using `ephemeral.privateKeyHex` and `iv` instead of fresh randomness, and must produce `envelope` byte for byte. It must also open `envelope` with `recipient.privateKeyPkcs8Pem`, and fail to open it under `wrongInfo`. The scheme is packages/sandboxing/src/shared/helpers/BoxEnvelope.ts (sealBoxEnvelope) and apps/microvmd/src/helpers/BoxEnvelope.ts (openBoxEnvelope). The keys are test-only and protect nothing.",
+  "scheme": {
+    "keyAgreement": "ECDH P-256; the shared secret is the 32-byte x coordinate",
+    "kdf": "HKDF-SHA256, salt = empty, info = UTF-8 `info`, length = 32",
+    "aead": "AES-256-GCM, 12-byte iv, no AAD; ciphertext = encrypted bytes || 16-byte tag",
+    "encoding": "ephemeralPublicKey = SPKI DER (uncompressed point); every envelope field is base64url without padding. agentPublicKey is SPKI DER in standard base64, as the API serves it"
+  },
+  "sandboxId": "7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+  "info": "zipbox-tailscale-v1|7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+  "wrongInfo": "zipbox-github-v1|7f9c2ba4-e88f-4d2b-9a3e-1c5b8d0e6a21",
+  "plaintext": "tskey-auth-kConformance1CNTRL-ZipboxSdkVectorNotARealKey0123456789",
+  "recipient": {
+    "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog==",
+    "privateKeyHex": "d36eac77f118b4b79616a55d589d4a9e1267b202dcb5004aa631ed047705d606",
+    "privateKeyPkcs8Pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg026sd/EYtLeWFqVd\nWJ1KnhJnsgLctQBKpjHtBHcF1gahRANCAAQ2P6qKa6l8Wr9tvmiTz5EPQGHs6lvL\nWE8rby1JS+8ufnyP1Asg+bV7WZ+jvPkf+Rua2fuUpw1mntxP7Ut/kSei\n-----END PRIVATE KEY-----\n"
+  },
+  "ephemeral": {
+    "privateKeyHex": "96640d00964c058f438067a0045362ad6990a4f9b238786c657807c016a8c257",
+    "publicKeyUncompressedHex": "046fc628864a38dece765b074dd43000bfde5bfd422bda57662a7fb221372683a9feafd8640e0d99eb9ca906a66faf15785bede2568499104b29e6c52c71473a8d"
+  },
+  "iv": "qoG7P5UeAXp8Ks1d",
+  "sharedSecretHex": "8bb9cdd78bc49d6e5793ea3889dd3003a8b501d075ae81b25dd781d2c613e09d",
+  "aesKeyHex": "a92a5f163ea46b32b62b9f59b30e89f87dd62b455dcddbe32f8fc8df818875a0",
+  "envelope": {
+    "ephemeralPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEb8Yohko43s52WwdN1DAAv95b_UIr2ldmKn-yITcmg6n-r9hkDg2Z65ypBqZvrxV4W-3iVoSZEEsp5sUscUc6jQ",
+    "iv": "qoG7P5UeAXp8Ks1d",
+    "ciphertext": "yHG01V57Go0rjDBV5CYrjnnzworFuH6iwxn5POlbznPWwgGQYLqGaBEElEzwDA9RN3dyhAVgmcyzzAocgP-M9ThR-WVQZ0_Fi2zALdzUjeQhFA"
+  }
+}

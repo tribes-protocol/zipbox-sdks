@@ -21,6 +21,8 @@ pub struct State {
     pub exchanges: Vec<Value>,
     pub next: usize,
     pub failures: Vec<String>,
+    /// Every request body received, so a test can assert what never left the client.
+    pub bodies: Vec<Vec<u8>>,
 }
 
 pub struct MockServer {
@@ -127,6 +129,7 @@ async fn handle(stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Result<
     while let Some(req) = read_request(&mut reader).await? {
         let response = {
             let mut st = state.lock().unwrap();
+            st.bodies.push(req.body.clone());
             match st.exchanges.get(st.next).cloned() {
                 None => {
                     st.failures.push(format!(
@@ -216,7 +219,7 @@ fn mismatch(expected: &Value, req: &ReceivedRequest) -> Option<String> {
     }
     if let Some(body) = expected.get("body") {
         match serde_json::from_slice::<Value>(&req.body) {
-            Ok(got) if &got == body => {}
+            Ok(got) if json_matches(body, &got) => {}
             Ok(got) => return Some(format!("body: expected {body}, got {got}")),
             Err(_) => return Some(format!("body: expected {body}, got non-JSON")),
         }
@@ -230,6 +233,23 @@ fn mismatch(expected: &Value, req: &ReceivedRequest) -> Option<String> {
         }
     }
     None
+}
+
+/// Deep equality, where the string `{{ANY}}` matches any non-null value.
+pub fn json_matches(expected: &Value, actual: &Value) -> bool {
+    match expected {
+        Value::String(s) if s == "{{ANY}}" => !actual.is_null(),
+        Value::Object(map) => actual.as_object().is_some_and(|got| {
+            got.len() == map.len()
+                && map
+                    .iter()
+                    .all(|(k, e)| got.get(k).is_some_and(|a| json_matches(e, a)))
+        }),
+        Value::Array(items) => actual.as_array().is_some_and(|got| {
+            got.len() == items.len() && items.iter().zip(got).all(|(e, a)| json_matches(e, a))
+        }),
+        _ => expected == actual,
+    }
 }
 
 /// Subset match per the conformance README.

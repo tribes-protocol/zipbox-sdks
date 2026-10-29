@@ -8,6 +8,8 @@ import math
 import os
 import posixpath
 import random
+import shlex
+import ssl
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from zipbox._effects import (
     Sleep,
     StreamOp,
 )
+from zipbox._envelope import seal, tailscale_info
 from zipbox._errors import ZipboxError, error_from_response
 from zipbox._models import (
     CommandInfo,
@@ -38,18 +41,24 @@ from zipbox._models import (
     SandboxInfo,
     Signal,
     SshInfo,
+    TailscaleStatus,
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
-_DEAD_STATUSES = frozenset({"destroyed", "stopped"})
+_DEAD_STATUSES = frozenset({"destroyed", "stopped", "deleting"})
 _RETRY_CODES = frozenset({"rate_limited", "unavailable"})
+# A box accepts a sealed credential while it is booting or running.
+_SEALABLE_STATUSES = frozenset({"provisioning", "running"})
+# How long a private box's reachability probe may take before the box counts as off
+# this device's tailnet. A probe is a one-off check, not a live surface.
+PRIVATE_PROBE_TIMEOUT_S = 5.0
 _RUNNERS: dict[str, tuple[str, str]] = {
     "python": ("python3", "py"),
-    "node": ("node", "js"),
+    "node": ("node", "mjs"),
     "bash": ("bash", "sh"),
 }
 # ffmpeg's x11grab, which the platform image ships (it has no ImageMagick). Under
@@ -95,6 +104,37 @@ def resolve_config(
         )
     url = base_url or os.environ.get("ZIPBOX_API_URL") or DEFAULT_API_URL
     return ClientConfig(api_key=key, base_url=url.rstrip("/"), max_retries=max_retries, **overrides)
+
+
+def awaits_tailnet(detail: SandboxDetail) -> bool:
+    """A private box that is running with its key but has not joined a tailnet yet."""
+    joined = detail.tailscale is not None and bool(detail.tailscale.ipv4)
+    return (
+        detail.private_mode
+        and not joined
+        and detail.status == "running"
+        and bool(detail.agent_public_key)
+    )
+
+
+def _tls_failure(error: BaseException) -> bool:
+    """Whether a network error was the TLS handshake (an ``ssl.SSLError`` in its chain)."""
+    seen: BaseException | None = error
+    for _ in range(6):
+        if seen is None:
+            return False
+        if isinstance(seen, ssl.SSLError):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def private_unreachable_message(name: str) -> str:
+    """What a box-direct call on a private box says when this device is off its tailnet."""
+    return (
+        f"{name} is private: it can only be reached from devices on your tailnet. "
+        "Turn on Tailscale on this device (https://tailscale.com/download)."
+    )
 
 
 def resolve_path(path: str) -> str:
@@ -228,6 +268,8 @@ class BoxTarget:
 
     base_url: str
     token: str = field(repr=False)
+    name: str = ""
+    private: bool = False
 
     @property
     def host(self) -> str:
@@ -241,6 +283,8 @@ class Core:
     def __init__(self, config: ClientConfig) -> None:
         self.config = config
         self._targets: dict[str, BoxTarget] = {}
+        # Private boxes this client has reached at least once.
+        self._reachable: set[str] = set()
 
     # ------------------------------------------------------------------ plumbing
 
@@ -311,22 +355,54 @@ class Core:
     def target(self, sandbox_id: str) -> Op[BoxTarget]:
         """The box's origin and token for this key, fetched once and cached."""
         cached = self._targets.get(sandbox_id)
-        if cached is not None:
-            return cached
-        detail = yield from self.get(sandbox_id)
-        cached = self._targets.get(sandbox_id)
         if cached is None:
-            raise ZipboxError(
-                "box_not_running",
-                f"Box {sandbox_id} is {detail.status} and not ready; start it first.",
-                # Booting or restarting comes back by itself; stopped or deleted does not.
-                retryable=detail.status in ("provisioning", "running"),
-            )
+            detail = yield from self.get(sandbox_id)
+            cached = self._targets.get(sandbox_id)
+            if cached is None:
+                raise ZipboxError(
+                    "box_not_running",
+                    f"Box {sandbox_id} is {detail.status} and not ready; start it first.",
+                    # Booting or restarting comes back by itself; stopped or deleted does not.
+                    retryable=detail.status in ("provisioning", "running"),
+                )
+        if cached.private and sandbox_id not in self._reachable:
+            yield from self.probe_private(sandbox_id, cached)
         return cached
+
+    def probe_private(
+        self, sandbox_id: str, target: BoxTarget, timeout_s: float = PRIVATE_PROBE_TIMEOUT_S
+    ) -> Op[None]:
+        """Check a private box answers from here before calling it.
+
+        A private box's name resolves to its tailnet address, which off the tailnet
+        does not refuse a connection, it swallows it. Any HTTP answer from
+        ``/challenge`` means this device reaches the box; a network failure within
+        the deadline means it does not, and the call fails now instead of hanging.
+        """
+        probe = HttpRequest(
+            "GET",
+            target.base_url + "/challenge",
+            {"user-agent": _USER_AGENT},
+            timeout_s=timeout_s,
+        )
+        try:
+            yield probe
+        except ZipboxError as error:
+            # A failed TLS handshake is an answer: the box is reachable and only lacks
+            # its certificate yet, which the box call itself waits out.
+            if not _tls_failure(error):
+                raise ZipboxError(
+                    "box_private_unreachable",
+                    private_unreachable_message(target.name or sandbox_id),
+                    retryable=False,
+                ) from error
+        self._reachable.add(sandbox_id)
+        return None
 
     def forget(self, sandbox_id: str) -> None:
         """Drop a cached box token (lifecycle changes may move the box)."""
         self._targets.pop(sandbox_id, None)
+        self._reachable.discard(sandbox_id)
 
     def box(
         self,
@@ -398,19 +474,36 @@ class Core:
         token = data.pop("boxToken", None)
         detail = SandboxDetail.from_json(data)
         if detail.ready and detail.base_url and isinstance(token, str) and token:
-            self._targets[sandbox_id] = BoxTarget(detail.base_url.rstrip("/"), token)
+            previous = self._targets.get(sandbox_id)
+            target = BoxTarget(
+                detail.base_url.rstrip("/"),
+                token,
+                name=detail.name or sandbox_id,
+                private=detail.private_mode,
+            )
+            if previous is None or previous.base_url != target.base_url or not target.private:
+                self._reachable.discard(sandbox_id)
+            self._targets[sandbox_id] = target
         else:
             self.forget(sandbox_id)
         return detail
 
     def wait_ready(self, sandbox_id: str) -> Op[SandboxDetail]:
-        """Re-read the box with backoff until it is ready. No deadline."""
+        """Re-read the box with backoff until it is ready. No deadline.
+
+        A private box that has not joined a tailnet (no tailnet IPv4 yet) cannot be
+        ready, so for one this returns as soon as it is running with its
+        ``agent_public_key``: the point at which a Tailscale auth key can be sealed to
+        it. A private box that has joined waits for ready like any other.
+        """
         backoff = Backoff(
             self.config.poll_interval_s, self.config.poll_max_interval_s, rng=self.config.rng
         )
         while True:
             detail = yield from self.get(sandbox_id)
             if detail.ready:
+                return detail
+            if awaits_tailnet(detail):
                 return detail
             if detail.status in _DEAD_STATUSES:
                 raise ZipboxError("conflict", f"Box {sandbox_id} is {detail.status}.")
@@ -423,6 +516,7 @@ class Core:
         tier: str | None = None,
         ssh_public_key: str | None = None,
         mailbox: bool | None = None,
+        private: bool | None = None,
     ) -> Op[SandboxDetail]:
         """Claim a box (idempotent) and wait until it is ready."""
         body: dict[str, Any] = {}
@@ -434,6 +528,8 @@ class Core:
             body["sshPublicKey"] = ssh_public_key
         if mailbox is not None:
             body["mailbox"] = mailbox
+        if private is not None:
+            body["private"] = private
         created = yield from self.control(
             "POST",
             "/sandbox/identity/claim",
@@ -450,17 +546,25 @@ class Core:
         tier: str | None = None,
         ssh_public_key: str | None = None,
         mailbox: bool | None = None,
+        private: bool | None = None,
     ) -> Op[SandboxDetail]:
-        """The live box with this name, started if stopped; created if there is none."""
+        """The live box with this name, started if stopped; created with the options if
+        there is none. The options apply only on create: a box that already has this
+        name is returned as it is, even when it differs (another tier, not private)."""
         boxes = yield from self.list_sandboxes()
         for box in boxes:
             if box.name == name and box.status not in _DEAD_STATUSES:
-                if box.status == "archived" or box.is_archived:
+                # "stopping": a stop is still landing; start() waits it out, then starts.
+                if box.status in ("archived", "stopping"):
                     yield from self.start(box.id)
                 return (yield from self.wait_ready(box.id))
         return (
             yield from self.create(
-                name=name, tier=tier, ssh_public_key=ssh_public_key, mailbox=mailbox
+                name=name,
+                tier=tier,
+                ssh_public_key=ssh_public_key,
+                mailbox=mailbox,
+                private=private,
             )
         )
 
@@ -472,37 +576,135 @@ class Core:
         )
         return None
 
-    def start(self, sandbox_id: str) -> Op[None]:
-        """Start (restore) a stopped box."""
-        return (yield from self.lifecycle(sandbox_id, "restore"))
-
-    def delete(self, sandbox_id: str) -> Op[None]:
-        """DELETE /sandbox/:id."""
+    def set_private(self, sandbox_id: str, enabled: bool) -> Op[None]:
+        """PUT /sandbox/:id/private."""
         self.forget(sandbox_id)
-        yield from self.control("DELETE", f"/sandbox/{quote(sandbox_id, safe='')}")
+        yield from self.control(
+            "PUT", f"/sandbox/{quote(sandbox_id, safe='')}/private", body={"enabled": enabled}
+        )
+        return None
+
+    # ----------------------------------------------------------------- tailscale
+
+    def tailscale_status(self, sandbox_id: str) -> Op[TailscaleStatus | None]:
+        """GET /sandbox/:id/tailscale; None when the box never joined a tailnet."""
+        data = yield from self.control("GET", f"/sandbox/{quote(sandbox_id, safe='')}/tailscale")
+        return TailscaleStatus.parse((data or {}).get("tailscale"))
+
+    def tailscale_connect(self, sandbox_id: str, auth_key: str) -> Op[None]:
+        """Seal ``auth_key`` to the box's own key here, then hand only the envelope over.
+
+        The key is read fresh for every seal: a claim re-mints it, and an envelope
+        sealed to the old key cannot be opened. ``box_key_changed`` re-reads and
+        re-seals once.
+        """
+        path = f"/sandbox/{quote(sandbox_id, safe='')}/tailscale"
+        resealed = False
+        while True:
+            detail = yield from self.get(sandbox_id)
+            box_key = detail.agent_public_key
+            if not box_key or detail.status not in _SEALABLE_STATUSES:
+                raise ZipboxError(
+                    "box_not_running",
+                    f"Box {sandbox_id} is {detail.status}; start it before connecting Tailscale.",
+                    retryable=False,
+                )
+            envelope = seal(box_key, tailscale_info(sandbox_id), auth_key)
+            try:
+                yield from self.control(
+                    "PUT", path, body={"envelope": envelope, "agentPublicKey": box_key}
+                )
+            except ZipboxError as error:
+                if error.code != "box_key_changed" or resealed:
+                    raise
+                resealed = True
+                continue
+            return None
+
+    def tailscale_disconnect(self, sandbox_id: str) -> Op[None]:
+        """DELETE /sandbox/:id/tailscale: leave the tailnet."""
+        yield from self.control("DELETE", f"/sandbox/{quote(sandbox_id, safe='')}/tailscale")
+        return None
+
+    def start(self, sandbox_id: str) -> Op[None]:
+        """Start (restore) a stopped box.
+
+        A stop is accepted at once but its disk takes seconds to minutes to land;
+        meanwhile the box reads ``stopping`` and the restore answers ``conflict``.
+        Wait that out with backoff and start the box once it reads ``archived``. A
+        box that comes out of the wait already starting or running (a resize restores
+        itself, a failed archive leaves it running) is started. Any other
+        ``conflict`` is raised as it came.
+        """
+        waited = False
+        while True:
+            try:
+                return (yield from self.lifecycle(sandbox_id, "restore"))
+            except ZipboxError as error:
+                if error.code != "conflict":
+                    raise
+                detail = yield from self.get(sandbox_id)
+                if detail.status != "stopping":
+                    # A second conflict after a stop was waited out: the box restored
+                    # itself, or it is archived and will not restore (that is final).
+                    if waited and detail.status in ("provisioning", "running"):
+                        return None
+                    raise error
+                backoff = Backoff(
+                    self.config.poll_interval_s,
+                    self.config.poll_max_interval_s,
+                    rng=self.config.rng,
+                )
+                while detail.status == "stopping":
+                    yield Sleep(backoff.next())
+                    detail = yield from self.get(sandbox_id)
+                waited = True
+                if detail.status in ("provisioning", "running"):
+                    return None
+                if detail.status != "archived":
+                    raise error
+
+    def delete(self, sandbox_id: str, archive: bool | None = None) -> Op[None]:
+        """DELETE /sandbox/:id. ``archive=False`` skips the recoverable copy."""
+        self.forget(sandbox_id)
+        body = None if archive is None else {"archiveBeforeDestroy": archive}
+        yield from self.control("DELETE", f"/sandbox/{quote(sandbox_id, safe='')}", body=body)
         return None
 
     # ---------------------------------------------------------------------- exec
 
     def exec_events(self, sandbox_id: str, body: dict[str, Any]) -> StreamOp:
-        """POST /exec and emit its events until exit."""
+        """POST /exec and emit its events until exit. A stream that drops after the
+        command started re-attaches from its last cursor (``command_events``)."""
         response = yield from self.box(
             sandbox_id, "POST", "/exec", body=body, stream=True, accept="text/event-stream"
         )
         parser = SseParser()
-        while True:
-            chunk: bytes = yield ReadChunk(response)
-            if not chunk:
-                yield CloseStream(response)
-                raise ZipboxError("unavailable", "The exec stream ended before the command exited.")
-            for message in parser.feed(chunk):
-                event = event_from_sse(message, message.id or parser.last_id or "0-0")
-                if event is None:
-                    continue
-                yield Emit(event)
-                if event.type == "exit":
+        command_id: str | None = None
+        cursor = "0-0"
+        try:
+            while True:
+                chunk: bytes = yield ReadChunk(response)
+                if not chunk:
                     yield CloseStream(response)
-                    return
+                    break
+                for message in parser.feed(chunk):
+                    event = event_from_sse(message, message.id or parser.last_id or "0-0")
+                    if event is None:
+                        continue
+                    cursor = event.cursor
+                    if event.type == "start":
+                        command_id = event.command_id
+                    yield Emit(event)
+                    if event.type == "exit":
+                        yield CloseStream(response)
+                        return
+        except ZipboxError as error:
+            if command_id is None or not error.retryable:
+                raise
+        if command_id is None:
+            raise ZipboxError("unavailable", "The exec stream ended before the command exited.")
+        yield from self.command_events(sandbox_id, command_id, cursor)
 
     def exec(self, sandbox_id: str, body: dict[str, Any]) -> Op[ExecResult]:
         """Run a command to completion and collect its output."""
@@ -605,17 +807,19 @@ class Core:
         )
         return None
 
-    def run_code(self, sandbox_id: str, language: Language, code: str) -> Op[ExecResult]:
-        """Write ``code`` to a temp file and run it with the language's interpreter."""
+    def run_code(
+        self, sandbox_id: str, language: Language, code: str, options: dict[str, Any]
+    ) -> Op[ExecResult]:
+        """Write ``code`` to a temp file, run it with the language's interpreter through
+        the login shell (``options`` are ``exec_body`` keywords), then remove it."""
         if language not in _RUNNERS:
             raise ZipboxError("invalid_request", f"Unsupported language {language!r}.")
         interpreter, extension = _RUNNERS[language]
         path = f"/tmp/zipbox-run-{uuid.uuid4().hex}.{extension}"
         yield from self.write(sandbox_id, path, code.encode())
-        script = '"$0" "$1"; rc=$?; rm -f "$1"; exit $rc'
-        return (
-            yield from self.exec(sandbox_id, exec_body(["bash", "-c", script, interpreter, path]))
-        )
+        quoted = shlex.quote(path)
+        script = f"{interpreter} {quoted}; status=$?; rm -f {quoted}; exit $status"
+        return (yield from self.exec(sandbox_id, exec_body(script, **options)))
 
     # --------------------------------------------------------------------- files
 
@@ -716,25 +920,32 @@ class Core:
         return Preview(url=f"https://{host}", label=chosen)
 
     def unpreview(self, sandbox_id: str, label: str) -> Op[None]:
-        """Remove a preview via tribes-caddy rm."""
+        """Remove a preview by label (or full host) via tribes-caddy rm."""
         target = yield from self.target(sandbox_id)
-        result = yield from self.exec(
-            sandbox_id, exec_body(["tribes-caddy", "rm", f"{label}.{target.host}"])
-        )
+        host = label if label.endswith(f".{target.host}") else f"{label}.{target.host}"
+        result = yield from self.exec(sandbox_id, exec_body(["tribes-caddy", "rm", host]))
         if result.exit_code != 0:
             raise ZipboxError(
                 "conflict", f"tribes-caddy rm failed: {(result.stderr or result.stdout).strip()}"
             )
         return None
 
-    def logs(self, sandbox_id: str, since: str | None, lines: int | None) -> Op[str]:
-        """The box's system journal."""
+    def logs(
+        self, sandbox_id: str, since: str | None, lines: int | None, unit: str | None
+    ) -> Op[str]:
+        """The box's system journal. A failed journalctl raises ``conflict``."""
         argv = ["journalctl", "-o", "short-iso", "--no-pager"]
         if since is not None:
             argv += ["--since", since]
         if lines is not None:
             argv += ["-n", str(lines)]
+        if unit is not None:
+            argv += ["-u", unit]
         result = yield from self.exec(sandbox_id, exec_body(argv))
+        if result.exit_code != 0:
+            raise ZipboxError(
+                "conflict", f"journalctl failed: {(result.stderr or result.stdout).strip()}"
+            )
         return result.stdout
 
     def ssh_info(self, sandbox_id: str) -> Op[SshInfo]:

@@ -8,7 +8,7 @@ from langgraph.prebuilt import create_react_agent
 
 from zipbox import Zipbox
 
-box = Zipbox().sandboxes.get_or_create("langgraph-agent")
+box = Zipbox().sandboxes.get_or_create("langgraph-agent", tier="s")
 
 
 @tool

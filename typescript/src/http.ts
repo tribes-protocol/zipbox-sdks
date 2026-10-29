@@ -2,9 +2,8 @@ import { backoffDelay, sleep } from './backoff.js'
 import { errorFromResponse, ZipboxError } from './errors.js'
 import type { FetchLike } from './types.js'
 
-const SDK_VERSION = '0.1.4'
+const SDK_VERSION = '0.1.5'
 const USER_AGENT = `zipbox-sdk-typescript/${SDK_VERSION}`
-const RETRY_CAP_MS = 30_000
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
 
@@ -28,6 +27,7 @@ export interface HttpClientOptions {
   fetch: FetchLike
   maxRetries: number
   retryBaseDelayMs: number
+  retryMaxDelayMs: number
   random: () => number
 }
 
@@ -36,22 +36,29 @@ function isAbort(error: unknown, signal: AbortSignal | undefined): boolean {
   return error instanceof Error && error.name === 'AbortError'
 }
 
-// Error codes that can only come from establishing the connection: DNS, refusal,
-// unreachable routes, and the TLS handshake (alerts and certificate verification).
-// Node's fetch (undici) and Bun both put them on the error or its `cause`.
-// ECONNRESET and "socket closed" are deliberately absent — those can follow a
+// Error codes that can only come from establishing the connection. Node's fetch
+// (undici) and Bun both put them on the error or its `cause`. ECONNRESET and
+// "socket closed" are deliberately absent from both sets — those can follow a
 // request that was already sent.
-const UNSENT_CODES = new Set([
+//
+// Connecting itself failed: DNS, a refused or unroutable address, a connect
+// timeout. Nothing at the address answered.
+const CONNECT_FAILURE_CODES = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
   'EAI_AGAIN',
   'EHOSTUNREACH',
   'ENETUNREACH',
   'EHOSTDOWN',
-  'EPROTO',
   'UND_ERR_CONNECT_TIMEOUT',
   'ConnectionRefused',
-  'FailedToOpenSocket',
+  'FailedToOpenSocket'
+])
+// The connection was made and the TLS handshake failed: alerts and certificate
+// verification. The peer answered, so the address IS reachable; what is missing
+// is its certificate, which a fresh or newly private box grows into.
+const TLS_FAILURE_CODES = new Set([
+  'EPROTO',
   'UNABLE_TO_GET_ISSUER_CERT',
   'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
@@ -60,11 +67,34 @@ const UNSENT_CODES = new Set([
   'CERT_HAS_EXPIRED',
   'CERT_NOT_YET_VALID'
 ])
-const UNSENT_CODE_PREFIXES = ['ERR_SSL_', 'ERR_TLS_', 'TLSV1_ALERT_', 'SSL_']
+const TLS_FAILURE_CODE_PREFIXES = ['ERR_SSL_', 'ERR_TLS_', 'TLSV1_ALERT_', 'SSL_']
 
 function errorCode(value: unknown): string | null {
   if (typeof value !== 'object' || value === null || !('code' in value)) return null
   return typeof value.code === 'string' ? value.code : null
+}
+
+// The first error code on the error or its `cause` chain that `matches`.
+function failureCode(error: unknown, matches: (code: string) => boolean): string | null {
+  let current: unknown = error
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth++) {
+    const code = errorCode(current)
+    if (code !== null && matches(code)) return code
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return null
+}
+
+/** Whether a fetch failure was the TLS handshake: the peer answered, its certificate did not check out. */
+export function isTlsFailure(error: unknown): boolean {
+  return (
+    failureCode(
+      error,
+      (code) =>
+        TLS_FAILURE_CODES.has(code) ||
+        TLS_FAILURE_CODE_PREFIXES.some((prefix) => code.startsWith(prefix))
+    ) !== null
+  )
 }
 
 /**
@@ -74,18 +104,9 @@ function errorCode(value: unknown): string | null {
  * every method may retry it, POSTs included.
  */
 export function isUnsentFailure(error: unknown): boolean {
-  let current: unknown = error
-  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth++) {
-    const code = errorCode(current)
-    if (
-      code !== null &&
-      (UNSENT_CODES.has(code) || UNSENT_CODE_PREFIXES.some((prefix) => code.startsWith(prefix)))
-    ) {
-      return true
-    }
-    current = current instanceof Error ? current.cause : undefined
-  }
-  return false
+  return (
+    failureCode(error, (code) => CONNECT_FAILURE_CODES.has(code)) !== null || isTlsFailure(error)
+  )
 }
 
 async function readErrorBody(response: Response): Promise<unknown> {
@@ -132,7 +153,7 @@ export class HttpClient {
             backoffDelay({
               attempt: unsentAttempt++,
               baseMs: this.options.retryBaseDelayMs,
-              capMs: RETRY_CAP_MS,
+              capMs: this.options.retryMaxDelayMs,
               random: this.options.random()
             }),
             request.signal
@@ -154,10 +175,39 @@ export class HttpClient {
         backoffDelay({
           attempt,
           baseMs: this.options.retryBaseDelayMs,
-          capMs: RETRY_CAP_MS,
+          capMs: this.options.retryMaxDelayMs,
           random: this.options.random()
         })
       await sleep(delay, request.signal)
+    }
+  }
+
+  /**
+   * One GET with a deadline and no retry: does anything answer at `url`? Any HTTP
+   * response, whatever its status, is an answer, and so is a failed TLS handshake:
+   * the box answered, it only lacks its certificate yet, which {@link send} waits
+   * out. Used only to tell a private box this device cannot reach from a box that
+   * is merely slow, so a call fails fast instead of hanging on an address that is
+   * not routed here.
+   */
+  async answers(url: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    const deadline = new AbortController()
+    const timer = setTimeout(() => {
+      deadline.abort()
+    }, timeoutMs)
+    try {
+      const response = await this.options.fetch(url, {
+        method: 'GET',
+        headers: { 'user-agent': USER_AGENT },
+        signal: signal === undefined ? deadline.signal : AbortSignal.any([signal, deadline.signal])
+      })
+      await response.body?.cancel()
+      return true
+    } catch (caught) {
+      if (signal?.aborted === true) throw caught
+      return isTlsFailure(caught)
+    } finally {
+      clearTimeout(timer)
     }
   }
 

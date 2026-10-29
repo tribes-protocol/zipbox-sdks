@@ -8,6 +8,12 @@
 //! # async fn run() -> zipbox::Result<()> {
 //! let zb = zipbox::Zipbox::from_env()?; // reads ZIPBOX_API_KEY
 //! let sandbox = zb.sandboxes().get_or_create("demo").await?;
+//! // Create options apply only when the box is created:
+//! let ci = zb
+//!     .sandboxes()
+//!     .get_or_create_with("ci-runner", zipbox::CreateOptions { tier: Some("l".into()), ..Default::default() })
+//!     .await?;
+//! # let _ = ci;
 //! let out = sandbox.exec("echo hello").await?;
 //! assert_eq!(out.stdout, "hello\n");
 //! # Ok(()) }
@@ -24,12 +30,14 @@ mod account;
 mod backoff;
 mod client;
 mod commands;
+mod envelope;
 mod error;
 mod files;
 mod pty;
 mod sandbox;
 mod sandboxes;
 mod sse;
+mod tailscale;
 mod types;
 
 pub use account::Account;
@@ -40,7 +48,9 @@ pub use files::{Files, MAX_FILE_BYTES, WORKSPACE_DIR};
 pub use pty::{Pty, PtyClient, PtyEvent, PTY_SUBPROTOCOL};
 pub use sandbox::{Previews, Sandbox};
 pub use sandboxes::Sandboxes;
+pub use tailscale::Tailscale;
 pub use types::{
-    CreateOptions, ExecEvent, ExecOptions, ExecRecord, ExecResult, FileEntry, FileKind, Language,
-    LogOptions, OutputStream, Preview, SandboxDetail, SandboxInfo, Signal, SshInfo,
+    CreateOptions, DeleteOptions, ExecEvent, ExecOptions, ExecRecord, ExecResult, FileEntry,
+    FileKind, Language, LogOptions, OutputStream, Preview, PtyOptions, SandboxDetail, SandboxInfo,
+    Signal, SshInfo, TailscalePeer, TailscaleStatus,
 };

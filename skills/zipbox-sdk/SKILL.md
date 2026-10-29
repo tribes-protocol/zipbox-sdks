@@ -69,8 +69,10 @@ node -e "require.resolve('@zipbox/sdk')"
 from zipbox import Zipbox, ZipboxError
 
 zb = Zipbox()                                   # reads ZIPBOX_API_KEY
-# reuse by name; created + ready the first time
-box = zb.sandboxes.get_or_create("worker")
+# reuse by name; created + ready the first time. The create options (tier,
+# ssh_public_key, mailbox, private) apply only then: an existing box
+# is returned as it is.
+box = zb.sandboxes.get_or_create("worker", tier="m")
 
 # bash -lc; returns, never raises, on non-zero exit
 r = box.exec("python3 --version")
@@ -97,17 +99,19 @@ Async code: `from zipbox import AsyncZipbox`, then the same calls with `await`
 (`async with AsyncZipbox() as zb:`).
 
 Other Python calls you will need: `zb.sandboxes.list()`, `get(id)`, `create(name=,
-tier=)`, `start(id)`, `restart(id)`, `set_tier(id, tier)`, `delete(id)`;
-`box.run_code("python", code)`; `box.commands.get/events/stdin/signal`;
-`box.files.read/stat/mkdir/move/delete/upload/download`; `box.pty.create()`;
-`box.logs(since="10 min ago")`; `box.ssh_info()`; `zb.account.balance()`.
+tier=)`, `wait_ready(id)`, `start(id)`, `restart(id)`, `set_tier(id, tier)`,
+`delete(id, archive=None)`; `box.run_code("python", code, cwd=)`;
+`box.commands.get/events/stdin/close_stdin/signal`;
+`box.files.read/stat/mkdir/move/copy/delete/upload/download`; `box.pty.create()`;
+`box.logs(since="10 min ago", unit=)`; `box.ssh_info()`; `zb.account.balance()`.
+Every SDK has these with the same parameters, in its own naming.
 
 ### TypeScript delta
 
 ```ts
 import { Zipbox } from '@zipbox/sdk'
 const zb = new Zipbox()
-const box = await zb.sandboxes.getOrCreate('worker')
+const box = await zb.sandboxes.getOrCreate('worker', { tier: 'm' })
 const { exitCode, stdout } = await box.exec('node --version')
 for await (const e of box.execStream('npm test'))
   if (e.type === 'stdout') process.stdout.write(e.data)
@@ -124,7 +128,8 @@ promises everywhere, `AbortSignal` via `{ signal }`. Node 20+ (PTYs on Node 20 n
 
 ```go
 c := zipbox.New("")                          // "" reads ZIPBOX_API_KEY
-box, _ := c.Sandboxes.GetOrCreate(ctx, "worker")
+opts := zipbox.CreateOptions{Tier: "m"}
+box, _ := c.Sandboxes.GetOrCreate(ctx, "worker", opts)
 res, _ := box.Exec(ctx, "go version")        // res.ExitCode, res.Stdout
 _ = box.Files.Write(ctx, "a.txt", strings.NewReader("hi"))
 p, _ := box.Preview.Create(ctx, 3000, "")    // p.URL; "" label = p3000
@@ -138,7 +143,11 @@ Every call takes a `context.Context`; cancelling it disconnects a stream. Errors
 ```rust
 let zb = zipbox::Zipbox::from_env()?;
 // `box` is a Rust keyword
-let sbx = zb.sandboxes().get_or_create("worker").await?;
+let opts = zipbox::CreateOptions {
+    tier: Some("m".into()),
+    ..Default::default()
+};
+let sbx = zb.sandboxes().get_or_create_with("worker", opts).await?;
 // res.exit_code, res.stdout
 let res = sbx.exec("uname -a").await?;
 sbx.files().write("a.txt", "hi").await?;
@@ -196,7 +205,7 @@ that must outlive the call. Output is kept on the box (64 MiB per stream).
 You are an agent on box A and need a clean machine for a job:
 
 1. Preflight: `ZIPBOX_API_KEY` must be set on box A (see Preflight).
-2. `zipbox sandbox create --name job-1` (or `get_or_create("job-1")`).
+2. `zipbox sandbox create --name job-1` (or `get_or_create("job-1", tier="m")`).
 3. Run the work there with `exec`; copy results back with `files.read` / `zipbox files cat`.
 4. **Stop it** (`zipbox sandbox stop job-1`) — nothing stops it for you, and a
    running box bills by the hour. Delete it if it will never be reused.
@@ -273,6 +282,7 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | Create, stop, start, resize, delete boxes              | `references/lifecycle.md`                                                                            |
 | Stream, background, stdin, signals, files, PTY         | `references/box-api.md`                                                                              |
 | Publish a port                                         | `references/previews.md`                                                                             |
+| Join a tailnet, private (tailnet-only) boxes           | `references/tailscale.md`                                                                            |
 | Read system logs                                       | `references/logs.md`                                                                                 |
 | Call the API with curl or from another language        | `references/http-api.md`                                                                             |
 | Exact method lists per language                        | `references/sdk-python.md`, `references/sdk-ts.md`, `references/sdk-go.md`, `references/sdk-rust.md` |

@@ -19,7 +19,7 @@ The biggest difference is time: a Zipbox box is a long-lived machine, not a disp
 | Memory pause / resume            | Out: restart reboots, files survive                                        |
 | Auto-stop / idle timeout         | Never, by design. A box runs until you stop it                             |
 | Resize                           | Have (`setTier`)                                                           |
-| Named snapshots / templates      | Out. A box is its own template; `getOrCreate(name)` reuses it              |
+| Named snapshots / templates      | Out. A box is its own template; `getOrCreate(name, options)` reuses it     |
 | Run a command, streamed          | Have                                                                       |
 | Background command, re-attach    | Have; survives a restart of the box's agent                                |
 | Run code (Python, Node, Bash)    | Have (`runCode`)                                                           |
@@ -50,4 +50,4 @@ The biggest difference is time: a Zipbox box is a long-lived machine, not a disp
 | `fs`, `files`                  | `files` ([Files](https://zipbox.ai/docs/files.md))                                          |
 | `pty`                          | `pty` ([Terminals](https://zipbox.ai/docs/terminals.md))                                    |
 | Preview link, public URL       | `preview.create(port)` ([Previews](https://zipbox.ai/docs/previews.md))                     |
-| Snapshot / template            | A named box reused with `getOrCreate(name)`                             |
+| Snapshot / template            | A named box reused with `getOrCreate(name, options)`                    |

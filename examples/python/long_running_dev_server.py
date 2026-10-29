@@ -12,7 +12,7 @@ BOX = "dev-server"
 
 
 def start(zb: Zipbox) -> None:
-    box = zb.sandboxes.get_or_create(BOX)
+    box = zb.sandboxes.get_or_create(BOX, tier="s")
     box.files.write("site/index.html", "<h1>served from a Zipbox</h1>\n")
     command = box.exec_background("python3 -m http.server 8080", cwd="site")
     preview = box.preview.create(8080, label="site")
@@ -20,7 +20,7 @@ def start(zb: Zipbox) -> None:
 
 
 def logs(zb: Zipbox, command_id: str, since: str | None) -> None:
-    box = zb.sandboxes.get_or_create(BOX)
+    box = zb.sandboxes.get_or_create(BOX, tier="s")
     for event in box.commands.events(command_id, since=since):
         if event.data is not None:
             print(event.data, end="")
