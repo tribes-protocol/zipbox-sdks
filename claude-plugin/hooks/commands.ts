@@ -148,7 +148,8 @@ async function onBox($: EngineInterface, action: string, rest: string[]): Promis
       if (!Number.isInteger(port) || port < 1 || port > 65535)
         return 'Name the port: /zipbox preview <port>'
       const box = await pickBox($)
-      const apex = new URL(await boxOrigin($, box.id)).hostname.replace(/^box--/, '')
+      // `box--<apex>` on a public box, `box.<apex>` on a private one.
+      const apex = new URL(await boxOrigin($, box.id)).hostname.replace(/^box(?:--|\.)/, '')
       const host = `p${port}.${apex}`
       const ran = await exec($, box.id, {
         argv: ['tribes-caddy', 'add', host, `127.0.0.1:${port}`, '--no-wait']

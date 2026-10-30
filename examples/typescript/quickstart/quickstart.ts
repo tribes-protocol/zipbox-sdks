@@ -3,6 +3,10 @@
 import { Zipbox } from '@zipbox/sdk'
 
 const zb = new Zipbox()
+// Reuse names, never mint one per job: an account holds 250 machine names and a deleted
+// box keeps its name. For a fleet, keep a fixed pool and get-or-create from it:
+//   const worker = await zb.sandboxes.getOrCreate(`worker-${i % 50}`, { tier: 's' })
+// https://zipbox.ai/docs/machine-limit
 const box = await zb.sandboxes.getOrCreate('quickstart', { tier: 's' })
 
 const { stdout } = await box.exec('uname -a')

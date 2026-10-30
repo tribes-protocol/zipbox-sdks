@@ -9,6 +9,11 @@ export type ZipboxErrorCode =
   | 'rate_limited'
   | 'box_not_running'
   | 'unavailable'
+  /**
+   * The account holds 250 machine names (a deleted box keeps its name); reuse one
+   * instead of creating a new one. See https://zipbox.ai/docs/machine-limit.
+   */
+  | 'machine_limit_reached'
   /** The box's key changed between reading it and sealing to it. */
   | 'box_key_changed'
   /** Private mode needs the box connected to a tailnet first. */
@@ -30,6 +35,7 @@ const ERROR_CODES: readonly ZipboxErrorCode[] = [
   'rate_limited',
   'box_not_running',
   'unavailable',
+  'machine_limit_reached',
   'box_key_changed',
   'tailnet_not_connected',
   'tailscale_unavailable_egress_lockdown',
@@ -100,6 +106,7 @@ function isRetryableCode(code: ZipboxErrorCode): boolean {
     case 'not_found':
     case 'insufficient_credits':
     case 'conflict':
+    case 'machine_limit_reached':
     case 'box_key_changed':
     case 'tailnet_not_connected':
     case 'tailscale_unavailable_egress_lockdown':

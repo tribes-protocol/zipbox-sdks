@@ -64,7 +64,9 @@ also takes `private` (a box that is never public); it then returns once the box 
 because a private box is not ready until it joins a tailnet. `getOrCreate` takes every
 `create` option except the name and applies them only when it creates the box: a box that
 already has the name is returned as it is (a different tier is not an error and is not
-resized).
+resized). An account holds 250 machine names and a deleted box keeps its name, so reuse a
+fixed pool of names with get-or-create rather than a fresh name per job; a new name past the
+limit raises `machine_limit_reached` ([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
 
 `tailscale.connect` seals the auth key on the caller's machine to the box's own
 `agentPublicKey` (P-256 ECDH → HKDF-SHA256 → AES-256-GCM, the same envelope the dashboard
@@ -75,7 +77,7 @@ fixed-key vector in `conformance/vectors/box_envelope.json` byte for byte.
 
 Every failure is one error type carrying `code` (`invalid_request`, `unauthorized`,
 `forbidden`, `not_found`, `insufficient_credits`, `conflict`, `rate_limited`,
-`box_not_running`, `unavailable`, `box_key_changed`, `tailnet_not_connected`,
+`box_not_running`, `unavailable`, `machine_limit_reached`, `box_key_changed`, `tailnet_not_connected`,
 `tailscale_unavailable_egress_lockdown`, `tailscale_requires_update`, `box_private_unreachable`), `status`, `message`, `requestId`, `retryable`,
 `retryAfterMs` and `docsUrl` (`https://zipbox.ai/docs/errors#<code>`). A command that
 exits non-zero is a result, never an error.

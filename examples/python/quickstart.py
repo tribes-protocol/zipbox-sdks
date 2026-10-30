@@ -3,6 +3,10 @@
 from zipbox import Zipbox
 
 zb = Zipbox()  # ZIPBOX_API_KEY
+# Reuse names, never mint one per job: an account holds 250 machine names and a deleted
+# box keeps its name. For a fleet, keep a fixed pool and get-or-create from it:
+#   worker = zb.sandboxes.get_or_create(f"worker-{i % 50}", tier="s")
+# https://zipbox.ai/docs/machine-limit
 box = zb.sandboxes.get_or_create("quickstart", tier="s")
 print(box.exec("echo hello from $(hostname)").stdout, end="")
 box.files.write("hello.txt", "hi from the SDK\n")

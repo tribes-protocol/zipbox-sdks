@@ -686,12 +686,13 @@ mod tests {
     // Nothing listens: the connect is refused, which is what "unreachable" means here.
     #[tokio::test]
     async fn a_refused_connection_is_unreachable() {
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        // Port 1 (tcpmux): privileged, so no test server in this run can be listening on
+        // it, and the connect is refused. A port freed with `bind(0)` + `drop` is NOT
+        // safe: the OS hands it straight back to the next `bind(0)`, so a mock server in
+        // a concurrent test took it and answered this box's calls (CI, 2026-10-29).
         let zb = Zipbox::new("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT").unwrap();
         let access = BoxAccess {
-            base_url: format!("http://127.0.0.1:{port}"),
+            base_url: "http://127.0.0.1:1".into(),
             token: "bt".into(),
             name: "build".into(),
             private: true,

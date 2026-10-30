@@ -325,7 +325,14 @@ impl Sandbox {
             .ok()
             .and_then(|u| {
                 u.host_str()
-                    .map(|host| host.strip_prefix("box--").unwrap_or(host).to_string())
+                    // `box--` on a public box, `box.` on a private one (it serves
+                    // itself on box.<apex>); only one prefix is ever dropped.
+                    .map(|host| {
+                        host.strip_prefix("box--")
+                            .or_else(|| host.strip_prefix("box."))
+                            .unwrap_or(host)
+                            .to_string()
+                    })
             })
             .ok_or_else(|| Error::new(ErrorCode::Unavailable, "box origin has no host"))
     }
@@ -567,6 +574,8 @@ mod tests {
         for (origin, apex) in [
             ("https://box--demo.zbox.sh", "demo.zbox.sh"),
             ("https://box--box--demo.zbox.sh", "box--demo.zbox.sh"),
+            ("https://box.demo.zbox.sh", "demo.zbox.sh"),
+            ("https://box--box.zbox.sh", "box.zbox.sh"),
             ("https://demo.zbox.sh", "demo.zbox.sh"),
             ("https://mailbox--demo.zbox.sh", "mailbox--demo.zbox.sh"),
             ("http://127.0.0.1:9100", "127.0.0.1"),

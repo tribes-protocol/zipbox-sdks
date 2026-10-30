@@ -24,6 +24,10 @@ const (
 	CodeRateLimited         ErrorCode = "rate_limited"
 	CodeBoxNotRunning       ErrorCode = "box_not_running"
 	CodeUnavailable         ErrorCode = "unavailable"
+	// CodeMachineLimitReached: the account holds 250 machine names (a deleted box
+	// keeps its name); reuse one instead of creating a new one. Never retried. See
+	// https://zipbox.ai/docs/machine-limit.
+	CodeMachineLimitReached ErrorCode = "machine_limit_reached"
 	// CodeBoxKeyChanged: the box's key changed between reading it and sending a
 	// sealed credential (a claim re-mints it). Tailscale.Connect re-seals once.
 	CodeBoxKeyChanged ErrorCode = "box_key_changed"

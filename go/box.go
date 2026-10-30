@@ -257,7 +257,9 @@ func (b *Box) json(ctx context.Context, method, boxPath string, query url.Values
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// host is the custom preview apex, without the platform transport prefix or port.
+// host is the custom preview apex, without the transport prefix or port: `box--` on
+// a public box (box--demo.zbox.sh), `box.` on a private one (box.demo.zbox.sh). Only
+// one prefix is ever dropped.
 func (b *Box) host(ctx context.Context) (string, error) {
 	creds, err := b.client.boxCreds(ctx, b.ID, false)
 	if err != nil {
@@ -267,7 +269,13 @@ func (b *Box) host(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimPrefix(u.Hostname(), "box--"), nil
+	host := u.Hostname()
+	for _, prefix := range []string{"box--", "box."} {
+		if strings.HasPrefix(host, prefix) {
+			return strings.TrimPrefix(host, prefix), nil
+		}
+	}
+	return host, nil
 }
 
 // WorkspaceDir is where relative paths resolve and commands start by default.

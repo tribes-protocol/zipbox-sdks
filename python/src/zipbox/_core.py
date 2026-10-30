@@ -45,7 +45,7 @@ from zipbox._models import (
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
@@ -273,8 +273,16 @@ class BoxTarget:
 
     @property
     def host(self) -> str:
-        """The custom preview apex, without the platform transport prefix or port."""
-        return (urlparse(self.base_url).hostname or "").removeprefix("box--")
+        """The custom preview apex, without the transport prefix or port.
+
+        The prefix is `box--` on a public box (`box--demo.zbox.sh`) and `box.` on a
+        private one (`box.demo.zbox.sh`); only one is ever dropped.
+        """
+        host = urlparse(self.base_url).hostname or ""
+        for prefix in ("box--", "box."):
+            if host.startswith(prefix):
+                return host[len(prefix) :]
+        return host
 
 
 class Core:

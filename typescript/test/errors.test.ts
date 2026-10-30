@@ -51,4 +51,26 @@ describe('errors', () => {
   it('is an Error', () => {
     expect(new ZipboxError({ code: 'conflict', message: 'x' })).toBeInstanceOf(Error)
   })
+
+  it('keeps machine_limit_reached as its own code (never forbidden), not retryable', () => {
+    const error = errorFromResponse({
+      status: 403,
+      headers: new Headers(),
+      body: {
+        error: {
+          code: 'machine_limit_reached',
+          message: "You've reached this account's limit of 250 machines.",
+          requestId: 'r1',
+          retryable: false
+        }
+      }
+    })
+    expect(error).toMatchObject({
+      code: 'machine_limit_reached',
+      status: 403,
+      retryable: false,
+      message: "You've reached this account's limit of 250 machines."
+    })
+    expect(error.docsUrl).toBe('https://zipbox.ai/docs/errors#machine_limit_reached')
+  })
 })

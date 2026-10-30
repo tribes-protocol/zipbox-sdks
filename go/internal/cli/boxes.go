@@ -28,7 +28,11 @@ func (a *app) sandboxCommand() *cobra.Command {
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a box and wait until it is ready",
+		Long: "Create a box and wait until it is ready. An account holds 250 machine names and a\n" +
+			"deleted box keeps its name, so reuse names: creating the name of a box you deleted brings\n" +
+			"that name back instead of using up a new one (https://zipbox.ai/docs/machine-limit).",
 		Example: "  zipbox sandbox create --name demo\n" +
+			"  zipbox sandbox create --name worker-07   # a deleted worker-07 comes back under its name\n" +
 			"  zipbox sandbox create --name build --private --tailscale-auth-key-file tskey.txt",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

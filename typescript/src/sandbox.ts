@@ -657,10 +657,13 @@ export class Sandbox {
     return deleteBox(this.ctx, this.id, options.archive, options.signal)
   }
 
-  /** @internal The custom preview apex, without the platform transport prefix. */
+  /**
+   * @internal The custom preview apex, without the transport prefix: `box--` on a
+   * public box (`box--demo.zbox.sh`), `box.` on a private one (`box.demo.zbox.sh`).
+   */
   async host(options: CallOptions = {}): Promise<string> {
     const box = await this.ctx.boxes.resolve(this.id, options.signal)
-    return new URL(box.baseUrl).hostname.replace(/^box--/, '')
+    return new URL(box.baseUrl).hostname.replace(/^box(?:--|\.)/, '')
   }
 
   /** @internal Run a command the SDK itself issues; a non-zero exit is an error. */

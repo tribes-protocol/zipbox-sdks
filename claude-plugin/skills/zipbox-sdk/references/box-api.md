@@ -29,7 +29,7 @@ The box token is derived from your key and this one box. It has **no expiry and 
 
 A box that is not `ready` (stopped, starting) has no `baseUrl`; the SDKs raise `box_not_running` without calling it.
 
-**Private boxes.** A box with `privateMode: true` serves this API only to devices on your tailnet, at the same `baseUrl`. The SDKs probe `<baseUrl>/challenge` with a 5-second deadline before their first call; off the tailnet they raise `box_private_unreachable` instead of hanging ([Tailscale](https://zipbox.ai/docs/tailscale.md#reaching-a-private-box)).
+**Private boxes.** A box with `privateMode: true` serves this API itself, only to devices on your tailnet, at `https://box.<name>.zbox.sh` - the `baseUrl` its row carries while it is private. The SDKs probe `<baseUrl>/challenge` with a 5-second deadline before their first call; off the tailnet they raise `box_private_unreachable` instead of hanging ([Tailscale](https://zipbox.ai/docs/tailscale.md#reaching-a-private-box)).
 
 ## Exec
 

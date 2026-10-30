@@ -54,13 +54,14 @@ fn client(base: &str) -> Zipbox {
 // must fail with a clear error instead of hanging.
 #[tokio::test]
 async fn a_private_box_off_the_tailnet_fails_fast() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    // Port 1 (tcpmux): privileged, so no test server in this run can be listening on
+    // it, and the connect is refused. A port freed with `bind(0)` + `drop` is NOT
+    // safe: the OS hands it straight back to the next `bind(0)`, so a mock server in
+    // a concurrent test took it and answered this box's calls (CI, 2026-10-29).
     let (api, listener) = MockServer::bind().await;
     api.state.lock().unwrap().exchanges = vec![json!({
         "request": { "method": "GET", "path": "/sandbox/sbx_1" },
-        "response": { "status": 200, "body": private_detail(&format!("http://127.0.0.1:{port}")) }
+        "response": { "status": 200, "body": private_detail("http://127.0.0.1:1") }
     })];
     api.serve(listener);
     let err = tokio::time::timeout(

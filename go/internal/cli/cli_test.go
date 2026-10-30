@@ -43,6 +43,10 @@ func fakeZipbox(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/sandbox/sbx_1", auth(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"id":"sbx_1","name":"demo","status":"running","ipv6":"2a01::1","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":true,"baseUrl":%q,"boxToken":"bt_cli"}`, server.URL)
 	}))
+	mux.HandleFunc("/sandbox/identity/claim", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		io.WriteString(w, `{"error":{"code":"machine_limit_reached","message":"You've reached this account's limit of 250 machines.","requestId":"r","retryable":false,"docsUrl":"https://zipbox.ai/docs/errors#machine_limit_reached"}}`)
+	}))
 	mux.HandleFunc("/account/whoami", auth(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"userId":"did:privy:u1","apiKey":{"id":"k1","name":"laptop","kind":"cli","last4":"TTTT","createdAt":"2026-10-19T00:00:00Z"}}`)
 	}))
@@ -160,6 +164,21 @@ func TestErrorsPrintDocsURL(t *testing.T) {
 	}
 	if !strings.Contains(h.err.String(), "bad key (unauthorized)") || !strings.Contains(h.err.String(), "https://zipbox.ai/docs/errors#unauthorized") {
 		t.Fatalf("stderr %q", h.err)
+	}
+}
+
+// A create with a NEW name at the account's machine limit prints the reuse remedy
+// and its docs line, and exits 1 without retrying.
+func TestCreateAtMachineLimitPrintsRemedy(t *testing.T) {
+	server := fakeZipbox(t)
+	h := newHarness(t, server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("sandbox", "create", "--name", "worker-251"); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	stderr := h.err.String()
+	if !strings.Contains(stderr, "limit of 250 machines. (machine_limit_reached)") || !strings.Contains(stderr, "docs: https://zipbox.ai/docs/errors#machine_limit_reached") {
+		t.Fatalf("stderr %q", stderr)
 	}
 }
 

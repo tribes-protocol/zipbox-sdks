@@ -62,6 +62,10 @@ const handle = zb.sandbox(id) // no network call
 `create`, `get` and `getOrCreate` return a `Sandbox`: the row (`box.info`, `box.status`,
 `box.name`, `box.baseUrl`, …) plus everything below.
 
+An account holds 250 machine names, and a deleted box keeps its name: reuse a fixed pool of
+names with `getOrCreate` instead of a fresh name per job. A new name past the limit raises
+`machine_limit_reached` ([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
+
 ## Commands
 
 ```ts
@@ -163,7 +167,7 @@ await zb.account.usage()
 
 Every failure is a `ZipboxError` with `code` (`invalid_request`, `unauthorized`,
 `forbidden`, `not_found`, `insufficient_credits`, `conflict`, `rate_limited`,
-`box_not_running`, `unavailable`, `box_key_changed`, `tailnet_not_connected`,
+`box_not_running`, `unavailable`, `machine_limit_reached`, `box_key_changed`, `tailnet_not_connected`,
 `tailscale_unavailable_egress_lockdown`, `tailscale_requires_update`, `box_private_unreachable`), `status`,
 `requestId`, `retryable`, `retryAfterMs` and `docsUrl`.
 

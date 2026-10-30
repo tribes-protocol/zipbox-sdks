@@ -79,10 +79,13 @@ ready as usual.
 
 Every failure raises `ZipboxError` with `code` (`invalid_request`, `unauthorized`,
 `forbidden`, `not_found`, `insufficient_credits`, `conflict`, `rate_limited`,
-`box_not_running`, `unavailable`, `box_key_changed`, `tailnet_not_connected`,
+`box_not_running`, `unavailable`, `machine_limit_reached`, `box_key_changed`, `tailnet_not_connected`,
 `tailscale_unavailable_egress_lockdown`, `tailscale_requires_update`, `box_private_unreachable`), `status`, `message`, `request_id`, `retryable`,
 `retry_after_ms` and `docs_url`. `rate_limited` and `unavailable` are retried
-automatically on reads and on `create` (`max_retries`, default 3).
+automatically on reads and on `create` (`max_retries`, default 3). An account holds 250
+machine names, and a deleted box keeps its name: reuse a fixed pool of names with
+`get_or_create` instead of a fresh name per job. A new name past the limit raises
+`machine_limit_reached` ([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
 
 ## Configuration
 

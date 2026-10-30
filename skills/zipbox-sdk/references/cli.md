@@ -52,6 +52,8 @@ zipbox login
 
 `<box>` is a box id or its name. `sandbox` also answers to `box`; `sandbox list` to `sandbox ls`. `delete` asks for confirmation unless you pass `--yes` (`-y`).
 
+An account holds 250 machine names and a deleted box keeps its name, so reuse names: look the box up with `zipbox sandbox get worker-07` and run `zipbox sandbox create --name worker-07` only when there is none; `create` with the name of a box you deleted brings that name back. A new name past the limit prints `machine_limit_reached` with its docs link ([Machine limit](https://zipbox.ai/docs/machine-limit.md)).
+
 ## Run commands
 
 ```sh

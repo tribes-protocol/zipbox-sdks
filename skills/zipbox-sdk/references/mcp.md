@@ -82,6 +82,8 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 
 **Output cap.** A tool result shows at most 32 KiB of output. `execute_command` returns the command id with its result; `get_command_output` reads the rest from the box, which keeps everything (64 MiB per stream).
 
+**Reuse names.** An account holds 250 machine names and a deleted box keeps its name. `create_sandbox` with a new name past that answers `machine_limit_reached`; a model should use a box it already has (`list_sandboxes`) or the name of one it deleted, which `create_sandbox` brings back. See [Machine limit](https://zipbox.ai/docs/machine-limit.md).
+
 **Nothing stops on a clock.** A command `execute_command` starts has no deadline unless you pass `timeoutMs`; use `start_background_command` for dev servers and watchers.
 
 ## Private boxes and Tailscale

@@ -101,8 +101,9 @@ in milliseconds (the delays are configuration, never skipped logic).
 | `tailscale.connect`      | `id`, `authKey`                                          | `GET /sandbox/:id` for `agentPublicKey`, seal locally, `PUT /sandbox/:id/tailscale` `{envelope, agentPublicKey}`                                                                                             |
 | `tailscale.disconnect`   | `id`                                                     | `DELETE /sandbox/:id/tailscale`                                                                                                                                                                              |
 
-`sandboxes.create` also takes `private?`. `sandbox.*` and `tailscale.*` ops run on the handle
-`zb.sandbox(id)`.
+`sandboxes.create` also takes `private?`. A `403 machine_limit_reached` from `sandboxes.create`
+(the account already holds 250 machine names) raises that code, never `forbidden`, and is not
+retried. `sandbox.*` and `tailscale.*` ops run on the handle `zb.sandbox(id)`.
 
 ## Client rules every SDK implements
 

@@ -131,6 +131,20 @@ func TestLegacyBoxErrorMapsByStatus(t *testing.T) {
 	}
 }
 
+func TestMachineLimitCodePassesThroughNotRetryable(t *testing.T) {
+	resp := &http.Response{StatusCode: 403, Header: http.Header{}}
+	zerr := errorFromResponse(resp, []byte(`{"error":{"code":"machine_limit_reached","message":"limit of 250 machines","requestId":"r1"}}`))
+	if zerr.Code != CodeMachineLimitReached || zerr.Status != 403 || zerr.Retryable || zerr.Message != "limit of 250 machines" {
+		t.Fatalf("%+v", zerr)
+	}
+	if zerr.DocsURL != "https://zipbox.ai/docs/errors#machine_limit_reached" {
+		t.Fatalf("docs: %q", zerr.DocsURL)
+	}
+	if !IsCode(zerr, CodeMachineLimitReached) {
+		t.Fatal("IsCode")
+	}
+}
+
 // detailHandler answers GET /sandbox/sbx_1 with a ready box pointing at base.
 func detailHandler(base *string, token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -507,9 +521,12 @@ func TestPreviewApexPreservesTransportOrigin(t *testing.T) {
 	cases := map[string]string{
 		"https://box--demo.zbox.sh":      "demo.zbox.sh",
 		"https://box--box--demo.zbox.sh": "box--demo.zbox.sh",
-		"https://demo.zbox.sh":           "demo.zbox.sh",
-		"https://mailbox--demo.zbox.sh":  "mailbox--demo.zbox.sh",
-		"http://127.0.0.1:9100":          "127.0.0.1",
+		// A private box serves itself on box.<apex>; only one prefix is ever dropped.
+		"https://box.demo.zbox.sh":      "demo.zbox.sh",
+		"https://box--box.zbox.sh":      "box.zbox.sh",
+		"https://demo.zbox.sh":          "demo.zbox.sh",
+		"https://mailbox--demo.zbox.sh": "mailbox--demo.zbox.sh",
+		"http://127.0.0.1:9100":         "127.0.0.1",
 	}
 	for origin, apex := range cases {
 		t.Run(origin, func(t *testing.T) {

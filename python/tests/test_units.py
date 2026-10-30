@@ -106,6 +106,23 @@ def test_envelope_and_legacy_bodies() -> None:
     assert html.code == "unavailable" and html.retryable
 
 
+def test_machine_limit_code_is_kept_and_not_retried() -> None:
+    error = error_from_response(
+        403,
+        {},
+        b'{"error":{"code":"machine_limit_reached","message":"limit of 250 machines",'
+        b'"requestId":"r1","retryable":false,'
+        b'"docsUrl":"https://zipbox.ai/docs/errors#machine_limit_reached"}}',
+    )
+    assert (error.code, error.status, error.message) == (
+        "machine_limit_reached",
+        403,
+        "limit of 250 machines",
+    )
+    assert not error.retryable
+    assert error.docs_url == "https://zipbox.ai/docs/errors#machine_limit_reached"
+
+
 def test_missing_key_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ZIPBOX_API_KEY", raising=False)
     with pytest.raises(ZipboxError) as caught:
@@ -226,6 +243,9 @@ def test_a_second_401_says_the_box_has_not_received_a_live_key() -> None:
     [
         ("https://box--demo.zbox.sh", "demo.zbox.sh"),
         ("https://box--box--demo.zbox.sh", "box--demo.zbox.sh"),
+        # A private box serves itself on box.<apex>; only one prefix is ever dropped.
+        ("https://box.demo.zbox.sh", "demo.zbox.sh"),
+        ("https://box--box.zbox.sh", "box.zbox.sh"),
         ("https://demo.zbox.sh", "demo.zbox.sh"),
         ("https://mailbox--demo.zbox.sh", "mailbox--demo.zbox.sh"),
         ("http://127.0.0.1:9100", "127.0.0.1"),

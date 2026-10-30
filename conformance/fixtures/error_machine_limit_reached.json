@@ -1,0 +1,48 @@
+{
+  "name": "error_machine_limit_reached",
+  "description": "A create with a NEW name at the account's machine limit answers 403 machine_limit_reached; it keeps its own code (never forbidden) and is not retried.",
+  "call": {
+    "op": "sandboxes.create",
+    "args": {
+      "name": "worker-251",
+      "tier": "s"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "worker-251",
+          "tier": "s"
+        }
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "error": {
+            "code": "machine_limit_reached",
+            "message": "You've reached this account's limit of 250 machines. Every machine name you create — including deleted ones — stays yours, so boot one of your existing names instead of creating a new one. How to keep a pool of names and reuse them: https://zipbox.ai/docs/machine-limit. Need more than 250? Email support@tribes.xyz.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#machine_limit_reached"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "machine_limit_reached",
+      "status": 403,
+      "docsUrl": "https://zipbox.ai/docs/errors#machine_limit_reached"
+    }
+  }
+}

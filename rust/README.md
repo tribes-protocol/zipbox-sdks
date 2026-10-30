@@ -39,6 +39,10 @@ async fn main() -> zipbox::Result<()> {
 - A command that exits non-zero is a result (`ExecResult::exit_code`), never an error.
 - Every failure is a `zipbox::Error` with a stable `code` (`not_found`, `rate_limited`, …)
   and a `docs_url` (`https://zipbox.ai/docs/errors#<code>`).
+- An account holds 250 machine names, and a deleted box keeps its name: reuse a fixed pool
+  of names with `get_or_create_with` instead of a fresh name per job. A new name past the
+  limit returns `ErrorCode::MachineLimitReached`
+  ([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
 - Relative paths resolve against `/root/workspace`.
 - No request or command has a deadline unless you set one (`ExecOptions::timeout_ms`).
 - A `Pty` reconnects by itself, forever, with backoff, and re-attaches its session.

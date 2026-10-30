@@ -27,6 +27,10 @@ pub enum ErrorCode {
     BoxNotRunning,
     /// The service is temporarily unavailable (5xx, network failure).
     Unavailable,
+    /// The account holds 250 machine names (a deleted box keeps its name): reuse one
+    /// instead of creating a new one (403). Never retried. See
+    /// <https://zipbox.ai/docs/machine-limit>.
+    MachineLimitReached,
     /// The box's key changed (a claim re-minted it) between reading it and sealing
     /// to it. [`crate::Tailscale::connect`] re-reads and re-seals once by itself.
     BoxKeyChanged,
@@ -53,6 +57,7 @@ impl ErrorCode {
             ErrorCode::RateLimited => "rate_limited",
             ErrorCode::BoxNotRunning => "box_not_running",
             ErrorCode::Unavailable => "unavailable",
+            ErrorCode::MachineLimitReached => "machine_limit_reached",
             ErrorCode::BoxKeyChanged => "box_key_changed",
             ErrorCode::TailnetNotConnected => "tailnet_not_connected",
             ErrorCode::TailscaleUnavailableEgressLockdown => {
@@ -74,6 +79,7 @@ impl ErrorCode {
             "conflict" => ErrorCode::Conflict,
             "rate_limited" => ErrorCode::RateLimited,
             "box_not_running" => ErrorCode::BoxNotRunning,
+            "machine_limit_reached" => ErrorCode::MachineLimitReached,
             "box_key_changed" => ErrorCode::BoxKeyChanged,
             "tailnet_not_connected" => ErrorCode::TailnetNotConnected,
             "tailscale_unavailable_egress_lockdown" => {
@@ -280,5 +286,30 @@ mod tests {
             assert_eq!(ErrorCode::parse(code.as_str()), code);
             assert!(!code.is_retryable());
         }
+    }
+
+    #[test]
+    fn machine_limit_code_is_kept_and_not_retried() {
+        assert_eq!(
+            ErrorCode::parse("machine_limit_reached"),
+            ErrorCode::MachineLimitReached
+        );
+        assert_eq!(
+            ErrorCode::MachineLimitReached.as_str(),
+            "machine_limit_reached"
+        );
+        assert!(!ErrorCode::MachineLimitReached.is_retryable());
+        let e = Error::from_response(
+            403,
+            None,
+            br#"{"error":{"code":"machine_limit_reached","message":"limit of 250 machines","requestId":"r"}}"#,
+        );
+        assert_eq!(e.code, ErrorCode::MachineLimitReached);
+        assert_eq!(e.status, Some(403));
+        assert!(!e.retryable);
+        assert_eq!(
+            e.docs_url,
+            "https://zipbox.ai/docs/errors#machine_limit_reached"
+        );
     }
 }

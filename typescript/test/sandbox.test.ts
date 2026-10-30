@@ -5,6 +5,9 @@ import { Zipbox } from '../src/index.js'
 it.each([
   ['https://box--demo.zbox.sh', 'demo.zbox.sh'],
   ['https://box--box--demo.zbox.sh', 'box--demo.zbox.sh'],
+  // A private box serves itself on box.<apex>; only one prefix is ever dropped.
+  ['https://box.demo.zbox.sh', 'demo.zbox.sh'],
+  ['https://box--box.zbox.sh', 'box.zbox.sh'],
   ['https://demo.zbox.sh', 'demo.zbox.sh'],
   ['https://mailbox--demo.zbox.sh', 'mailbox--demo.zbox.sh'],
   ['http://127.0.0.1:9100', '127.0.0.1']

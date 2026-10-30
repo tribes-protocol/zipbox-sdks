@@ -66,7 +66,10 @@ A runnable version is in [`../examples/go/quickstart`](../examples/go/quickstart
 Every failure is a `*zipbox.Error` (`errors.As`) carrying `Code`, `Status`,
 `Message`, `RequestID`, `Retryable`, `RetryAfter` and `DocsURL`. A command that exits
 non-zero is a result (`ExecResult.ExitCode`), never an error. No call has a default
-deadline: bound one with a `context`.
+deadline: bound one with a `context`. An account holds 250 machine names, and a deleted
+box keeps its name: reuse a fixed pool of names with `GetOrCreate` instead of a fresh name
+per job. A new name past the limit returns `CodeMachineLimitReached`
+([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
 
 ## CLI
 

@@ -17,6 +17,9 @@ ErrorCode = Literal[
     "rate_limited",
     "box_not_running",
     "unavailable",
+    # The account holds 250 machine names (a deleted box keeps its name); reuse one
+    # instead of creating a new one. See https://zipbox.ai/docs/machine-limit.
+    "machine_limit_reached",
     "box_key_changed",
     "tailnet_not_connected",
     "tailscale_unavailable_egress_lockdown",
@@ -97,6 +100,7 @@ _CODES: frozenset[str] = frozenset(
         "rate_limited",
         "box_not_running",
         "unavailable",
+        "machine_limit_reached",
         "box_key_changed",
         "tailnet_not_connected",
         "tailscale_unavailable_egress_lockdown",

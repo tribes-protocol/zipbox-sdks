@@ -249,11 +249,11 @@ GitHub in zipbox.ai Settings: `box.exec("git clone https://github.com/org/repo")
 | Output kept per command stream      | 64 MiB, then a `gap` event                      |
 | Output kept per box                 | 512 MiB, oldest finished evicted first          |
 | MCP tool result                     | 32 KiB shown; the rest via `get_command_output` |
+| Machine names per account           | 250 (reuse names; deleted boxes keep theirs)    |
 | Box lifetime, command duration, PTY | Unlimited                                       |
 
-Not in this version: named snapshots/templates (reuse a box by name instead), volumes,
-LSP, outbound network policy, per-key scopes, memory pause/resume, file watch,
-private previews.
+Not in this version: named snapshots/templates (reuse a box by name instead), volumes, LSP,
+outbound network policy, per-key scopes, memory pause/resume, file watch, private previews.
 
 ## Errors
 
@@ -269,6 +269,7 @@ Every error carries a `code`; branch on it, not on the message:
 | `box_not_running`             | Start the box, then retry                              |
 | `rate_limited`, `unavailable` | Wait (`retry_after_ms`) and retry                      |
 | `invalid_request`             | Fix the request                                        |
+| `machine_limit_reached`       | Reuse one of the account's existing names              |
 
 Each error's `docs_url` / `docsUrl` points at the matching section of
 `references/errors.md`.
@@ -290,6 +291,7 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | Connect an MCP client, the tool list                   | `references/mcp.md`, `references/oauth.md`                                                           |
 | Set up Claude Code, Claude, Codex or Cursor            | `references/integrations.md`                                                                         |
 | Framework integrations (AI SDK, LangChain, Agents SDK) | `references/examples.md`                                                                             |
+| Stay under the machine limit / reuse names             | `references/machine-limit.md`                                                                        |
 | Decode an error or a limit                             | `references/errors.md`                                                                               |
 | See everything Zipbox can and cannot do                | `references/api.md`                                                                                  |
 

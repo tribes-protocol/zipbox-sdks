@@ -88,7 +88,7 @@ A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved wit
 
 It takes every `create` option except the name (`tier`, `sshPublicKey`, `mailbox`, `private`) in every SDK, and uses them only when it creates the box. A box that already has the name is returned as it is, even when it differs from the options (another tier, not private): that is not an error, and nothing is resized. Check its tier and call `setTier` if it matters.
 
-Reusing a name also reuses its mailbox and wallets. A recurring job should claim one name and keep it, not create a box per run: every fresh name reserves an address, and every mailbox you then use is kept for you.
+Reusing a name also reuses its mailbox and wallets. A recurring job should claim one name and keep it, not create a box per run: every fresh name reserves an address, and every mailbox you then use is kept for you. An account holds 250 names; see [Machine limit](https://zipbox.ai/docs/machine-limit.md).
 
 #### TypeScript
 

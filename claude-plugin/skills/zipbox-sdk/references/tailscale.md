@@ -282,15 +282,15 @@ curl -X PUT https://api.tribes.xyz/sandbox/$ID/private \
   -H 'Content-Type: application/json' -d '{"enabled":true}'
 ```
 
-Turning private on needs the box `connected` with a tailnet IPv4; otherwise the answer is `409 tailnet_not_connected`. The switch runs in an order that never locks you out:
+Turning private on needs the box `connected` with a tailnet IPv4; otherwise the answer is `409 tailnet_not_connected`. A box whose ZipOS predates private boxes serving their own names is refused with `409 tailscale_requires_update` until you accept its ZipOS update; the dashboard shows **Update ZipOS to go private** in place of the switch. The switch runs in an order that never locks you out:
 
-1. The box gets its own HTTPS certificate for its names, and starts serving them on its own port 443.
+1. The box starts serving its terminal, IDE, desktop and tunnel on its own port 443, at its own names `box.demo.zbox.sh`, `ide.demo.zbox.sh`, `vnc.demo.zbox.sh` and `tunnel.demo.zbox.sh`, with the `*.demo.zbox.sh` certificate it already holds. No new certificate is ordered; a box that has none yet gets one first.
 2. Once it reports those names ready, its public DNS records point at its tailnet addresses (`A` → the tailnet IPv4, `AAAA` → the tailnet IPv6, TTL 60).
 3. Only then does the host drop the box's public routes and close its public IPv6 to everything but Tailscale's own encrypted traffic.
 
 Until step 3 the box is still public; `privateMode` is true from the start, and the dashboard shows each stage. Turning private off runs the same steps backwards.
 
-The same URLs keep working on your tailnet devices, so nothing in your code or bookmarks changes. A `100.x` address means nothing off your tailnet, so publishing it in public DNS reveals nothing usable. If your router's DNS drops answers that point at private addresses, turn on MagicDNS on your device.
+Its own URLs (`demo.zbox.sh`, previews, custom names, `ssh root@demo.zbox.sh`) keep working on your tailnet devices. The Box API moves to `https://box.demo.zbox.sh` while the box is private: `baseUrl` on the box row says so, and the SDKs and the CLI follow it. The `box--demo.zbox.sh` names stay with the host, which no longer routes the box. A `100.x` address means nothing off your tailnet, so publishing it in public DNS reveals nothing usable. If your router's DNS drops answers that point at private addresses, turn on MagicDNS on your device.
 
 **If Tailscale drops, a private box stays private.** It does not fall back to public. To recover, send a new key with `connect`: it travels over Zipbox's own channel to the host, never the internet, so it works while the box is unreachable. The dashboard's recovery card does the same.
 
@@ -352,7 +352,7 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
 # seal, and PUT /sandbox/:id/tailscale
 ```
 
-The box is reachable from your tailnet once it has joined and its certificate is issued, usually within a minute.
+The box is reachable from your tailnet once it has joined and its `*.demo.zbox.sh` certificate is issued, usually within a minute.
 
 ## Reaching a private box
 

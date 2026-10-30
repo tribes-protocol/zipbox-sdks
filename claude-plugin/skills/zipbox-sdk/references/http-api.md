@@ -67,7 +67,7 @@ Other fields are internal and may change without notice.
 
 - `ready` - the box is running and serving you, and accepts every live key's token. Only then can you call it.
 - `httpsReady` - `baseUrl` completes a TLS handshake with a trusted certificate. A box never waits for its certificate to boot, so a freshly named or restarted box can be `ready` a few seconds to minutes before this turns true; until then a request fails in the TLS handshake, before anything is sent, and is safe to retry. The SDKs retry it for you.
-- `baseUrl` - the box's HTTPS origin, e.g. `https://box--demo.zbox.sh`. Null until `ready`. Previews live under the name, not this origin: `https://<label>.demo.zbox.sh`.
+- `baseUrl` - the box's HTTPS origin, e.g. `https://box--demo.zbox.sh`, or `https://box.demo.zbox.sh` while the box is [private](https://zipbox.ai/docs/tailscale.md#make-a-box-private). Null until `ready`. Previews live under the name, not this origin: `https://<label>.demo.zbox.sh`.
 - `boxToken` - the bearer the box accepts for **this key on this box**. Null until `ready`, and always null when the dashboard calls the route.
 
 ```sh
@@ -99,7 +99,7 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
   -d '{"name":"demo","tier":"s"}'
 ```
 
-The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) until `ready` is true. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`.
+The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) until `ready` is true. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`. A name the account has never used, once it already holds 250, answers `403 machine_limit_reached`; claim one of its existing names instead (the name of a box you deleted boots again under the same subdomain, mailbox and wallets), see [Machine limit](https://zipbox.ai/docs/machine-limit.md).
 
 A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved with the name, and the mailbox itself is created the first time the box or its owner uses mail: the first `tribes-email` call from inside the box, the first time the box is opened in the dashboard, or the first `/sandbox/:id/email` request. Pass `"mailbox": true` to create it at claim time instead, for a box that must be able to receive mail before anything on it has asked. Either way the mailbox belongs to the name, not the box: reusing a name (`getOrCreate`) reuses its mailbox, so prefer one long-lived name per recurring job over a fresh box per run.
 
@@ -130,7 +130,7 @@ The how-to, with samples in every language, is [Tailscale and private boxes](htt
 | 409    | `box_key_changed`                       | `agentPublicKey` is not the box's current key: read it again, re-seal, send once more |
 | 409    | `tailscale_unavailable_egress_lockdown` | The box has company egress lockdown, which Tailscale cannot pass                      |
 | 409    | `tailnet_not_connected`                 | `PUT …/private` `{enabled: true}` while the box is not connected with a tailnet IPv4  |
-| 409    | `tailscale_requires_update`             | The box's ZipOS predates Tailscale (`tailscaleSupported: false`): update it first     |
+| 409    | `tailscale_requires_update`             | The box's ZipOS predates Tailscale or private mode: update it first                   |
 
 ## Idempotency
 

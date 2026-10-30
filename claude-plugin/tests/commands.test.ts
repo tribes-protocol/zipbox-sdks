@@ -57,6 +57,28 @@ test('/zipbox preview uses the custom apex of a platform transport host', async 
   ])
 })
 
+// A private box serves itself on its own box.<apex>; previews still live under the apex.
+test('/zipbox preview uses the custom apex of a private box own host', async ($, on) => {
+  const execs: unknown[] = []
+  fakeZipbox(on, {
+    boxOrigin: 'https://box.dev.zbox.sh',
+    box: (_method, path, body) => {
+      if (path === '/exec') execs.push(body.argv)
+      return undefined
+    }
+  })
+  await start($)
+  await zipbox($, 'use dev')
+  expect((await zipbox($, 'preview 3000')).text).toContain('https://p3000.dev.zbox.sh')
+  expect(execs).toContainEqual([
+    'tribes-caddy',
+    'add',
+    'p3000.dev.zbox.sh',
+    '127.0.0.1:3000',
+    '--no-wait'
+  ])
+})
+
 test('/zipbox save copies a box file into this folder', async ($, on) => {
   const zb = fakeZipbox(on)
   await start($)

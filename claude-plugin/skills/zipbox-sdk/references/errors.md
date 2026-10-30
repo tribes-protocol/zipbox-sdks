@@ -6,7 +6,7 @@
 
 Every error code with its cause and fix, HTTP statuses, box-side and client-side errors, retry rules, limits, and what is not in this version.
 
-Every error a public caller sees - control plane, box, SDK, CLI or MCP - resolves to one of fourteen codes. Each error's `docsUrl` points at the section below named after its code.
+Every error a public caller sees - control plane, box, SDK, CLI or MCP - resolves to one of fifteen codes. Each error's `docsUrl` points at the section below named after its code.
 
 ## Nothing times out on a clock
 
@@ -20,6 +20,7 @@ No box, command, PTY, preview or token ends because time passed. There is no idl
 | 401    | `unauthorized`                          | No - fix the credential (once on a box: re-fetch the token) |
 | 402    | `insufficient_credits`                  | No - add credit                                             |
 | 403    | `forbidden`                             | No                                                          |
+| 403    | `machine_limit_reached`                 | No - reuse one of your existing machine names               |
 | 404    | `not_found`                             | No                                                          |
 | 409    | `conflict`                              | No - the box is in the wrong state; read it and act on that |
 | 409    | `box_key_changed`                       | Once - re-read `agentPublicKey`, re-seal, send again        |
@@ -67,6 +68,12 @@ Creating, starting or resizing a box needs a credit balance above $0. Add credit
 
 The key is not allowed to do this: key management, OAuth consent, buying credit, the billing portal, auto top-up, signup grants, GitHub connect and provider-key writes are dashboard-only. A request with an `Origin` header (a browser) is also refused. Do it in the dashboard instead.
 
+## machine_limit_reached
+
+A create with a **new** name was refused because the account already holds 250 machine names. A name is permanent: its subdomain, mailbox address and wallets are reserved to your account the first time it is created, and deleting the box keeps them. Nothing was created or charged.
+
+Creating, starting or rebooting any name you already own keeps working, so the fix is to reuse names: keep a fixed pool (`worker-00` … `worker-49`) and call get-or-create with one of them instead of a fresh name per job. How, in every SDK, the CLI and MCP: [Machine limit and reusing names](https://zipbox.ai/docs/machine-limit.md). Need more than 250? Email support@tribes.xyz with your account email and what the fleet does.
+
 ## not_found
 
 No such box (or it is not yours), no such command id, or no such file. Box ids come from `GET /sandbox`; command ids from `exec` or `GET /exec`.
@@ -97,7 +104,7 @@ The box runs under company egress lockdown, which only lets traffic out through 
 
 ## tailscale_requires_update
 
-The box's ZipOS predates Tailscale: it reported that it has no managed Tailscale, so it could never use the key. Accept the ZipOS software update (**Settings → Software Update** in the dashboard; the box restarts into it), then connect again. A box row says so ahead of time with `tailscaleSupported: false`. Applies to `PUT /sandbox/:id/tailscale` and to turning private mode on; turning private mode off is never refused.
+The box's ZipOS is too old for what you asked: it reported that it has no managed Tailscale, so it could never use the key, or its ZipOS predates private boxes serving their own `box.`/`ide.`/`vnc.`/`tunnel.` names, so it cannot go private. Accept the ZipOS software update (**Settings → Software Update** in the dashboard; the box restarts into it), then try again. The dashboard says so ahead of time (**Update ZipOS to use Tailscale**, **Update ZipOS to go private**), and a box row carries `tailscaleSupported: false` for the first case. Applies to `PUT /sandbox/:id/tailscale` and to turning private mode on; turning private mode off is never refused.
 
 ## box_private_unreachable
 
@@ -137,18 +144,19 @@ Retry only `retryable` errors: `rate_limited`, `unavailable`, `box_not_running`.
 
 ## Limits
 
-| Limit                                              | Value                                                            |
-| -------------------------------------------------- | ---------------------------------------------------------------- |
-| Control-plane requests per key                     | 600 per minute (`429` + `Retry-After` + `X-RateLimit-Remaining`) |
-| API keys per account                               | 20                                                               |
-| Running commands per box                           | 32                                                               |
-| Concurrent file transfers per box                  | 8                                                                |
-| File read / write per request                      | 250 MiB                                                          |
-| Command output kept per stream                     | 64 MiB (then a `gap` event)                                      |
-| Command output kept per box                        | 512 MiB (oldest finished evicted first)                          |
-| MCP tool result shown to a model                   | 32 KiB (the rest via `get_command_output`)                       |
-| Idempotency window for create                      | 24 hours                                                         |
-| Box lifetime, command duration, PTY session, token | Unlimited                                                        |
+| Limit                                              | Value                                                                |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| Control-plane requests per key                     | 600 per minute (`429` + `Retry-After` + `X-RateLimit-Remaining`)     |
+| API keys per account                               | 20                                                                   |
+| Machines (names) per account                       | 250 - deleted boxes keep their name; [reuse it](https://zipbox.ai/docs/machine-limit.md) |
+| Running commands per box                           | 32                                                                   |
+| Concurrent file transfers per box                  | 8                                                                    |
+| File read / write per request                      | 250 MiB                                                              |
+| Command output kept per stream                     | 64 MiB (then a `gap` event)                                          |
+| Command output kept per box                        | 512 MiB (oldest finished evicted first)                              |
+| MCP tool result shown to a model                   | 32 KiB (the rest via `get_command_output`)                           |
+| Idempotency window for create                      | 24 hours                                                             |
+| Box lifetime, command duration, PTY session, token | Unlimited                                                            |
 
 ## Out of v1
 
@@ -178,6 +186,10 @@ The box has not yet received the token list after a start, or the key was delete
 ### "Your balance is at or below $0 — top up to a positive balance to boot a machine."
 
 `insufficient_credits` (402) from `create`; `start` and `setTier` say the same with "unarchive this sandbox" or "upgrade this sandbox". Top up in the dashboard; running boxes keep running.
+
+### "You've reached this account's limit of 250 machines."
+
+`machine_limit_reached` (403) from `create` with a name the account has never used. Boot one of your existing names instead (get-or-create with that name); see [Machine limit and reusing names](https://zipbox.ai/docs/machine-limit.md).
 
 ### "upload too large"
 
