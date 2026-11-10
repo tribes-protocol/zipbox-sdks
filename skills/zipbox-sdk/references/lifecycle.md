@@ -4,25 +4,27 @@
 
 # Boxes
 
-Create, getOrCreate, stop, start, restart, resize and delete boxes - and what each costs.
+Create, getOrCreate, stop, start, restart, fork, resize and delete boxes - and what each costs.
 
 A box is a long-lived machine, not a disposable sandbox. It runs until you stop it. Nothing stops, pauses or deletes a box on a clock.
 
-| Verb           | Route                              | What happens                                                          |
-| -------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| `create`       | `POST /sandbox/identity/claim`     | A new box with that name; the SDK waits until it is ready             |
-| `getOrCreate`  | `GET /sandbox`, then claim         | The box with that name (started if stopped), created the first time   |
-| `list` / `get` | `GET /sandbox`, `GET /sandbox/:id` | Your boxes, with status and the latest CPU / memory / disk sample     |
-| `stop`         | `POST /sandbox/:id/pause`          | Disk archived to cold storage; the box bills nothing while stopped    |
-| `start`        | `POST /sandbox/:id/restore`        | The same disk comes back on a running machine                         |
-| `restart`      | `POST /sandbox/:id/reset`          | Hard reboot of a running box; files survive, running processes do not |
-| `setTier`      | `POST /sandbox/:id/tier`           | Move to a bigger or smaller machine; files survive                    |
-| `delete`       | `DELETE /sandbox/:id`              | The box is deleted; a recoverable copy is kept for 30 days by default |
-| `setPrivate`   | `PUT /sandbox/:id/private`         | Only your tailnet can reach the box ([Tailscale](https://zipbox.ai/docs/tailscale.md))    |
+| Verb               | Route                                 | What happens                                                                                         |
+| ------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `create`           | `POST /sandbox/identity/claim`        | A new box with that name; the SDK waits until it is ready                                            |
+| `getOrCreate`      | `GET /sandbox`, then claim            | The box with that name (started if stopped), created the first time                                  |
+| `list` / `get`     | `GET /sandbox`, `GET /sandbox/:id`    | Your boxes, with status and the latest CPU / memory / disk sample                                    |
+| `stop`             | `POST /sandbox/:id/pause`             | Disk archived to cold storage; the box bills nothing while stopped                                   |
+| `start`            | `POST /sandbox/:id/restore`           | The same disk comes back on a running machine                                                        |
+| `restart`          | `POST /sandbox/:id/reset`             | Hard reboot of a running box; files survive, running processes do not                                |
+| `cancelTransition` | `POST /sandbox/:id/transition/cancel` | Cancel the stop, start, restart, resize or fork in flight; the box goes back where it was            |
+| `fork`             | `POST /sandbox/:id/fork`              | A new box with this box's files and settings, its own name and a fresh identity ([Fork](https://zipbox.ai/docs/fork.md)) |
+| `setTier`          | `POST /sandbox/:id/tier`              | Move to a bigger or smaller machine; files survive                                                   |
+| `delete`           | `DELETE /sandbox/:id`                 | The box is deleted; a recoverable copy is kept for 30 days by default                                |
+| `setPrivate`       | `PUT /sandbox/:id/private`            | Only your tailnet can reach the box ([Tailscale](https://zipbox.ai/docs/tailscale.md))                                   |
 
 ## Create a box
 
-`create` takes a `name` (the box's permanent subdomain, `<name>.zbox.sh`), an optional `tier`, and an optional `sshPublicKey`. It sends an `Idempotency-Key`, so a retried create never makes two boxes, and then reads `GET /sandbox/:id` with backoff until `ready` is true. That wait is the SDK's, never the box's: the box boots as fast as it can.
+`create` takes a `name` (the box's permanent subdomain, `<name>.zbox.sh`), an optional `tier`, and an optional `sshPublicKey`. It sends an `Idempotency-Key`, so a retried create never makes two boxes, and then reads `GET /sandbox/:id` with backoff while its [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is `settling`. That wait is the SDK's, never the box's: the box boots as fast as it can. It has no deadline, and a box that will not come up by itself ends it with an error, not retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. `getOrCreate`, `waitReady` and `fork` wait the same way. A created box answers first on its machine's boot address and its `baseUrl` moves once, to `box--<name>`, a few minutes later; a box call that fails before anything was sent runs this same wait again and retries on the new address, so a client created once keeps working.
 
 #### TypeScript
 
@@ -239,7 +241,7 @@ ID=$(curl -s -X POST https://api.tribes.xyz/sandbox/identity/claim \
 ID=$(curl -s https://api.tribes.xyz/sandbox -H "$AUTH" \
   | jq -r '.[] | select(.name == "worker-1") | .id')
 # a box whose last stop is still finishing reads "stopping":
-# repeat until it reads "archived", then start it
+# repeat until it reads "pausing" or "archived", then start it
 curl -s https://api.tribes.xyz/sandbox/$ID -H "$AUTH" | jq -r .status
 curl -s -X POST https://api.tribes.xyz/sandbox/$ID/restore -H "$AUTH"
 # repeat until "ready" is true, then run setup.sh and job.sh
@@ -249,7 +251,7 @@ curl -s https://api.tribes.xyz/sandbox/$ID -H "$AUTH" | jq .ready
 curl -s -X POST https://api.tribes.xyz/sandbox/$ID/pause -H "$AUTH"
 ```
 
-`stop` returns once it is accepted. The disk is then archived, which takes from seconds to minutes depending on how much is on it; until it lands the box reads `status: stopping` and `ready: false`. The SDKs' `start` and `getOrCreate` and the CLI's `start` wait for it and then start the box, so the next run on that name can begin as soon as the last one has called `stop`. Over plain HTTP, `start` on a `stopping` box answers `409 conflict`: read `GET /sandbox/:id` until `status` is `archived`, then start it. Runs that overlap take different names from the pool.
+`stop` returns once it is accepted. The box reads paused (`status: pausing`) as soon as its machine has stopped, while its disk's backup finishes in the background, and `archived` once the backup lands; it reads `ready: false` throughout. A box whose stop is still landing reads `status: stopping`: the SDKs' `start` and `getOrCreate` and the CLI's `start` wait for it and then start the box, so the next run on that name can begin as soon as the last one has called `stop`. Over plain HTTP, `start` on a `stopping` box answers `409 conflict`: read `GET /sandbox/:id` until `status` is `pausing` or `archived`, then start it. Runs that overlap take different names from the pool.
 
 `start` also answers `409 conflict` for a box that is running, for example one whose last run ended before its `stop`; go straight to the job.
 
@@ -314,7 +316,117 @@ curl -X POST https://api.tribes.xyz/sandbox/$ID/reset \
   -H "Authorization: Bearer $ZIPBOX_API_KEY"
 ```
 
-Stop and start are asynchronous on the control plane: the call returns once the change is accepted. Read `get(id)` for `status` (`provisioning`, `running`, `stopping`, `archived`, …) and `ready`. A box reads `stopping` from the moment its `stop` is accepted until its disk has been archived; `start` waits that out in the SDKs and the CLI.
+Stop and start are asynchronous on the control plane: the call returns once the change is accepted. Read `get(id)` for `status` (`provisioning`, `running`, `stopping`, `pausing`, `archived`, …) and `ready`. A stopped box reads paused as soon as its machine has stopped: `status: pausing`, `phase: paused`, billed nothing. Its backup to cold storage finishes in the background, from seconds to minutes depending on how much is on the disk, and then it reads `archived`. A `start` while it is `pausing` boots it at once from the disk still on its host and drops the unfinished backup; a `delete` waits for the backup, which becomes the delete's recoverable copy. A box whose stop is still landing reads `stopping`; `start` waits that out in the SDKs and the CLI.
+
+## Cancel a change in flight
+
+A stop, start, restart, resize or fork that has not finished can be cancelled, and the box goes back where it was: a cancelled stop leaves it running (cancelled once the box reads `pausing`, it is started again as `start` does, and answers `cleared`), a cancelled start leaves it stopped. Cancel a fork on the new box: before it boots it is discarded and its name stays yours, and a source the fork paused is resumed. The answer says what happened:
+
+| Outcome      | Meaning                                                                                  |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `cleared`    | Nothing was running on a machine yet; the change was dropped and the box is already back |
+| `cancelling` | A machine is executing it; its abort is on the way and the box comes back on its own     |
+| `none`       | The box had no change in flight                                                          |
+
+A change past its point of no return (an upload that has finished, a box already booting from its restored disk, a restart already rebooting) is refused with `409 conflict` and the reason in the error message; the change then completes normally. Cancel is not retried by the SDKs.
+
+#### TypeScript
+
+```ts
+// 'cleared' | 'cancelling' | 'none'
+const outcome = await zb.sandboxes.cancelTransition(box.id)
+```
+
+#### Python
+
+```python
+# "cleared" | "cancelling" | "none"
+outcome = zb.sandboxes.cancel_transition(box.id)
+```
+
+#### Go
+
+```go
+// zipbox.TransitionCleared, TransitionCancelling or TransitionNone
+outcome, err := c.Sandboxes.CancelTransition(ctx, box.ID)
+```
+
+#### Rust
+
+```rust
+// TransitionCancelOutcome::Cleared, ::Cancelling or ::None
+let outcome = zb.sandboxes().cancel_transition(sbx.id()).await?;
+```
+
+#### CLI
+
+```sh
+zipbox sandbox cancel ci-runner
+```
+
+#### curl
+
+```sh
+curl -X POST https://api.tribes.xyz/sandbox/$ID/transition/cancel \
+  -H "Authorization: Bearer $ZIPBOX_API_KEY"
+# {"outcome":"cleared","reason":null}
+```
+
+## Fork a box
+
+A fork is a new box made from a consistent capture of this one's disk: the same files, installed software, repositories and settings, with its own name, keys, mailbox and wallets. RAM and running processes are not copied. A running source pauses for the capture only with `pause_and_resume` and resumes right after; with `require_paused` it answers `409 pause_required`. What is copied, the private-box flow and the errors: [Fork a box](https://zipbox.ai/docs/fork.md).
+
+#### TypeScript
+
+```ts
+const child = await zb.sandboxes.fork(box.id, {
+  name: 'ci-runner-2',
+  sourcePolicy: 'pause_and_resume'
+})
+```
+
+#### Python
+
+```python
+child = zb.sandboxes.fork(
+    box.id, name="ci-runner-2", source_policy="pause_and_resume"
+)
+```
+
+#### Go
+
+```go
+child, err := c.Sandboxes.Fork(ctx, box.ID, zipbox.ForkOptions{
+	Name:         "ci-runner-2",
+	SourcePolicy: zipbox.ForkPauseAndResume,
+})
+```
+
+#### Rust
+
+```rust
+let options = zipbox::ForkOptions::new(
+    "ci-runner-2",
+    zipbox::ForkSourcePolicy::PauseAndResume,
+);
+let child = zb.sandboxes().fork(sbx.id(), options).await?;
+```
+
+#### CLI
+
+```sh
+zipbox fork ci-runner --name ci-runner-2 --pause
+```
+
+#### curl
+
+```sh
+curl -X POST https://api.tribes.xyz/sandbox/$ID/fork \
+  -H "Authorization: Bearer $ZIPBOX_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"name":"ci-runner-2","sourcePolicy":"pause_and_resume"}'
+```
 
 ## Resize
 

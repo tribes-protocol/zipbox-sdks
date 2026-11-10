@@ -58,29 +58,47 @@ func main() {
 
 ## Client
 
-`zipbox.New(apiKey, opts...)` returns a `*Client`. It reads `ZIPBOX_API_KEY` when `apiKey` is empty and `ZIPBOX_API_URL` for the control plane (default `https://api.tribes.xyz`). Options: `WithBaseURL`, `WithHTTPClient`, `WithMaxRetries` (default 3), `WithBackoff(base, max)` for retries and command stream reconnects (default 500 ms, 30 s), `WithPollInterval(min, max)` for the readiness checks in `Create` (default 1 s, 10 s), `WithPtyBackoff(base, max)` for PTY reconnects (default 500 ms, 30 s). Nothing has a deadline unless your `ctx` does.
+`zipbox.New(apiKey, opts...)` returns a `*Client`. It reads `ZIPBOX_API_KEY` when `apiKey` is empty and `ZIPBOX_API_URL` for the control plane (default `https://api.tribes.xyz`). Options: `WithBaseURL`, `WithHTTPClient`, `WithMaxRetries` (default 3), `WithBackoff(base, max)` for retries and command stream reconnects (default 500 ms, 30 s), `WithPollInterval(min, max)` for the readiness checks in `Create` (default 1 s growing by 1.25× to 10 s, with jitter), `WithPtyBackoff(base, max)` for PTY reconnects (default 500 ms, 30 s). Nothing has a deadline unless your `ctx` does.
 
 ## Boxes
 
-| Method                                                                                           | Returns                                         |
-| ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| `c.Sandboxes.Create(ctx, zipbox.CreateOptions{Name, Tier, SSHPublicKey, Mailbox, Private})`      | `*Box`, ready (with `Private`, running)         |
-| `c.Sandboxes.GetOrCreate(ctx, name, zipbox.CreateOptions{Tier, SSHPublicKey, Mailbox, Private})` | `*Box`                                          |
-| `c.Sandboxes.WaitReady(ctx, id)`                                                                 | `*Box`, ready (private and not joined: running) |
-| `c.Sandboxes.List(ctx)`                                                                          | `[]Sandbox`                                     |
-| `c.Sandboxes.Get(ctx, id)`                                                                       | `*SandboxDetail`                                |
-| `c.Sandboxes.Start(ctx, id)` / `Stop` / `Restart`                                                | `error`                                         |
-| `c.Sandboxes.SetTier(ctx, id, tier)`                                                             | `error`                                         |
-| `c.Sandboxes.Delete(ctx, id, zipbox.DeleteOptions{Archive})`                                     | `error`                                         |
-| `c.Sandbox(id)`                                                                                  | `*Box` handle, no network call                  |
-| `box.Refresh(ctx)` / `box.WaitReady(ctx)`                                                        | `*SandboxDetail`                                |
-| `box.Start(ctx)` / `Stop` / `Restart` / `SetTier(ctx, tier)` / `Delete(ctx, opts)`               | `error`                                         |
+| Method                                                                                                                         | Returns                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `c.Sandboxes.Create(ctx, zipbox.CreateOptions{Name, Tier, SSHPublicKey, Mailbox, Private})`                                    | `*Box`, ready (with `Private`, running)                                                                                                        |
+| `c.Sandboxes.GetOrCreate(ctx, name, zipbox.CreateOptions{Tier, SSHPublicKey, Mailbox, Private})`                               | `*Box`                                                                                                                                         |
+| `c.Sandboxes.WaitReady(ctx, id)`                                                                                               | `*Box`, ready (private and not joined: running)                                                                                                |
+| `c.Sandboxes.List(ctx)`                                                                                                        | `[]Sandbox`                                                                                                                                    |
+| `c.Sandboxes.Get(ctx, id)`                                                                                                     | `*SandboxDetail`                                                                                                                               |
+| `c.Sandboxes.Start(ctx, id)` / `Stop` / `Restart`                                                                              | `error`                                                                                                                                        |
+| `c.Sandboxes.CancelTransition(ctx, id)` / `box.CancelTransition(ctx)`                                                          | `TransitionCancelOutcome, error` (`TransitionCleared` / `TransitionCancelling` / `TransitionNone`; `CodeConflict` past the point of no return) |
+| `c.Sandboxes.Fork(ctx, id, zipbox.ForkOptions{Name, SourcePolicy, Private, TailscaleAuthKey, NoWait})` / `box.Fork(ctx, opts)` | `*Box`: the new box, ready (private: running; `NoWait`: as accepted)                                                                           |
+| `c.Sandboxes.GetFork(ctx, id)` / `box.ForkStatus(ctx)`                                                                         | `*SandboxFork` of the new box `id`                                                                                                             |
+| `c.Sandboxes.SetTier(ctx, id, tier)`                                                                                           | `error`                                                                                                                                        |
+| `c.Sandboxes.Delete(ctx, id, zipbox.DeleteOptions{Archive})`                                                                   | `error`                                                                                                                                        |
+| `c.Sandbox(id)`                                                                                                                | `*Box` handle, no network call                                                                                                                 |
+| `box.Refresh(ctx)` / `box.WaitReady(ctx)`                                                                                      | `*SandboxDetail`                                                                                                                               |
+| `box.Start(ctx)` / `Stop` / `Restart` / `SetTier(ctx, tier)` / `Delete(ctx, opts)`                                             | `error`                                                                                                                                        |
+
+Every wait (`Create`, `GetOrCreate`, `WaitReady`, `Fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `Phase` and `AllowedActions`; a `SandboxDetail` also carries `Readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+
+A created box's `BaseURL` is not permanent: it answers on its boot address first and moves once, to `box--<name>`, a few minutes after create. The SDK follows it. A box call (or a PTY dial) that fails before anything was sent (a refused connect, DNS, a TLS handshake) waits one rung of the `WithBackoff` ladder, re-reads the box with the same wait `Create` uses, and retries on the `BaseURL` and token that read returned, with no attempt ceiling: `ctx` is the only bound. A box that is paused, failed or deleted meanwhile ends the call with the wait's own error. A request that was sent is never repeated this way.
 
 `GetOrCreate` takes every `CreateOptions` field except `Name` (leave it empty) and applies them only when it creates the box. A box that already has the name is returned as it is, even when it differs (another tier, not private): that is not an error and nothing is resized. `DeleteOptions.Archive` is a `*bool`: `nil` keeps the recoverable copy (the server default), `false` skips it.
 
 ```go
 opts := zipbox.CreateOptions{Tier: "l", Mailbox: true}
 box, err := c.Sandboxes.GetOrCreate(ctx, "ci-runner", opts)
+```
+
+### Fork
+
+`Fork` makes a new box from a consistent capture of the source's disk: its files, software and settings, with a new name and identity ([Fork a box](https://zipbox.ai/docs/fork.md)). `SourcePolicy` is required: `zipbox.ForkRequirePaused` refuses a running source with `CodePauseRequired`, `zipbox.ForkPauseAndResume` pauses it for the capture and resumes it right after. One `Idempotency-Key` per call is reused on every retry. `TailscaleAuthKey` stays on your machine: it is sealed to the new box once that box runs, never part of the fork request, needs the wait (`NoWait` false, the default), and is redacted when `ForkOptions` is printed. A new box its fork removed (a cancel or a failure) returns its fork's error code, or `CodeConflict` when the fork was cancelled. Cancelling `ctx` stops only the wait; `CancelTransition(ctx, child.ID)` cancels the fork.
+
+```go
+child, err := box.Fork(ctx, zipbox.ForkOptions{
+	Name:         "ci-runner-2",
+	SourcePolicy: zipbox.ForkPauseAndResume,
+})
 ```
 
 ## Tailscale and private mode

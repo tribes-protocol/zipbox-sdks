@@ -2,6 +2,7 @@ import { boxPath, type ClientContext, getDetail } from './context.js'
 import { sealBoxEnvelope, tailscaleEnvelopeInfo } from './envelope.js'
 import { ZipboxError } from './errors.js'
 import { isRecord, readJson } from './guards.js'
+import { readinessOf } from './readiness.js'
 import type { CallOptions, SandboxDetail, TailscaleStatus } from './types.js'
 
 interface TailscaleResponse {
@@ -24,7 +25,8 @@ function sealableKey(id: string, detail: SandboxDetail): string {
     throw new ZipboxError({
       code: 'box_not_running',
       message: `box ${id} has not started (status: ${detail.status}); start it, then connect it to Tailscale`,
-      retryable: started
+      // A box that is settling grows its key by itself; one that is paused or gone does not.
+      retryable: readinessOf(detail) === 'settling'
     })
   }
   return key

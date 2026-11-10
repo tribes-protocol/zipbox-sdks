@@ -101,6 +101,13 @@ func (f *fakeTailnet) openSent(t *testing.T) string {
 	if put == nil {
 		t.Fatal("no PUT /sandbox/sbx_1/tailscale")
 	}
+	return openEnvelope(t, f.priv, put.body, "sbx_1")
+}
+
+// openEnvelope opens a PUT /sandbox/:id/tailscale body with the box key priv, the
+// way box sandboxID does.
+func openEnvelope(t *testing.T, priv *ecdh.PrivateKey, putBody, sandboxID string) string {
+	t.Helper()
 	var body struct {
 		Envelope struct {
 			EphemeralPublicKey string `json:"ephemeralPublicKey"`
@@ -109,7 +116,7 @@ func (f *fakeTailnet) openSent(t *testing.T) string {
 		} `json:"envelope"`
 		AgentPublicKey string `json:"agentPublicKey"`
 	}
-	if err := json.Unmarshal([]byte(put.body), &body); err != nil {
+	if err := json.Unmarshal([]byte(putBody), &body); err != nil {
 		t.Fatal(err)
 	}
 	spki, _ := base64.RawURLEncoding.DecodeString(body.Envelope.EphemeralPublicKey)
@@ -118,8 +125,8 @@ func (f *fakeTailnet) openSent(t *testing.T) string {
 		t.Fatal(err)
 	}
 	pub, _ := parsed.(*ecdsa.PublicKey).ECDH()
-	shared, _ := f.priv.ECDH(pub)
-	key, _ := hkdf.Key(sha256.New, shared, nil, "zipbox-tailscale-v1|sbx_1", 32)
+	shared, _ := priv.ECDH(pub)
+	key, _ := hkdf.Key(sha256.New, shared, nil, "zipbox-tailscale-v1|"+sandboxID, 32)
 	block, _ := aes.NewCipher(key)
 	gcm, _ := cipher.NewGCM(block)
 	iv, _ := base64.RawURLEncoding.DecodeString(body.Envelope.IV)

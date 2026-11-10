@@ -1,0 +1,52 @@
+{
+  "name": "exec_box_awaits_tailnet",
+  "description": "A box call on a private box that has not joined a tailnet raises tailnet_not_connected, not retryable, without calling the box: only the owner's auth key moves it on.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "privateMode": true,
+          "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog==",
+          "tailscale": null,
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "readiness": "awaits_tailnet"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "tailnet_not_connected",
+      "retryable": false
+    }
+  }
+}

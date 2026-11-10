@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from email.utils import parsedate_to_datetime
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 ErrorCode = Literal[
     "invalid_request",
@@ -25,6 +25,24 @@ ErrorCode = Literal[
     "tailscale_unavailable_egress_lockdown",
     "tailscale_requires_update",
     "box_private_unreachable",
+    # A fork (POST /sandbox/:id/fork), answered before anything is reserved: the name
+    # is in use; the source is not a forkable box; the source is busy with another
+    # change; a running source was sent without pause consent; copying the source's
+    # machine-scoped credentials needs the owner in the dashboard, not an API key; the
+    # Idempotency-Key was already used for a different request.
+    "name_taken",
+    "source_unsupported",
+    "source_busy",
+    "pause_required",
+    "requires_interactive",
+    "idempotency_mismatch",
+    # Why a fork ended without a new box (raised while waiting on it): the source was
+    # deleted before its capture; the new box came up with the source's key; the copy
+    # could not produce a verified filesystem; the new box failed to boot.
+    "source_gone",
+    "identity_reused",
+    "copy_failed",
+    "start_failed",
 ]
 
 DOCS_ERRORS_URL = "https://zipbox.ai/docs/errors"
@@ -106,8 +124,23 @@ _CODES: frozenset[str] = frozenset(
         "tailscale_unavailable_egress_lockdown",
         "tailscale_requires_update",
         "box_private_unreachable",
+        "name_taken",
+        "source_unsupported",
+        "source_busy",
+        "pause_required",
+        "requires_interactive",
+        "idempotency_mismatch",
+        "source_gone",
+        "identity_reused",
+        "copy_failed",
+        "start_failed",
     }
 )
+
+
+def is_error_code(value: object) -> TypeGuard[ErrorCode]:
+    """Whether ``value`` is a public error code this SDK knows."""
+    return isinstance(value, str) and value in _CODES
 
 
 def parse_retry_after_ms(headers: dict[str, str]) -> int | None:
@@ -146,7 +179,12 @@ def error_from_response(status: int, headers: dict[str, str], body: bytes) -> Zi
             status=status,
             request_id=env.get("requestId"),
             retryable=env.get("retryable") if isinstance(env.get("retryable"), bool) else None,
-            retry_after_ms=retry_after if isinstance(retry_after, int) else header_retry,
+            # Retry-After wins over the envelope's hint, as in every SDK.
+            retry_after_ms=header_retry
+            if header_retry is not None
+            else retry_after
+            if isinstance(retry_after, int)
+            else None,
             docs_url=env.get("docsUrl"),
         )
     message = f"HTTP {status}"

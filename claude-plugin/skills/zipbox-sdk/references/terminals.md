@@ -70,6 +70,8 @@ Input is raw terminal input: send `\r` for Enter, and control characters as byte
 
 A dropped terminal reconnects by itself, with exponential backoff (capped at 30 seconds by default, with jitter; every SDK's client sets the first delay and the cap) and no attempt limit; the backoff resets only once output arrives again. Nothing closes a terminal on a timer.
 
+The first connection waits the same way. A box can be ready a little before its certificate is, so a failed connection or TLS handshake is retried, and so is a box that has not yet received a key the control plane accepts. Before each such retry the terminal reads the box again, because a new box's `baseUrl` changes once, to `box--<name>`, a few minutes after create; a box that was paused, failed to start or was deleted ends the terminal. A terminal ends only on an answered verdict: the control plane refusing the key (it was deleted), or the box or the session gone.
+
 To pick up a session from another process, `attach(sessionId)` it: the shell, its running programs and the screen are all still there. `attach` takes the same options as `create` (size and client label); without a size it leaves the terminal as it is. If another client holds the session, `takeover()` moves it to yours.
 
 ## Sessions and the dashboard

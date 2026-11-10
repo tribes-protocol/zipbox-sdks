@@ -1,0 +1,98 @@
+{
+  "name": "exec_reresolves_base_after_unsent_failure",
+  "description": "A box call whose request never reached the box (connect refused, TLS handshake failed) waits one backoff rung, drops the cached box, re-reads GET /sandbox/:id as a readiness wait does, and retries on the baseUrl that read returned. After a claim the box's baseUrl moves once, from its boot name to its chosen name; a client must follow it instead of redialling the old origin forever. {{DEAD}} is a port that refuses every dial, so the first POST never reaches the mock server.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{DEAD}}",
+          "boxToken": "bt_dead",
+          "phase": "running",
+          "readiness": "ready"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_live",
+          "phase": "running",
+          "readiness": "ready"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/exec",
+        "headers": {
+          "authorization": "Bearer bt_live"
+        },
+        "body": {
+          "cmd": "true"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "bodyText": "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_1\"}\n\nid: 0-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0,\"signal\":null,\"timedOut\":false}\n\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "cmd_1",
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  }
+}

@@ -15,8 +15,9 @@ use crate::files::{resolve_path, Files};
 use crate::pty::PtyClient;
 use crate::tailscale::Tailscale;
 use crate::types::{
-    DeleteOptions, ExecEvent, ExecOptions, ExecRecord, ExecRequestBody, ExecResult, Language,
-    LogOptions, OutputStream, Preview, SandboxDetail, SshInfo,
+    DeleteOptions, ExecEvent, ExecOptions, ExecRecord, ExecRequestBody, ExecResult, ForkOptions,
+    Language, LogOptions, OutputStream, Preview, SandboxDetail, SandboxFork, SshInfo,
+    TransitionCancelOutcome,
 };
 
 /// Captures the desktop (`:10`) with ffmpeg's x11grab, which the platform image
@@ -86,6 +87,24 @@ impl Sandbox {
     /// Hard-restarts the box.
     pub async fn restart(&self) -> Result<()> {
         self.client.sandboxes().restart(&self.id).await
+    }
+
+    /// Cancels the box's state change in flight (see
+    /// [`crate::Sandboxes::cancel_transition`]).
+    pub async fn cancel_transition(&self) -> Result<TransitionCancelOutcome> {
+        self.client.sandboxes().cancel_transition(&self.id).await
+    }
+
+    /// Forks this box into a new box with the same files and a new identity, and
+    /// returns a handle on the new box (see [`crate::Sandboxes::fork`]).
+    pub async fn fork(&self, options: ForkOptions) -> Result<Sandbox> {
+        self.client.sandboxes().fork(&self.id, options).await
+    }
+
+    /// The fork that made (or is making) this box (see
+    /// [`crate::Sandboxes::get_fork`]).
+    pub async fn fork_status(&self) -> Result<SandboxFork> {
+        self.client.sandboxes().get_fork(&self.id).await
     }
 
     /// Deletes the box, keeping a recoverable copy for 30 days.

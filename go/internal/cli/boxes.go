@@ -142,6 +142,32 @@ func (a *app) sandboxCommand() *cobra.Command {
 		return c.Sandboxes.Restart(ctx, id)
 	})
 
+	cancelCmd := &cobra.Command{
+		Use:   "cancel <box>",
+		Short: "Cancel the box's change in flight (a stop, start, restart, tier change or fork)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, box, err := a.boxFor(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			outcome, err := c.Sandboxes.CancelTransition(cmd.Context(), box.ID)
+			if err != nil {
+				return err
+			}
+			return a.emit(map[string]string{"id": box.ID, "outcome": string(outcome)}, func() {
+				switch outcome {
+				case zipbox.TransitionCleared:
+					fmt.Fprintf(a.out, "%s: change cancelled.\n", box.ID)
+				case zipbox.TransitionCancelling:
+					fmt.Fprintf(a.out, "%s: cancelling.\n", box.ID)
+				case zipbox.TransitionNone:
+					fmt.Fprintf(a.out, "%s: nothing in flight.\n", box.ID)
+				}
+			})
+		},
+	}
+
 	var yes bool
 	deleteCmd := &cobra.Command{
 		Use:   "delete <box>",
@@ -189,7 +215,7 @@ func (a *app) sandboxCommand() *cobra.Command {
 			})
 		},
 	}
-	cmd.AddCommand(createCmd, listCmd, getCmd, startCmd, stopCmd, restartCmd, deleteCmd, tierCmd)
+	cmd.AddCommand(createCmd, listCmd, getCmd, startCmd, stopCmd, restartCmd, cancelCmd, deleteCmd, tierCmd)
 	return cmd
 }
 
@@ -202,6 +228,9 @@ func (a *app) printDetail(d *zipbox.SandboxDetail) {
 	fmt.Fprintf(w, "ready\t%t\n", d.Ready)
 	if d.PrivateMode {
 		fmt.Fprintln(w, "private\tyes (tailnet only)")
+	}
+	if d.Fork != nil {
+		fmt.Fprintf(w, "fork\t%s from %s (operation %s)\n", d.Fork.Phase, d.Fork.SourceSandboxID, d.Fork.OperationID)
 	}
 	if d.BaseURL != nil {
 		fmt.Fprintf(w, "url\t%s\n", *d.BaseURL)

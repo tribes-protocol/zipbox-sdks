@@ -8,10 +8,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::{json, Value};
 use zipbox::{
-    CreateOptions, DeleteOptions, Error, ExecEvent, LogOptions, OutputStream, Signal, Zipbox,
+    CreateOptions, DeleteOptions, Error, ExecEvent, ForkOptions, ForkSourcePolicy, LogOptions,
+    OutputStream, Signal, Zipbox,
 };
 
-use common::{subset, MockServer};
+use common::{dead_origin, subset, MockServer};
 
 const API_KEY: &str = "zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
 
@@ -58,6 +59,19 @@ fn event_json(event: &ExecEvent) -> Value {
             "signal": signal,
             "timedOut": timed_out,
         }),
+    }
+}
+
+fn fork_options(args: &Value) -> ForkOptions {
+    let policy = match arg(args, "sourcePolicy") {
+        "pause_and_resume" => ForkSourcePolicy::PauseAndResume,
+        _ => ForkSourcePolicy::RequirePaused,
+    };
+    ForkOptions {
+        private: args["private"].as_bool(),
+        tailscale_auth_key: args["tailscaleAuthKey"].as_str().map(str::to_string),
+        wait: args["wait"].as_bool().unwrap_or(true),
+        ..ForkOptions::new(arg(args, "name"), policy)
     }
 }
 
@@ -110,6 +124,19 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
             .restart(arg(args, "id"))
             .await
             .map(|_| Value::Null),
+        "sandboxes.cancelTransition" => zb
+            .sandboxes()
+            .cancel_transition(arg(args, "id"))
+            .await
+            .map(|outcome| Value::String(outcome.as_str().to_string())),
+        "sandboxes.fork" => Ok(to(serde_json::to_value(
+            zb.sandboxes()
+                .fork(arg(args, "id"), fork_options(args))
+                .await?,
+        ))),
+        "sandboxes.getFork" => Ok(to(serde_json::to_value(
+            zb.sandboxes().get_fork(arg(args, "id")).await?,
+        ))),
         "sandboxes.delete" => zb
             .sandboxes()
             .delete_with(
@@ -263,6 +290,7 @@ fn error_json(err: &Error) -> Value {
         "requestId": err.request_id,
         "docsUrl": err.docs_url,
         "message": err.message,
+        "retryable": err.retryable,
     })
 }
 
@@ -271,7 +299,8 @@ async fn run_fixture(path: PathBuf) -> Result<(), String> {
     let raw = std::fs::read_to_string(&path).unwrap();
     let raw = raw
         .replace("{{BASE}}", &server.base)
-        .replace("{{HOST}}", &server.host);
+        .replace("{{HOST}}", &server.host)
+        .replace("{{DEAD}}", &dead_origin());
     let fixture: Value = serde_json::from_str(&raw).unwrap();
     server.state.lock().unwrap().exchanges = fixture["exchanges"].as_array().unwrap().clone();
     server.serve(listener);
@@ -295,7 +324,11 @@ async fn run_fixture(path: PathBuf) -> Result<(), String> {
     .map_err(|_| "timed out".to_string())?;
 
     let mut problems = server.finish();
-    if let Some(auth_key) = fixture["call"]["args"]["authKey"].as_str() {
+    let args = &fixture["call"]["args"];
+    if let Some(auth_key) = args["authKey"]
+        .as_str()
+        .or(args["tailscaleAuthKey"].as_str())
+    {
         let leaked = server
             .state
             .lock()
@@ -361,7 +394,8 @@ async fn preview_pending_survives_the30second_exec_window() {
     let raw = std::fs::read_to_string(fixtures_dir().join("preview_pending.json"))
         .unwrap()
         .replace("{{BASE}}", &server.base)
-        .replace("{{HOST}}", &server.host);
+        .replace("{{HOST}}", &server.host)
+        .replace("{{DEAD}}", &dead_origin());
     let mut fixture: Value = serde_json::from_str(&raw).unwrap();
     let body = fixture["exchanges"][1]["response"]["bodyText"]
         .as_str()

@@ -47,21 +47,28 @@ async fn main() -> Result<(), zipbox::Error> {
 
 ## Client
 
-`Zipbox::new(api_key)` or `Zipbox::from_env()` (reads `ZIPBOX_API_KEY` and, optionally, `ZIPBOX_API_URL`; default control plane `https://api.tribes.xyz`). `Zipbox::builder()` sets `api_key`, `base_url`, `max_retries` (default 3), `retry_base_delay` / `retry_max_delay` (500 ms / 30 s), `poll_interval` / `poll_max_interval` (the readiness checks in `create`; 1 s / 10 s), `pty_base_delay` / `pty_max_delay` (PTY reconnects; 500 ms / 30 s) and `http_client`, then `.build()?`. No request has a timeout unless you wrap it in one.
+`Zipbox::new(api_key)` or `Zipbox::from_env()` (reads `ZIPBOX_API_KEY` and, optionally, `ZIPBOX_API_URL`; default control plane `https://api.tribes.xyz`). `Zipbox::builder()` sets `api_key`, `base_url`, `max_retries` (default 3), `retry_base_delay` / `retry_max_delay` (500 ms / 30 s), `poll_interval` / `poll_max_interval` (the readiness checks in `create`; 1 s growing by 1.25× to 10 s, with jitter), `pty_base_delay` / `pty_max_delay` (PTY reconnects; 500 ms / 30 s) and `http_client`, then `.build()?`. No request has a timeout unless you wrap it in one.
 
 ## Boxes
 
-| Method                                                                                  | Returns                                         |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `zb.sandboxes().create(CreateOptions { name, tier, ssh_public_key, mailbox, private })` | `Sandbox`, ready (with `private`, running)      |
-| `zb.sandboxes().get_or_create(name)` / `get_or_create_with(name, CreateOptions)`        | `Sandbox`                                       |
-| `zb.sandboxes().list()`                                                                 | `Vec<SandboxInfo>`                              |
-| `zb.sandboxes().get(id)`                                                                | `Sandbox`                                       |
-| `zb.sandboxes().start(id)` / `stop` / `restart`                                         | `()`                                            |
-| `zb.sandboxes().set_tier(id, tier)`                                                     | `()`                                            |
-| `zb.sandboxes().delete(id)` / `delete_with(id, DeleteOptions { archive })`              | `()`                                            |
-| `zb.sandboxes().wait_ready(id)`                                                         | `Sandbox`, ready (private, not joined: running) |
-| `zb.sandbox(id)`                                                                        | `Sandbox` handle, no network call               |
+| Method                                                                                             | Returns                                                                                               |
+| -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `zb.sandboxes().create(CreateOptions { name, tier, ssh_public_key, mailbox, private })`            | `Sandbox`, ready (with `private`, running)                                                            |
+| `zb.sandboxes().get_or_create(name)` / `get_or_create_with(name, CreateOptions)`                   | `Sandbox`                                                                                             |
+| `zb.sandboxes().list()`                                                                            | `Vec<SandboxInfo>`                                                                                    |
+| `zb.sandboxes().get(id)`                                                                           | `Sandbox`                                                                                             |
+| `zb.sandboxes().start(id)` / `stop` / `restart`                                                    | `()`                                                                                                  |
+| `zb.sandboxes().cancel_transition(id)`                                                             | `TransitionCancelOutcome` (`Cleared` / `Cancelling` / `None`; `Conflict` past the point of no return) |
+| `zb.sandboxes().fork(id, ForkOptions::new(name, source_policy))` (`private`, `tailscale_auth_key`) | `Sandbox`: the new box, ready (private: running; `wait: false`: as accepted)                          |
+| `zb.sandboxes().get_fork(id)`                                                                      | `SandboxFork` of the new box `id`                                                                     |
+| `zb.sandboxes().set_tier(id, tier)`                                                                | `()`                                                                                                  |
+| `zb.sandboxes().delete(id)` / `delete_with(id, DeleteOptions { archive })`                         | `()`                                                                                                  |
+| `zb.sandboxes().wait_ready(id)`                                                                    | `Sandbox`, ready (private, not joined: running)                                                       |
+| `zb.sandbox(id)`                                                                                   | `Sandbox` handle, no network call                                                                     |
+
+Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+
+A created box's `base_url` changes once, to `box--<name>`, a few minutes after create, and the SDK follows it. A box call whose request never reached the box (a refused connect, DNS, a failed TLS handshake) waits one backoff rung, re-reads the box with this same wait, and retries on the address and token it returns, with no attempt ceiling; a paused, failed or deleted box ends the call with the wait's error. A `Pty` dial that is refused before the upgrade re-reads the box the same way.
 
 `get_or_create_with` takes every `CreateOptions` field except `name` (leave it `None`) and applies them only when it creates the box. A box that already has the name is returned as it is, even when it differs (another tier, not private): that is not an error and nothing is resized.
 
@@ -74,7 +81,19 @@ let opts = zipbox::CreateOptions {
 let sbx = zb.sandboxes().get_or_create_with("ci-runner", opts).await?;
 ```
 
-A `Sandbox` has `id()`, `info()` (the last `SandboxDetail` read), `refresh()` and `wait_ready()`, plus `start`, `stop`, `restart`, `set_tier`, `delete` and `delete_with` on itself.
+A `Sandbox` has `id()`, `info()` (the last `SandboxDetail` read), `refresh()` and `wait_ready()`, plus `start`, `stop`, `restart`, `cancel_transition`, `set_tier`, `delete`, `delete_with`, `fork` and `fork_status` on itself.
+
+### Fork
+
+`fork` makes a new box from a consistent capture of the source's disk: its files, software and settings, with a new name and identity ([Fork a box](https://zipbox.ai/docs/fork.md)). `ForkOptions::new(name, source_policy)` takes both required fields: `ForkSourcePolicy::RequirePaused` refuses a running source with `PauseRequired`, `ForkSourcePolicy::PauseAndResume` pauses it for the capture and resumes it right after. One `Idempotency-Key` per call is reused on every retry. `tailscale_auth_key` stays on your machine: it is sealed to the new box once that box runs, never part of the fork request, needs `wait` (`true` from `new`), and is redacted from `Debug`. A new box its fork removed (a cancel or a failure) returns its fork's error code, or `Conflict` when the fork was cancelled. Dropping the future stops only the wait; `cancel_transition(child.id())` cancels the fork.
+
+```rust
+let options = zipbox::ForkOptions::new(
+    "ci-runner-2",
+    zipbox::ForkSourcePolicy::PauseAndResume,
+);
+let child = sbx.fork(options).await?;
+```
 
 ## Tailscale and private mode
 
@@ -156,7 +175,7 @@ Dropping a stream disconnects it, which stops a foreground command; `exec_backgr
 
 ## Errors
 
-Every failure is a `zipbox::Error` with `code` (`zipbox::ErrorCode`), `status`, `message`, `request_id`, `retryable`, `retry_after` (a `Duration`) and `docs_url`; a transport failure has code `Unavailable` and its cause in `source`. A non-zero exit code is a result.
+Every failure is a `zipbox::Error` with `code` (`zipbox::ErrorCode`), `status`, `message`, `request_id`, `retryable`, `retry_after` (a `Duration`) and `docs_url`; a transport failure has code `Unavailable` and its cause in `source`. A box call does not return a failure to reach the box: it re-reads the box and retries (see the wait above) until the box answers or the wait ends it; drop the future to stop sooner. A non-zero exit code is a result.
 
 ```rust
 if let Err(e) = zb.sandboxes().start(&id).await {

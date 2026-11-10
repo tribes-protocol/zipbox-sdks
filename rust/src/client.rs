@@ -145,6 +145,19 @@ pub(crate) enum Body {
     Bytes(Vec<u8>),
 }
 
+/// One request for `Zipbox::send`. A box call sets `box_unsent` to its unsent ladder,
+/// so a request that never left this client comes back to it instead of being retried
+/// in place.
+struct SendRequest<'a> {
+    method: Method,
+    url: &'a str,
+    auth: &'a str,
+    body: Body,
+    extra: HeaderMap,
+    retry: bool,
+    box_unsent: Option<&'a mut Backoff>,
+}
+
 /// Configures a [`Zipbox`] client.
 #[derive(Debug, Clone)]
 pub struct ZipboxBuilder {
@@ -208,7 +221,8 @@ impl ZipboxBuilder {
         self
     }
 
-    /// The first rung of the poll that waits for a new box to be ready. Default 1 s.
+    /// The first rung of the poll that waits for a new box to be ready; each rung
+    /// grows 1.25×, with jitter. Default 1 s.
     pub fn poll_interval(mut self, d: Duration) -> Self {
         self.poll_interval = d;
         self
@@ -328,7 +342,16 @@ impl Zipbox {
     ) -> Result<Response> {
         let url = format!("{}{}", self.inner.base_url, path);
         let auth = format!("Bearer {}", self.inner.api_key);
-        self.send(method, &url, &auth, body, extra, retry).await
+        self.send(SendRequest {
+            method,
+            url: &url,
+            auth: &auth,
+            body,
+            extra,
+            retry,
+            box_unsent: None,
+        })
+        .await
     }
 
     pub(crate) async fn api_json<T: DeserializeOwned>(
@@ -355,6 +378,11 @@ impl Zipbox {
         let detail: SandboxDetail = self
             .api_json(Method::GET, &format!("/sandbox/{}", encode(id)), Body::None)
             .await?;
+        // A box that is not ready no longer answers where it did: its cached access
+        // goes, and the next box call reads it afresh.
+        if !detail.ready {
+            self.inner.boxes.lock().expect("box cache").remove(id);
+        }
         self.remember(&detail);
         Ok(detail)
     }
@@ -391,17 +419,27 @@ impl Zipbox {
             None => {
                 self.inner.boxes.lock().expect("box cache").remove(id);
                 let detail = self.detail(id).await?;
-                BoxAccess::from_detail(&detail).ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::BoxNotRunning,
-                        format!(
-                            "box {id} is not running (status {}); start it and wait until it is ready",
-                            detail.info.status
-                        ),
-                    )
-                })?
+                BoxAccess::from_detail(&detail)
+                    .ok_or_else(|| crate::sandboxes::box_not_ready_error(id, &detail))?
             }
         };
+        self.reach(id, access).await
+    }
+
+    /// The box's access after a request to it never left this client: its origin
+    /// may have moved (a created box moves once, from its boot address to
+    /// `box--<name>`). Drops the cached access and runs the wait `create` uses; a
+    /// paused, failed or gone box ends it with that wait's error.
+    pub(crate) async fn reresolve(&self, id: &str) -> Result<BoxAccess> {
+        self.inner.boxes.lock().expect("box cache").remove(id);
+        let ready = self.sandboxes().wait_ready(id).await?;
+        let detail = ready.info().expect("wait_ready returns the detail it read");
+        let access = BoxAccess::from_detail(detail)
+            .ok_or_else(|| crate::sandboxes::box_not_ready_error(id, detail))?;
+        self.reach(id, access).await
+    }
+
+    async fn reach(&self, id: &str, access: BoxAccess) -> Result<BoxAccess> {
         if access.private && !access.reachable {
             self.probe_private(id, &access, PRIVATE_PROBE_TIMEOUT)
                 .await?;
@@ -449,6 +487,12 @@ impl Zipbox {
     /// A second 401 is not a deleted key: that fails the re-fetch itself, at the
     /// control plane. The control plane just vouched for the key, so the box has not
     /// received its token yet, and the error says so.
+    ///
+    /// A request that never reached the box waits one rung of the unsent ladder,
+    /// re-reads the box (`reresolve`) and retries where it now answers,
+    /// with no attempt ceiling: dropping the future is the caller's bound. The
+    /// ladder is the call's own; it grows across re-reads and starts over only when
+    /// the box answers.
     pub(crate) async fn box_request(
         &self,
         id: &str,
@@ -462,38 +506,33 @@ impl Zipbox {
         if let Some(accept) = accept {
             headers.insert(ACCEPT, HeaderValue::from_static(accept));
         }
-        let access = self.box_access(id, false).await?;
-        let first = self
-            .send(
-                method.clone(),
-                &format!("{}{}", access.base_url, path),
-                &format!("Bearer {}", access.token),
-                body(),
-                headers.clone(),
-                retry,
-            )
-            .await;
-        match first {
-            Err(err) if err.status == Some(401) => {
-                let access = self.box_access(id, true).await?;
-                self.send(
-                    method,
-                    &format!("{}{}", access.base_url, path),
-                    &format!("Bearer {}", access.token),
-                    body(),
-                    headers,
+        let mut unsent = Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
+        let mut access = self.box_access(id, false).await?;
+        let mut refetched = false;
+        loop {
+            let sent = self
+                .send(SendRequest {
+                    method: method.clone(),
+                    url: &format!("{}{}", access.base_url, path),
+                    auth: &format!("Bearer {}", access.token),
+                    body: body(),
+                    extra: headers.clone(),
                     retry,
-                )
-                .await
-                .map_err(|err| {
-                    if err.status == Some(401) {
-                        key_not_received(id, err)
-                    } else {
-                        err
-                    }
+                    box_unsent: Some(&mut unsent),
                 })
+                .await;
+            match sent {
+                Err(err) if is_unsent(&err) => {
+                    tokio::time::sleep(unsent.next_delay()).await;
+                    access = self.reresolve(id).await?;
+                }
+                Err(err) if err.status == Some(401) && !refetched => {
+                    refetched = true;
+                    access = self.box_access(id, true).await?;
+                }
+                Err(err) if err.status == Some(401) => return Err(key_not_received(id, err)),
+                other => return other,
             }
-            other => other,
         }
     }
 
@@ -507,15 +546,21 @@ impl Zipbox {
         decode_json(self.box_request(id, method, path, body, None).await?).await
     }
 
-    async fn send(
-        &self,
-        method: Method,
-        url: &str,
-        auth: &str,
-        body: Body,
-        extra: HeaderMap,
-        retry: bool,
-    ) -> Result<Response> {
+    /// Sends one request, retrying a retryable answer of a safe request. A request
+    /// that never left this client (a failed connect or TLS handshake) is retried
+    /// in place for the control plane, whose origin does not move. A box call
+    /// passes its unsent ladder (`box_unsent`) and gets that failure back instead:
+    /// only it can re-read the box. Any answer resets that ladder.
+    async fn send(&self, request: SendRequest<'_>) -> Result<Response> {
+        let SendRequest {
+            method,
+            url,
+            auth,
+            body,
+            extra,
+            retry,
+            mut box_unsent,
+        } = request;
         let mut backoff = Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
         let mut unsent_backoff =
             Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
@@ -537,8 +582,13 @@ impl Zipbox {
                     .body(bytes.clone()),
             };
             let outcome = match req.send().await {
-                Ok(resp) if resp.status().is_success() => return Ok(resp),
                 Ok(resp) => {
+                    if let Some(ladder) = box_unsent.as_deref_mut() {
+                        ladder.reset();
+                    }
+                    if resp.status().is_success() {
+                        return Ok(resp);
+                    }
                     let status = resp.status().as_u16();
                     let retry_after = resp
                         .headers()
@@ -550,20 +600,19 @@ impl Zipbox {
                     Error::from_response(status, retry_after, &bytes)
                 }
                 // A failure to connect or to complete the TLS handshake: nothing was
-                // sent, and a box's certificate can trail its readiness. Retried for
-                // EVERY method with no attempt ceiling, on a capped, jittered ladder;
-                // dropping the future is the caller's bound.
+                // sent. A box call re-reads the box before it retries.
+                Err(err) if err.is_connect() && box_unsent.is_some() => {
+                    return Err(Error::transport(err))
+                }
+                // Retried for EVERY method with no attempt ceiling, on a capped,
+                // jittered ladder; dropping the future is the caller's bound.
                 Err(err) if err.is_connect() => {
                     tokio::time::sleep(unsent_backoff.next_delay()).await;
                     continue;
                 }
                 Err(err) => Error::transport(err),
             };
-            let retryable = matches!(
-                outcome.code,
-                ErrorCode::RateLimited | ErrorCode::Unavailable
-            ) && outcome.retryable;
-            if !retry || !retryable || attempt >= self.inner.max_retries {
+            if !retry || !outcome.retryable || attempt >= self.inner.max_retries {
                 return Err(outcome);
             }
             attempt += 1;
@@ -571,6 +620,16 @@ impl Zipbox {
             tokio::time::sleep(delay).await;
         }
     }
+}
+
+/// Whether a request failed before anything reached the server: a failed connect,
+/// DNS lookup or TLS handshake, including one the server ended early. reqwest
+/// reports each as a connect error; a failure after the request was written is not.
+fn is_unsent(err: &Error) -> bool {
+    err.source
+        .as_deref()
+        .and_then(|source| source.downcast_ref::<reqwest::Error>())
+        .is_some_and(reqwest::Error::is_connect)
 }
 
 /// The second 401 of `box_request`, worded for what it is.

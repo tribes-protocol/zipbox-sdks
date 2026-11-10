@@ -259,3 +259,59 @@ test('a box that stops answering is read again with backoff, never given up on',
   await zb.clock.advance(60_000)
   expect(reads() - before - during).toBeGreaterThan(5)
 })
+
+test('a deleted key ends following with a note instead of reconnecting', async ($, on) => {
+  const zb = fakeZipbox(on)
+  await start($)
+  await zipbox($, 'new dev fix the login')
+  await zb.clock.advance(0)
+  zb.deleteKey()
+  await zb.clock.advance(2_000)
+  expect(zb.notes().at(-1)).toBe(
+    'Stopped following “fix the login” on dev: Zipbox refused ZIPBOX_API_KEY.'
+  )
+  const asked = zb.asked.length
+  await zb.clock.advance(60_000)
+  expect(zb.asked).toHaveLength(asked)
+  expect(await turn($, 'hello', 'c-1')).toEqual(['from the model'])
+})
+
+test('a task the box no longer has ends following with a note', async ($, on) => {
+  let gone = false
+  const zb = fakeZipbox(on, {
+    box: (_method, path) =>
+      gone && path === '/command-center/tasks/t-1'
+        ? { status: 404, body: { error: 'not_found', message: 'No task t-1.' } }
+        : undefined
+  })
+  await start($)
+  await zipbox($, 'new dev fix the login')
+  await zb.clock.advance(0)
+  gone = true
+  await zb.clock.advance(2_000)
+  expect(zb.notes().at(-1)).toBe('Stopped following “fix the login” on dev: No task t-1.')
+  const asked = zb.asked.length
+  await zb.clock.advance(60_000)
+  expect(zb.asked).toHaveLength(asked)
+})
+
+test('a box that has not received a live key yet is read again, not given up on', async ($, on) => {
+  let pending = false
+  const zb = fakeZipbox(on, {
+    box: (_method, path) =>
+      pending && path === '/command-center/tasks/t-1'
+        ? { status: 401, body: { error: 'unauthorized' } }
+        : undefined
+  })
+  await start($)
+  await zipbox($, 'new dev fix the login')
+  await zb.clock.advance(0)
+  pending = true
+  await zb.clock.advance(60_000)
+  pending = false
+  const reads = () => zb.asked.filter((one) => one.includes('/command-center/tasks/t-1 ')).length
+  const before = reads()
+  await zb.clock.advance(60_000)
+  expect(reads() - before).toBeGreaterThan(5)
+  expect(zb.notes().join('\n')).not.toContain('Stopped following')
+})

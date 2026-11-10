@@ -250,8 +250,10 @@ impl Follow {
             let connected = self.command.connect(self.cursor.as_deref()).await;
             match connected {
                 Ok(stream) => self.current = Some(stream),
+                // Never sooner than the server asked.
                 Err(err) if err.retryable => {
-                    tokio::time::sleep(self.backoff.next_delay()).await;
+                    let ladder = self.backoff.next_delay();
+                    tokio::time::sleep(ladder.max(err.retry_after.unwrap_or_default())).await;
                 }
                 Err(err) => {
                     self.done = true;

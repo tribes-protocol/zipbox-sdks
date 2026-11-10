@@ -140,7 +140,18 @@ func (a *app) printError(err error) {
 			_ = enc.Encode(map[string]any{"error": zerr})
 			return
 		}
-		fmt.Fprintf(a.err, "error: %s (%s)\n  docs: %s\n", zerr.Message, zerr.Code, zerr.DocsURL)
+		fmt.Fprintf(a.err, "error: %s (%s)\n", zerr.Message, zerr.Code)
+		if zerr.RequestID != "" {
+			fmt.Fprintf(a.err, "  request id: %s\n", zerr.RequestID)
+		}
+		retry := "no"
+		if zerr.Retryable {
+			retry = "yes"
+			if zerr.RetryAfter > 0 {
+				retry += ", after " + zerr.RetryAfter.String()
+			}
+		}
+		fmt.Fprintf(a.err, "  retryable: %s\n  docs: %s\n", retry, zerr.DocsURL)
 		return
 	}
 	if a.jsonOut {
@@ -166,6 +177,7 @@ func (a *app) rootCommand() *cobra.Command {
 		a.logoutCommand(),
 		a.whoamiCommand(),
 		a.sandboxCommand(),
+		a.forkCommand(),
 		a.execCommand(),
 		a.runCommand(),
 		a.filesCommand(),

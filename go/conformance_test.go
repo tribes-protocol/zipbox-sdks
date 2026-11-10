@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -73,6 +74,8 @@ type mockServer struct {
 	exchanges []exchange
 	next      int
 	failures  []string
+	// previous is the headers of the request before this one, for {{SAME}}.
+	previous http.Header
 }
 
 func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,9 +88,11 @@ func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ex := m.exchanges[m.next]
 	m.next++
+	previous := m.previous
+	m.previous = r.Header.Clone()
 	m.mu.Unlock()
 	body, _ := io.ReadAll(r.Body)
-	if problem := matchRequest(ex, r, body); problem != "" {
+	if problem := matchRequest(ex, r, body, previous); problem != "" {
 		m.mu.Lock()
 		m.failures = append(m.failures, fmt.Sprintf("exchange %d: %s", m.next-1, problem))
 		m.mu.Unlock()
@@ -109,7 +114,9 @@ func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(ex.Response.Body)
 }
 
-func matchRequest(ex exchange, r *http.Request, body []byte) string {
+// matchRequest checks r against the exchange. previous is the headers of the
+// fixture's previous request, which `{{SAME}}` compares against.
+func matchRequest(ex exchange, r *http.Request, body []byte, previous http.Header) string {
 	want := ex.Request
 	if r.Method != want.Method {
 		return fmt.Sprintf("method %s, want %s", r.Method, want.Method)
@@ -122,6 +129,12 @@ func matchRequest(ex exchange, r *http.Request, body []byte) string {
 		if value == "{{ANY}}" {
 			if got == "" {
 				return fmt.Sprintf("header %s missing", name)
+			}
+			continue
+		}
+		if value == "{{SAME}}" {
+			if got == "" || previous == nil || got != previous.Get(name) {
+				return fmt.Sprintf("header %s = %q, want the previous request's %q", name, got, previous.Get(name))
 			}
 			continue
 		}
@@ -229,6 +242,24 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 		return nil, c.Sandboxes.Stop(ctx, id)
 	case "sandboxes.restart":
 		return nil, c.Sandboxes.Restart(ctx, id)
+	case "sandboxes.cancelTransition":
+		outcome, err := c.Sandboxes.CancelTransition(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"text": string(outcome)}, nil
+	case "sandboxes.fork":
+		opts := ForkOptions{Name: str(args, "name"), SourcePolicy: ForkSourcePolicy(str(args, "sourcePolicy")), Private: boolArg(args, "private"), TailscaleAuthKey: str(args, "tailscaleAuthKey")}
+		if wait, ok := args["wait"].(bool); ok {
+			opts.NoWait = !wait
+		}
+		b, err := c.Sandboxes.Fork(ctx, id, opts)
+		if err != nil {
+			return nil, err
+		}
+		return b.Detail, nil
+	case "sandboxes.getFork":
+		return c.Sandboxes.GetFork(ctx, id)
 	case "sandboxes.setTier":
 		return nil, c.Sandboxes.SetTier(ctx, id, str(args, "tier"))
 	case "sandboxes.delete":
@@ -369,6 +400,21 @@ func toJSONValue(t *testing.T, v any) any {
 	return out
 }
 
+// deadOrigin is {{DEAD}}: an origin on a port that was bound and closed, so every
+// dial to it is refused and nothing is sent.
+func deadOrigin(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return "http://" + addr
+}
+
 func TestConformance(t *testing.T) {
 	dir := fixturesDir(t)
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
@@ -386,7 +432,7 @@ func TestConformance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			text := strings.NewReplacer("{{BASE}}", base, "{{HOST}}", u.Hostname()).Replace(string(raw))
+			text := strings.NewReplacer("{{BASE}}", base, "{{HOST}}", u.Hostname(), "{{DEAD}}", deadOrigin(t)).Replace(string(raw))
 			var fx fixture
 			if err := json.Unmarshal([]byte(text), &fx); err != nil {
 				t.Fatalf("parse fixture: %v", err)
@@ -413,7 +459,7 @@ func TestConformance(t *testing.T) {
 				if !errors.As(callErr, &zerr) {
 					t.Fatalf("want a *zipbox.Error, got %v (result %v)", callErr, result)
 				}
-				got := map[string]any{"code": string(zerr.Code), "message": zerr.Message, "requestId": zerr.RequestID, "docsUrl": zerr.DocsURL}
+				got := map[string]any{"code": string(zerr.Code), "message": zerr.Message, "requestId": zerr.RequestID, "docsUrl": zerr.DocsURL, "retryable": zerr.Retryable}
 				if zerr.Status != 0 {
 					got["status"] = float64(zerr.Status)
 				}

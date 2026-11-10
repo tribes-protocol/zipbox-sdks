@@ -25,6 +25,7 @@ from zipbox._core import Core
 from zipbox._effects import (
     AsyncTransport,
     Emit,
+    HttpRequest,
     Sleep,
     Streams,
     SyncTransport,
@@ -78,6 +79,10 @@ class WsRefused(Exception):
     def __init__(self, status: int | None) -> None:
         super().__init__(f"websocket refused ({status})")
         self.status = status
+
+
+class PtyStopped(Exception):
+    """Detached while the loop was re-reading the box: it ends without an error."""
 
 
 @dataclass(frozen=True)
@@ -141,8 +146,10 @@ def pty_loop(core: Core, sandbox_id: str, state: PtyState) -> Generator[Any, Any
     config = core.config
     backoff = Backoff(config.pty_base_delay_s, config.pty_max_delay_s, rng=config.rng)
     resume = False
-    # Set when a 401 made us re-read the token; a second 401 before the box accepts a
-    # handshake again is an answered verdict (key deleted), not a transient.
+    # Set when a 401 made us re-read the token. A deleted key fails that re-read at
+    # the control plane (``core.target`` raises it). A box that refuses the token the
+    # control plane just handed out has not received the key yet: each later attempt
+    # waits on the ladder and re-reads, until the box accepts it or the key is refused.
     refetched = False
     while not state.stopping:
         try:
@@ -160,14 +167,10 @@ def pty_loop(core: Core, sandbox_id: str, state: PtyState) -> Generator[Any, Any
             yield WsConnect(socket_url(target.base_url, state, resume), (SUBPROTOCOL, target.token))
         except WsRefused as refused:
             if refused.status == 401:
-                if refetched:
-                    raise ZipboxError(
-                        "unauthorized",
-                        "The box refused this key's token (was the key deleted?).",
-                        status=401,
-                    ) from refused
-                refetched = True
                 core.forget(sandbox_id)
+                if refetched:
+                    yield Sleep(backoff.next())
+                refetched = True
                 continue
             if refused.status in (400, 403, 404):
                 raise ZipboxError(
@@ -176,6 +179,10 @@ def pty_loop(core: Core, sandbox_id: str, state: PtyState) -> Generator[Any, Any
                     status=refused.status,
                 ) from refused
             yield Sleep(backoff.next())
+            if refused.status is None and not state.stopping:
+                # Nothing answered: the box may have moved (its baseUrl changes once
+                # after create). Re-read it the way create waits before redialing.
+                yield from core.reresolve(sandbox_id)
             continue
         state.connected = True
         state.opened_once = True
@@ -298,7 +305,7 @@ class Pty:
             while True:
                 try:
                     effect = op.throw(throw) if throw is not None else op.send(send)
-                except StopIteration:
+                except (StopIteration, PtyStopped):
                     return
                 throw, send = None, None
                 try:
@@ -341,6 +348,9 @@ class Pty:
         if isinstance(effect, WsClose):
             self._drop_socket()
             return None
+        if isinstance(effect, HttpRequest) and self._stop.is_set():
+            # A Sleep no longer waits once detached; a re-read must not spin on it.
+            raise PtyStopped
         return perform_sync(self._transport, effect, streams)
 
     def _recv(self) -> str:
@@ -508,7 +518,7 @@ class AsyncPty:
             while True:
                 try:
                     effect = op.throw(throw) if throw is not None else op.send(send)
-                except StopIteration:
+                except (StopIteration, PtyStopped):
                     return
                 throw, send = None, None
                 try:
@@ -548,6 +558,9 @@ class AsyncPty:
         if isinstance(effect, WsClose):
             await self._drop_socket()
             return None
+        if isinstance(effect, HttpRequest) and self._stop.is_set():
+            # A Sleep no longer waits once detached; a re-read must not spin on it.
+            raise PtyStopped
         return await perform_async(self._transport, effect, streams)
 
     async def _recv(self) -> str:

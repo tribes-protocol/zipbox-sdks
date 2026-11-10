@@ -16,14 +16,17 @@ from zipbox._models import (
     ExecEvent,
     ExecResult,
     FileEntry,
+    ForkSourcePolicy,
     Language,
     Preview,
     SandboxDetail,
+    SandboxFork,
     SandboxInfo,
     Signal,
     SshInfo,
     TailscaleStatus,
     Tier,
+    TransitionCancelOutcome,
 )
 from zipbox._pty import Pty, new_state
 from zipbox._transport import HttpxSyncTransport
@@ -181,6 +184,60 @@ class Sandboxes:
         """Hard-restart a running box; files survive."""
         self._client._run(self._client._core.lifecycle(sandbox_id, "reset"))
 
+    def cancel_transition(self, sandbox_id: str) -> TransitionCancelOutcome:
+        """Cancel the box's state change in flight and return it to where it was.
+
+        Returns ``cleared`` (it is back already), ``cancelling`` (the host's abort is on
+        its way) or ``none`` (nothing was in flight). Raises ``conflict`` with the
+        reason past the point of no return.
+        """
+        return self._client._run(self._client._core.cancel_transition(sandbox_id))
+
+    def fork(
+        self,
+        source_id: str,
+        *,
+        name: str,
+        source_policy: ForkSourcePolicy,
+        private: bool | None = None,
+        tailscale_auth_key: str | None = None,
+        wait: bool = True,
+    ) -> Sandbox:
+        """Fork a box: a new box with the source's files and settings and a new identity.
+
+        ``name`` is the new box's permanent name (kept even if the fork is cancelled).
+        ``source_policy`` is ``"require_paused"`` (a running source raises
+        ``pause_required``) or ``"pause_and_resume"`` (a running source pauses for the
+        capture, its sessions disconnect, and it resumes right after). The new box
+        inherits the source's size; it starts public unless ``private=True`` (never
+        public, reachable only from your tailnet once it joins).
+
+        Waits (no deadline) until the new box is ready, or for a private one until it
+        is running with its key; a fork that fails raises its own code
+        (``copy_failed``, ``source_gone``, …) and a cancelled one ``conflict``.
+        ``tailscale_auth_key`` (needs the wait) is sealed here to the new box's own
+        key once it runs and never sent in the clear. ``wait=False`` returns the
+        accepted box at once. Stopping the wait never stops the fork: cancel it with
+        ``cancel_transition(child_id)``. Safe to retry: the request carries an
+        Idempotency-Key.
+        """
+        detail = self._client._run(
+            self._client._core.fork(
+                source_id,
+                name=name,
+                source_policy=source_policy,
+                private=private,
+                tailscale_auth_key=tailscale_auth_key,
+                wait=wait,
+            )
+        )
+        return Sandbox(self._client, detail.id, detail)
+
+    def get_fork(self, child_id: str) -> SandboxFork:
+        """The fork that is making (or made) this box: its phase, source recovery, waits
+        and error. ``not_found`` when the box was not made by a fork."""
+        return self._client._run(self._client._core.get_fork(child_id))
+
     def delete(self, sandbox_id: str, *, archive: bool | None = None) -> None:
         """Delete a box. A recoverable copy is kept for 30 days unless ``archive=False``."""
         self._client._run(self._client._core.delete(sandbox_id, archive))
@@ -304,6 +361,33 @@ class Sandbox:
     def restart(self) -> None:
         """Hard-restart this box."""
         self._client.sandboxes.restart(self.id)
+
+    def cancel_transition(self) -> TransitionCancelOutcome:
+        """Cancel this box's state change in flight (``conflict`` past the point of no return)."""
+        return self._client.sandboxes.cancel_transition(self.id)
+
+    def fork(
+        self,
+        *,
+        name: str,
+        source_policy: ForkSourcePolicy,
+        private: bool | None = None,
+        tailscale_auth_key: str | None = None,
+        wait: bool = True,
+    ) -> Sandbox:
+        """Fork this box into a new one named ``name``; see ``zb.sandboxes.fork``."""
+        return self._client.sandboxes.fork(
+            self.id,
+            name=name,
+            source_policy=source_policy,
+            private=private,
+            tailscale_auth_key=tailscale_auth_key,
+            wait=wait,
+        )
+
+    def fork_status(self) -> SandboxFork:
+        """The fork that is making (or made) this box (``not_found`` if none did)."""
+        return self._client.sandboxes.get_fork(self.id)
 
     def delete(self, *, archive: bool | None = None) -> None:
         """Delete this box (``archive=False`` skips the recoverable copy)."""

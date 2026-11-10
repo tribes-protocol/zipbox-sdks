@@ -1,6 +1,6 @@
 {
   "name": "sandboxes_list",
-  "description": "GET /sandbox returns the caller's boxes.",
+  "description": "GET /sandbox returns the caller's boxes, each with its phase and the lifecycle verbs it accepts.",
   "call": {
     "op": "sandboxes.list",
     "args": {}
@@ -30,7 +30,9 @@
             "memPct": 10,
             "diskPct": 20,
             "createdAt": "2026-10-19T00:00:00.000Z",
-            "updatedAt": "2026-10-19T00:00:00.000Z"
+            "updatedAt": "2026-10-19T00:00:00.000Z",
+            "phase": "running",
+            "allowedActions": ["stop", "restart", "delete", "fork"]
           }
         ]
       }
@@ -43,7 +45,9 @@
         {
           "id": "sbx_1",
           "name": "demo",
-          "status": "running"
+          "status": "running",
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"]
         }
       ]
     }

@@ -113,7 +113,10 @@ func (t *TailscaleService) Connect(ctx context.Context, authKey string) error {
 			return err
 		}
 		if (detail.Status != StatusRunning && detail.Status != StatusProvisioning) || detail.AgentPublicKey == nil || *detail.AgentPublicKey == "" {
-			return newError(CodeBoxNotRunning, "box "+t.box.ID+" is "+string(detail.Status)+" and has no key to seal to yet; start it and wait until it is running")
+			zerr := newError(CodeBoxNotRunning, "box "+t.box.ID+" is "+string(detail.Status)+" and has no key to seal to yet; start it and wait until it is running")
+			// A box that is settling grows its key by itself; one that is paused or gone does not.
+			zerr.Retryable = detail.readiness() == ReadinessSettling
+			return zerr
 		}
 		envelope, err := sealBoxEnvelope(*detail.AgentPublicKey, tailscaleEnvelopeInfo(t.box.ID), []byte(authKey))
 		if err != nil {

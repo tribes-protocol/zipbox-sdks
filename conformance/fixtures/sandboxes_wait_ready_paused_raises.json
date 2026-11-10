@@ -1,0 +1,48 @@
+{
+  "name": "sandboxes_wait_ready_paused_raises",
+  "description": "waitReady on a box whose readiness is paused raises box_not_running, not retryable: nothing will start it, so the wait ends instead of polling forever.",
+  "call": {
+    "op": "sandboxes.waitReady",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "archived",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["start", "delete", "fork"],
+          "readiness": "paused"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running",
+      "retryable": false
+    }
+  }
+}

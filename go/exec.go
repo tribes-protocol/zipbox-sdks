@@ -169,12 +169,18 @@ func (s *ExecStream) reattach() bool {
 	}
 	s.body, s.sse = nil, nil
 	s.mu.Unlock()
+	var retryAfter time.Duration
 	for {
 		if s.isClosed() {
 			s.err = errStreamClosed
 			return false
 		}
-		if err := sleep(s.ctx, s.box.client.backoff(s.failures)); err != nil {
+		// Never sooner than the server asked.
+		wait := s.box.client.backoff(s.failures)
+		if retryAfter > wait {
+			wait = retryAfter
+		}
+		if err := sleep(s.ctx, wait); err != nil {
 			s.err = err
 			return false
 		}
@@ -190,6 +196,10 @@ func (s *ExecStream) reattach() bool {
 		if !retryable(err) {
 			s.err = err
 			return false
+		}
+		retryAfter = 0
+		if zerr, ok := asError(err); ok && zerr.hasRetryAfter {
+			retryAfter = zerr.RetryAfter
 		}
 	}
 }

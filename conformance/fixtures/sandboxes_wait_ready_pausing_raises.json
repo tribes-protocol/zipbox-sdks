@@ -1,0 +1,48 @@
+{
+  "name": "sandboxes_wait_ready_pausing_raises",
+  "description": "waitReady on a pausing box (Paused while its backup still uploads) raises box_not_running, not retryable, exactly as for an archived box: its readiness is paused and nothing but a start will bring it up, so the wait ends instead of polling until the upload finishes.",
+  "call": {
+    "op": "sandboxes.waitReady",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "pausing",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["start", "delete"],
+          "readiness": "paused"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running",
+      "retryable": false
+    }
+  }
+}

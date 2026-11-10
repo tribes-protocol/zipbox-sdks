@@ -51,6 +51,7 @@ pub use sandboxes::Sandboxes;
 pub use tailscale::Tailscale;
 pub use types::{
     CreateOptions, DeleteOptions, ExecEvent, ExecOptions, ExecRecord, ExecResult, FileEntry,
-    FileKind, Language, LogOptions, OutputStream, Preview, PtyOptions, SandboxDetail, SandboxInfo,
-    Signal, SshInfo, TailscalePeer, TailscaleStatus,
+    FileKind, ForkError, ForkOptions, ForkSourcePolicy, Language, LogOptions, OutputStream,
+    Preview, PtyOptions, SandboxDetail, SandboxFork, SandboxInfo, Signal, SshInfo, TailscalePeer,
+    TailscaleStatus, TransitionCancelOutcome,
 };

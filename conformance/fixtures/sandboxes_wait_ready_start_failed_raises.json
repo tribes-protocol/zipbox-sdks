@@ -1,0 +1,49 @@
+{
+  "name": "sandboxes_wait_ready_start_failed_raises",
+  "description": "waitReady on a failed restore (archived with startFailedAt; readiness start_failed) raises start_failed, not retryable: the server already answered the start.",
+  "call": {
+    "op": "sandboxes.waitReady",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "archived",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "startFailedAt": "2026-11-09T00:01:00.000Z",
+          "phase": "start_failed",
+          "allowedActions": ["start", "delete"],
+          "readiness": "start_failed"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "start_failed",
+      "retryable": false
+    }
+  }
+}

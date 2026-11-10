@@ -82,7 +82,10 @@ interface PtyParams {
 /**
  * A live terminal. Drops reconnect by themselves with exponential backoff (cap
  * `ptyMaxDelayMs`, default 30 s, jitter) and no attempt ceiling; the ladder resets only when a frame
- * arrives. Input written while disconnected is sent on reconnect.
+ * arrives. Input written while disconnected is sent on reconnect. A dial that fails
+ * before the upgrade, a failed reconnect or a revoked token re-reads the box with the
+ * readiness wait before the next dial, so a moved baseUrl is followed and a paused,
+ * failed or deleted box ends the PTY.
  */
 export class Pty {
   /** The session id; pass it to `pty.attach` to come back to this terminal. */
@@ -99,7 +102,11 @@ export class Pty {
   private rows: number | null
   private attempt = 0
   private connectedOnce = false
+  // The cached box may be stale: the next dial re-reads it with the readiness wait.
+  private stale = false
   private ended = false
+  // Aborted when the PTY ends, so a readiness wait in flight stops with it.
+  private readonly lifetime = new AbortController()
   private pending: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
@@ -179,11 +186,21 @@ export class Pty {
   private async dial(): Promise<void> {
     let box
     try {
-      box = await this.ctx.boxes.resolve(this.sandboxId)
+      const signal = this.lifetime.signal
+      box = this.stale
+        ? await this.ctx.boxes.reresolve(this.sandboxId, signal)
+        : await this.ctx.boxes.resolve(this.sandboxId, signal)
+      this.stale = false
     } catch (error) {
       // An answered verdict (key deleted, box stopped or deleted) ends the PTY; a
-      // transient (network, box still booting) is retried forever.
-      if (error instanceof ZipboxError && !error.retryable) {
+      // transient (network, box still booting) is retried forever. A session that was
+      // open is a live surface: a private box this device lost its tailnet path to
+      // comes back when Tailscale does, so it keeps trying. A first attach fails fast.
+      const reattaching =
+        this.connectedOnce &&
+        error instanceof ZipboxError &&
+        error.code === 'box_private_unreachable'
+      if (error instanceof ZipboxError && !error.retryable && !reattaching) {
         this.finish('error', error.message)
         return
       }
@@ -206,7 +223,9 @@ export class Pty {
       return
     }
     this.ws = ws
+    let opened = false
     ws.onopen = () => {
+      opened = true
       this.connectedOnce = true
       if (this.cols !== null && this.rows !== null)
         this.send({ t: 'r', c: this.cols, r: this.rows })
@@ -227,9 +246,10 @@ export class Pty {
         this.finish('unknown_session', `no session ${this.sessionId} on this box`)
         return
       }
-      if (event.code === CLOSE_REVOKED || this.attempt > 0) {
-        // A revoked or rotated box token: read a fresh one before the next dial.
-        this.ctx.boxes.invalidate(this.sandboxId)
+      if (event.code === CLOSE_REVOKED || this.attempt > 0 || !opened) {
+        // A revoked or rotated token, or an origin that refused the dial (a claimed
+        // box's baseUrl moves once): re-read the box before the next dial.
+        this.stale = true
       }
       this.scheduleReconnect()
     }
@@ -311,6 +331,7 @@ export class Pty {
   private finish(reason: PtyEndReason, detail: string): void {
     if (this.ended) return
     this.ended = true
+    this.lifetime.abort()
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     this.stopPing()

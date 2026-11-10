@@ -40,7 +40,7 @@ Those answer `403 forbidden`. Keys are not for browsers: a request carrying an `
 
 ## How a key reaches a box
 
-The key never travels to a box. `GET /sandbox/:id` called with your key returns `baseUrl` (the box's HTTPS origin) and `boxToken`, a token derived from your key and that one box. The box accepts it as a bearer. It never expires, it works only on that box, and it stops working when the key is deleted. The SDKs fetch it on first use, cache it, and re-fetch it once if a box answers `401`. See [Box API](https://zipbox.ai/docs/box-api.md#authentication).
+The key never travels to a box. `GET /sandbox/:id` called with your key returns `baseUrl` (the box's HTTPS origin) and `boxToken`, a token derived from your key and that one box. The box accepts it as a bearer. It never expires, it works only on that box, and it stops working when the key is deleted. The SDKs fetch it on first use, cache it, and re-fetch it once if a box answers `401`. A box call that never reached the box (a connect or TLS failure) re-reads it too, because a new box's `baseUrl` changes once, to `box--<name>`, a few minutes after create. See [Box API](https://zipbox.ai/docs/box-api.md#authentication).
 
 ## Rate limits
 

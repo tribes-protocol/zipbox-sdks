@@ -39,6 +39,38 @@ const (
 	CodeTailscaleRequiresUpdate ErrorCode = "tailscale_requires_update"
 	// CodeBoxPrivateUnreachable: the box is private and this device is not on its tailnet.
 	CodeBoxPrivateUnreachable ErrorCode = "box_private_unreachable"
+
+	// Fork refusals, each answered before anything is reserved or the source is
+	// touched, and never retried.
+
+	// CodeNameTaken: the requested name is in use.
+	CodeNameTaken ErrorCode = "name_taken"
+	// CodeSourceUnsupported: the source is not a machine a fork supports (its class,
+	// or, as a fork's own error, its disk layout).
+	CodeSourceUnsupported ErrorCode = "source_unsupported"
+	// CodeSourceBusy: the source has another change in flight.
+	CodeSourceBusy ErrorCode = "source_busy"
+	// CodePauseRequired: the source is running and the fork did not allow pausing it
+	// (ForkPauseAndResume).
+	CodePauseRequired ErrorCode = "pause_required"
+	// CodeRequiresInteractive: copying the source's machine-scoped credentials needs
+	// the owner signed in to the dashboard, not an API key.
+	CodeRequiresInteractive ErrorCode = "requires_interactive"
+	// CodeIdempotencyMismatch: the Idempotency-Key was already used for a different request.
+	CodeIdempotencyMismatch ErrorCode = "idempotency_mismatch"
+
+	// Why a fork ended without a box (SandboxFork.Error), returned by a waiting
+	// Fork. Each is final; retrying the same fork fails the same way.
+
+	// CodeSourceGone: the source was deleted before it was captured.
+	CodeSourceGone ErrorCode = "source_gone"
+	// CodeIdentityReused: the new box came up with the source's key, so it was
+	// stopped before serving and its disk discarded.
+	CodeIdentityReused ErrorCode = "identity_reused"
+	// CodeCopyFailed: the isolated copy could not produce a verified filesystem.
+	CodeCopyFailed ErrorCode = "copy_failed"
+	// CodeStartFailed: the new box failed to boot.
+	CodeStartFailed ErrorCode = "start_failed"
 )
 
 const docsErrorsURL = "https://zipbox.ai/docs/errors"
@@ -62,7 +94,8 @@ type Error struct {
 	RequestID string `json:"requestId,omitempty"`
 	// Retryable reports whether the same request may succeed if sent again later.
 	Retryable bool `json:"retryable"`
-	// RetryAfter is how long the server asked the caller to wait, when it said.
+	// RetryAfter is how long the server asked the caller to wait, when it said. JSON
+	// carries it as retryAfterMs, the envelope's name (see MarshalJSON).
 	RetryAfter time.Duration `json:"-"`
 	// DocsURL points at the docs entry for Code.
 	DocsURL string `json:"docsUrl"`
@@ -80,6 +113,21 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("zipbox: %s (%d): %s", e.Code, e.Status, e.Message)
 	}
 	return fmt.Sprintf("zipbox: %s: %s", e.Code, e.Message)
+}
+
+// MarshalJSON writes the error's fields plus retryAfterMs, RetryAfter in
+// milliseconds, when the server said how long to wait.
+func (e *Error) MarshalJSON() ([]byte, error) {
+	type fields Error
+	out := struct {
+		*fields
+		RetryAfterMs *int64 `json:"retryAfterMs,omitempty"`
+	}{fields: (*fields)(e)}
+	if e.hasRetryAfter {
+		ms := e.RetryAfter.Milliseconds()
+		out.RetryAfterMs = &ms
+	}
+	return json.Marshal(out)
 }
 
 // IsCode reports whether err is a *Error with the given code.
@@ -104,6 +152,21 @@ func asError(err error) (*Error, bool) {
 
 func docsURLFor(code ErrorCode) string {
 	return docsErrorsURL + "#" + string(code)
+}
+
+// knownCode reports a code this SDK documents. Another code from a later server
+// maps by status, as in every SDK.
+func knownCode(code ErrorCode) bool {
+	switch code {
+	case CodeInvalidRequest, CodeUnauthorized, CodeForbidden, CodeNotFound, CodeInsufficientCredits,
+		CodeConflict, CodeRateLimited, CodeBoxNotRunning, CodeUnavailable, CodeMachineLimitReached,
+		CodeBoxKeyChanged, CodeTailnetNotConnected, CodeTailscaleUnavailableEgressLockdown,
+		CodeTailscaleRequiresUpdate, CodeBoxPrivateUnreachable, CodeNameTaken, CodeSourceUnsupported,
+		CodeSourceBusy, CodePauseRequired, CodeRequiresInteractive, CodeIdempotencyMismatch,
+		CodeSourceGone, CodeIdentityReused, CodeCopyFailed, CodeStartFailed:
+		return true
+	}
+	return false
 }
 
 func retryableCode(code ErrorCode) bool {
@@ -165,6 +228,10 @@ func errorFromResponse(resp *http.Response, body []byte) *Error {
 	if json.Unmarshal(body, &raw) == nil && len(raw.Error) > 0 {
 		var env envelopeBody
 		if raw.Error[0] == '{' && json.Unmarshal(raw.Error, &env) == nil && env.Code != "" {
+			if !knownCode(env.Code) {
+				env.Code = codeForStatus(resp.StatusCode)
+				env.DocsURL = ""
+			}
 			zerr := &Error{
 				Code:       env.Code,
 				Status:     resp.StatusCode,

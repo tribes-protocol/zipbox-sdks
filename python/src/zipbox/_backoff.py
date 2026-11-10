@@ -14,16 +14,18 @@ class Backoff:
         base_s: float,
         cap_s: float,
         *,
+        factor: float = 2.0,
         rng: Callable[[], float] = random.random,
     ) -> None:
         self.base_s = base_s
         self.cap_s = cap_s
+        self.factor = factor
         self.attempt = 0
         self._rng = rng
 
     def peek(self) -> float:
         """The un-jittered delay the next ``next()`` is based on."""
-        return float(min(self.cap_s, self.base_s * (2.0**self.attempt)))
+        return float(min(self.cap_s, self.base_s * (self.factor**self.attempt)))
 
     def next(self) -> float:
         """Advance the ladder; jitter keeps a fleet of clients from retrying in step."""

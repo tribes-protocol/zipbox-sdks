@@ -1,0 +1,53 @@
+{
+  "name": "sandboxes_get_fork",
+  "description": "getFork → GET /sandbox/:childId/fork; returns the fork projection as it came.",
+  "call": {
+    "op": "sandboxes.getFork",
+    "args": {
+      "id": "sbx_2"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "operationId": "fork_1",
+          "sourceSandboxId": "sbx_1",
+          "childSandboxId": "sbx_2",
+          "sourcePolicy": "pause_and_resume",
+          "phase": "copying",
+          "sourceRecovery": "resumed",
+          "captureMode": "reflink",
+          "waitingOn": null,
+          "attempt": 0,
+          "nextAttemptAt": null,
+          "cancelRequestedAt": null,
+          "error": null,
+          "createdAt": "2026-11-05T00:00:00.000Z",
+          "updatedAt": "2026-11-05T00:01:00.000Z",
+          "completedAt": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "operationId": "fork_1",
+      "sourceSandboxId": "sbx_1",
+      "childSandboxId": "sbx_2",
+      "sourcePolicy": "pause_and_resume",
+      "phase": "copying",
+      "sourceRecovery": "resumed",
+      "captureMode": "reflink",
+      "attempt": 0
+    }
+  }
+}

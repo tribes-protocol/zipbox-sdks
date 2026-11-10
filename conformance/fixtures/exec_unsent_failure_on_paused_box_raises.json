@@ -1,0 +1,78 @@
+{
+  "name": "exec_unsent_failure_on_paused_box_raises",
+  "description": "An unsent box failure re-enters the readiness wait, and the wait's own verdict ends the call: a box that reads paused raises box_not_running, not retryable, exactly as sandboxes.waitReady does. The retry has no attempt ceiling, so this verdict is what stops a call on a box nobody will start.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{DEAD}}",
+          "boxToken": "bt_dead",
+          "phase": "running",
+          "readiness": "ready"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "archived",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "readiness": "paused",
+          "allowedActions": ["start", "delete", "fork"]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running",
+      "retryable": false
+    }
+  }
+}

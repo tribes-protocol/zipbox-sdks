@@ -4,16 +4,18 @@ export interface BackoffParams {
   attempt: number
   baseMs: number
   capMs: number
+  /** Growth per attempt. Default 2. */
+  factor?: number
   /** A value in [0, 1). */
   random: number
 }
 
 /**
- * Exponential backoff with jitter: `min(cap, base * 2^attempt)`, scaled into
+ * Exponential backoff with jitter: `min(cap, base * factor^attempt)`, scaled into
  * [50%, 100%) of that so a fleet of clients never retries in lockstep.
  */
 export function backoffDelay(params: BackoffParams): number {
-  const exponential = params.baseMs * 2 ** Math.min(params.attempt, 30)
+  const exponential = params.baseMs * (params.factor ?? 2) ** Math.min(params.attempt, 30)
   const ceiling = Math.min(params.capMs, exponential)
   return Math.round(ceiling * (0.5 + params.random * 0.5))
 }

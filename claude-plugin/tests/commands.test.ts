@@ -107,6 +107,16 @@ test('a private box this computer can reach is probed once, then used', async ($
   ])
 })
 
+// AX-20: a failed TLS handshake is an answer. The box is reachable from here and only
+// lacks its certificate yet, so it is not "off your tailnet".
+test('a private box whose certificate has not landed counts as reached', async ($, on) => {
+  const zb = fakeZipbox(on, { privateBox: 'tls' })
+  await start($)
+  await zipbox($, 'use dev')
+  expect((await zipbox($, 'run ls')).text).toBe('ran ls\nexit 0')
+  expect(zb.asked.filter((line) => line.includes('/challenge'))).toHaveLength(1)
+})
+
 test('a private box off this tailnet says so instead of failing to connect', async ($, on) => {
   const zb = fakeZipbox(on, { privateBox: 'refused' })
   await start($)
@@ -132,4 +142,20 @@ test('a private box that never answers fails after 5 seconds, not before', async
   await pending
   expect(text).toContain('dev is private')
   expect(zb.asked.some((line) => line.includes('/exec'))).toBe(false)
+})
+
+// A created box's address moves once, to box--<name>, minutes after create. The old
+// one refuses: the window reads the box again, once, and runs the command where it moved.
+test('a box whose address moved is read again, and the command runs there', async ($, on) => {
+  const zb = fakeZipbox(on)
+  await start($)
+  await zipbox($, 'use dev')
+  expect((await zipbox($, 'run ls')).text).toBe('ran ls\nexit 0')
+  zb.moveBox('https://box--dev.zbox.sh')
+  expect((await zipbox($, 'run ls')).text).toBe('ran ls\nexit 0')
+  expect(zb.asked.filter((line) => line.startsWith('POST') && line.includes('/exec'))).toEqual([
+    'POST https://dev.zbox.sh/exec Bearer bt-1',
+    'POST https://dev.zbox.sh/exec Bearer bt-1',
+    'POST https://box--dev.zbox.sh/exec Bearer bt-1'
+  ])
 })

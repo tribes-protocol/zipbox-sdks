@@ -1,0 +1,49 @@
+{
+  "name": "sandboxes_fork_pause_required",
+  "description": "A running source forked with require_paused answers 409 pause_required: raised with its own code (never conflict) and not retried.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "pause_required",
+            "message": "demo is running. Fork it with sourcePolicy pause_and_resume: it pauses for the capture, its sessions disconnect, and it resumes right after.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#pause_required"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "pause_required",
+      "status": 409,
+      "docsUrl": "https://zipbox.ai/docs/errors#pause_required"
+    }
+  }
+}

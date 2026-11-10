@@ -1,7 +1,14 @@
 import { backoffDelay, sleep } from './backoff.js'
 import { ZipboxError } from './errors.js'
+import { isTransitionCancelResult, readJson } from './guards.js'
+import { endedError, readinessOf } from './readiness.js'
 import type { BoxTransport, ControlPlane } from './transport.js'
-import type { SandboxDetail, SandboxTier, WebSocketConstructor } from './types.js'
+import type {
+  SandboxDetail,
+  SandboxTier,
+  TransitionCancelOutcome,
+  WebSocketConstructor
+} from './types.js'
 
 /** Everything a handle needs from its client. Internal. */
 export interface ClientContext {
@@ -34,48 +41,71 @@ export async function getDetail(
   return row
 }
 
-/**
- * A private box that is running with its key but has not joined a tailnet yet: it
- * is never `ready` until it joins, which needs the caller's auth key, sealed to
- * that key.
- */
-function awaitsTailnet(detail: SandboxDetail): boolean {
-  return (
-    detail.privateMode === true &&
-    typeof detail.tailscale?.ipv4 !== 'string' &&
-    detail.status === 'running' &&
-    typeof detail.agentPublicKey === 'string' &&
-    detail.agentPublicKey !== ''
-  )
+// A box turns ready about a second after it serves, and nothing tells the client when,
+// so each poll rung is time spent asleep after it did. Doubling overshot by up to
+// several seconds; 1.25 keeps the same base, cap and jitter and reaches the cap gently.
+const POLL_FACTOR = 1.25
+
+/** The delay before the n-th re-read of a wait (0 = the first): the client's poll ladder. */
+function pollDelay(ctx: ClientContext, attempt: number): number {
+  return backoffDelay({
+    attempt,
+    baseMs: ctx.pollIntervalMs,
+    capMs: ctx.pollMaxIntervalMs,
+    factor: POLL_FACTOR,
+    random: ctx.random()
+  })
 }
 
 /**
- * Re-read the box until it is ready. Client-side polling with backoff, never on a
- * deadline: a box that is still booting is still booting. Abort with the signal.
- * A private box that has not joined a tailnet yet is returned once it is running
- * with its own key, so the caller can seal an auth key to it.
+ * Re-read the box until it is ready, or, for a private box that has not joined a
+ * tailnet yet, until it is running with its own key (the caller seals an auth key to
+ * it). The server's `readiness` decides: `settling` keeps reading, and `paused`,
+ * `start_failed`, `deleting` and `gone` raise their answered verdict. Client-side
+ * polling with backoff, never on a deadline: a box that is still booting is still
+ * booting. A read that fails with a retryable error (a control-plane deploy) goes
+ * on the same ladder, never sooner than its `retryAfterMs`. Abort with the signal.
  */
 export async function waitUntilReady(
   ctx: ClientContext,
   id: string,
   signal?: AbortSignal
 ): Promise<SandboxDetail> {
-  let delay = ctx.pollIntervalMs
-  for (;;) {
-    const detail = await getDetail(ctx, id, signal)
-    if (detail.ready || awaitsTailnet(detail)) return detail
-    if (
-      detail.status === 'destroyed' ||
-      detail.status === 'stopped' ||
-      detail.status === 'deleting'
-    ) {
-      throw new ZipboxError({
-        code: 'conflict',
-        message: `box ${id} is ${detail.status} and will not become ready`
-      })
+  for (let attempt = 0; ; attempt++) {
+    let retryAfterMs = 0
+    let detail: SandboxDetail | null = null
+    try {
+      detail = await getDetail(ctx, id, signal)
+    } catch (error) {
+      if (!(error instanceof ZipboxError) || !error.retryable) throw error
+      retryAfterMs = error.retryAfterMs ?? 0
     }
-    await sleep(Math.round(delay * (0.75 + ctx.random() * 0.5)), signal)
-    delay = Math.min(ctx.pollMaxIntervalMs, delay * 1.5)
+    if (detail !== null) {
+      const ended = endedError(id, detail)
+      if (ended !== null) throw ended
+      if (readinessOf(detail) !== 'settling') return detail
+    }
+    await sleep(Math.max(retryAfterMs, pollDelay(ctx, attempt)), signal)
+  }
+}
+
+/**
+ * One read of the box inside a wait. A read that fails with a retryable error (a
+ * control-plane deploy) is read again on the poll ladder, never sooner than its
+ * `retryAfterMs`, with no ceiling; any other error is raised.
+ */
+export async function readDetailInWait(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<SandboxDetail> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await getDetail(ctx, id, signal)
+    } catch (error) {
+      if (!(error instanceof ZipboxError) || !error.retryable) throw error
+      await sleep(Math.max(error.retryAfterMs ?? 0, pollDelay(ctx, attempt)), signal)
+    }
   }
 }
 
@@ -110,24 +140,46 @@ export async function startBox(
       return
     } catch (error) {
       if (!(error instanceof ZipboxError) || error.code !== 'conflict') throw error
-      let detail = await getDetail(ctx, id, signal)
+      let detail = await readDetailInWait(ctx, id, signal)
       if (detail.status !== 'stopping') {
         // A second conflict after a stop was waited out: the box restored itself,
         // or it is archived and will not restore (that answer is final).
         if (waited && (detail.status === 'provisioning' || detail.status === 'running')) return
         throw error
       }
-      let delay = ctx.pollIntervalMs
-      while (detail.status === 'stopping') {
-        await sleep(Math.round(delay * (0.75 + ctx.random() * 0.5)), signal)
-        delay = Math.min(ctx.pollMaxIntervalMs, delay * 1.5)
-        detail = await getDetail(ctx, id, signal)
+      for (let attempt = 0; detail.status === 'stopping'; attempt++) {
+        await sleep(pollDelay(ctx, attempt), signal)
+        detail = await readDetailInWait(ctx, id, signal)
       }
       waited = true
       if (detail.status === 'provisioning' || detail.status === 'running') return
       if (detail.status !== 'archived') throw error
     }
   }
+}
+
+/**
+ * Cancel the box's state change in flight (a stop, a start, a restart, a tier
+ * change, a delete that keeps a copy). Not retried: a refusal (`conflict`, past the
+ * point of no return) is raised with the server's reason.
+ */
+export async function cancelTransition(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<TransitionCancelOutcome> {
+  ctx.boxes.invalidate(id)
+  const response = await ctx.api.request({
+    method: 'POST',
+    path: boxPath(id, '/transition/cancel'),
+    signal
+  })
+  const body = await readJson(
+    response,
+    isTransitionCancelResult,
+    'POST /sandbox/:id/transition/cancel'
+  )
+  return body.outcome
 }
 
 export async function setTier(

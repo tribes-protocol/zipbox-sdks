@@ -1,0 +1,62 @@
+{
+  "name": "sandboxes_fork_replayed_after_it_ended",
+  "description": "A 202 whose sandbox is null: the Idempotency-Key found a fork that already ended and removed its box. fork raises that fork's own error code (here source_gone) from the 202 itself, with no further request and no retry.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "operationId": "fork_1",
+          "sandbox": null,
+          "fork": {
+            "operationId": "fork_1",
+            "sourceSandboxId": "sbx_1",
+            "childSandboxId": "sbx_2",
+            "sourcePolicy": "require_paused",
+            "phase": "failed",
+            "sourceRecovery": "not_needed",
+            "captureMode": null,
+            "waitingOn": null,
+            "attempt": 0,
+            "nextAttemptAt": null,
+            "cancelRequestedAt": null,
+            "error": {
+              "code": "source_gone",
+              "message": "The source machine was deleted before its disk was captured."
+            },
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:01:00.000Z",
+            "completedAt": "2026-11-05T00:01:00.000Z"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "source_gone",
+      "docsUrl": "https://zipbox.ai/docs/errors#source_gone"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "exec_box_not_ready",
-  "description": "A box that is not ready raises box_not_running without calling the box.",
+  "description": "A box that is not ready raises box_not_running without calling the box. With no readiness on the row (an older control plane) a paused box is not retryable.",
   "call": {
     "op": "sandbox.exec",
     "args": {
@@ -42,7 +42,8 @@
   ],
   "expect": {
     "error": {
-      "code": "box_not_running"
+      "code": "box_not_running",
+      "retryable": false
     }
   }
 }

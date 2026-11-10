@@ -259,3 +259,43 @@ describe('sandboxes.getOrCreate on a private box', () => {
     expect(detailReads()).toBe(2)
   })
 })
+
+describe('private box after an unsent failure', () => {
+  // A private box reached once, then this device drops off the tailnet: the dial fails
+  // before anything is sent. The re-read drops the reachability proof with the target,
+  // so the box is probed again and the call ends, instead of dialling it forever.
+  it('probes the box again and fails fast off the tailnet', async () => {
+    let onTailnet = true
+    const boxCalls: string[] = []
+    const fetch: FetchLike = (url) => {
+      if (url === 'https://api.test/sandbox/sbx_1') return json(detail({ privateMode: true }))
+      boxCalls.push(url)
+      if (url.endsWith('/challenge') && onTailnet) {
+        onTailnet = false
+        return json({})
+      }
+      return Promise.reject(
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' })
+        })
+      )
+    }
+    const zb = new Zipbox({
+      apiKey: 'zb_test',
+      baseUrl: 'https://api.test',
+      fetch,
+      retryBaseDelayMs: 1,
+      pollIntervalMs: 1
+    })
+    const error: unknown = await zb
+      .sandbox('sbx_1')
+      .commands.signal('cmd_1', 'TERM')
+      .catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'box_private_unreachable', retryable: false })
+    expect(boxCalls).toEqual([
+      'https://box--build.zbox.sh/challenge',
+      'https://box--build.zbox.sh/exec/cmd_1/signal',
+      'https://box--build.zbox.sh/challenge'
+    ])
+  })
+})

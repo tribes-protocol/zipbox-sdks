@@ -21,8 +21,10 @@ pub struct SandboxInfo {
     /// The box's public IPv6 address (SSH goes here directly).
     #[serde(default)]
     pub ipv6: Option<String>,
-    /// `provisioning`, `running`, `stopping`, `stopped`, `archived`, `deleting` (signing out
-    /// of its tailnet before it is destroyed) or `destroyed`.
+    /// `provisioning`, `running`, `stopping`, `pausing` (paused: the VM is stopped and its
+    /// disk is safe on its host; its backup is still uploading; a start boots it at once),
+    /// `stopped`, `archived`, `deleting` (signing out of its tailnet before it is
+    /// destroyed) or `destroyed`.
     pub status: String,
     /// The machine tier (`xs` … `xxl`).
     #[serde(default)]
@@ -81,6 +83,21 @@ pub struct SandboxInfo {
     /// accepted. `None` until the box has reported since it booted.
     #[serde(default)]
     pub tailscale_supported: Option<bool>,
+    /// The fork still making this box: its phase, source recovery, waits and error.
+    /// `None` on every box not being forked into.
+    #[serde(default)]
+    pub fork: Option<SandboxFork>,
+    /// What the box is doing now: `starting`, `running`, `stopping`, `paused`,
+    /// `resizing`, `forking`, `deleting`, `delete_failed` (a delete was refused; the
+    /// box still runs), `start_failed` or `gone`. `None` from an older control plane.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// The lifecycle verbs the box accepts now (`start`, `stop`, `restart`, `delete`,
+    /// `cancel_transition`, `fork`). A listed verb can still be refused for a reason
+    /// outside the box: credit, capacity, an argument. `None` from an older control
+    /// plane.
+    #[serde(default)]
+    pub allowed_actions: Option<Vec<String>>,
     /// Undocumented fields of the row.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -164,6 +181,12 @@ pub struct SandboxDetail {
     /// Running and serving the owner's generation: the box answers requests.
     #[serde(default)]
     pub ready: bool,
+    /// Whether the box will answer, from the same connection gate as `ready`: what
+    /// every wait reads. `ready`, `settling`, `awaits_tailnet`, `paused`,
+    /// `start_failed`, `deleting` or `gone`. `None` from an older control plane, where
+    /// the client falls back to `ready` and `status`.
+    #[serde(default)]
+    pub readiness: Option<String>,
     /// Whether `base_url` completes a TLS handshake with a trusted certificate yet.
     /// A fresh name's certificate can trail `ready`; the client's box calls retry the
     /// handshake meanwhile.
@@ -182,6 +205,7 @@ impl std::fmt::Debug for SandboxDetail {
         f.debug_struct("SandboxDetail")
             .field("info", &self.info)
             .field("ready", &self.ready)
+            .field("readiness", &self.readiness)
             .field("https_ready", &self.https_ready)
             .field("base_url", &self.base_url)
             .field("box_token", &self.box_token.as_ref().map(|_| "<redacted>"))
@@ -218,6 +242,143 @@ pub struct CreateOptions {
     /// running with its key; call [`crate::Tailscale::connect`] next.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>,
+}
+
+/// How a fork treats its source, for [`ForkOptions::source_policy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkSourcePolicy {
+    /// Refuse a running source ([`crate::ErrorCode::PauseRequired`]). A paused source
+    /// stays paused.
+    RequirePaused,
+    /// Let a running source pause for its capture: its sessions disconnect and it
+    /// resumes right after. A paused source stays paused.
+    PauseAndResume,
+}
+
+impl ForkSourcePolicy {
+    /// The wire value: `require_paused` or `pause_and_resume`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForkSourcePolicy::RequirePaused => "require_paused",
+            ForkSourcePolicy::PauseAndResume => "pause_and_resume",
+        }
+    }
+}
+
+/// Options for [`crate::Sandboxes::fork`]. Build them with [`ForkOptions::new`]:
+/// it waits for the new box by default, like the other SDKs.
+///
+/// `Debug` redacts `tailscale_auth_key`, so printing the options cannot leak it.
+#[derive(Clone)]
+pub struct ForkOptions {
+    /// The new box's permanent name. It is kept even if the fork is cancelled.
+    pub name: String,
+    /// What the fork may do to a running source.
+    pub source_policy: ForkSourcePolicy,
+    /// Start the new box private ("tailnet only"): never public, reachable only
+    /// from your tailnet once it joins. `None` or `Some(false)` = public, whatever
+    /// the source's privacy.
+    pub private: Option<bool>,
+    /// A Tailscale auth key to join the new box to your tailnet once it runs. It is
+    /// sealed on this machine to the new box's own key and never sent to `/fork`.
+    /// Needs `wait`.
+    pub tailscale_auth_key: Option<String>,
+    /// Wait until the new box is ready (a private one: running with its key, then
+    /// enrolled when a key is given). `false` returns the accepted box at once.
+    /// Default `true`. Dropping the future only stops the wait; the fork goes on.
+    pub wait: bool,
+}
+
+impl ForkOptions {
+    /// Fork into a box named `name`, waiting for it, with no Tailscale key.
+    pub fn new(name: impl Into<String>, source_policy: ForkSourcePolicy) -> ForkOptions {
+        ForkOptions {
+            name: name.into(),
+            source_policy,
+            private: None,
+            tailscale_auth_key: None,
+            wait: true,
+        }
+    }
+}
+
+impl std::fmt::Debug for ForkOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForkOptions")
+            .field("name", &self.name)
+            .field("source_policy", &self.source_policy)
+            .field("private", &self.private)
+            .field(
+                "tailscale_auth_key",
+                &self.tailscale_auth_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("wait", &self.wait)
+            .finish()
+    }
+}
+
+/// Why a fork ended without a box.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkError {
+    /// `source_unsupported`, `source_gone`, `identity_reused`, `copy_failed` or
+    /// `start_failed`. A string, so a later value never breaks parsing.
+    pub code: String,
+    /// Human-readable detail.
+    pub message: String,
+}
+
+/// One fork operation's progress (`GET /sandbox/:id/fork` on the new box).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxFork {
+    /// The durable operation's id.
+    pub operation_id: String,
+    /// The box being forked.
+    pub source_sandbox_id: String,
+    /// The new box.
+    pub child_sandbox_id: String,
+    /// `require_paused` or `pause_and_resume`.
+    pub source_policy: String,
+    /// `preparing_identity`, `queued`, `capturing`, `copying`, `starting`,
+    /// `complete`, `cancelling`, `cancelled` or `failed`. `complete`: the new box has
+    /// its own disk and serves.
+    pub phase: String,
+    /// `not_needed` (the source was paused and stays paused), `pending` (its resume
+    /// is owed), `resumed` or `superseded` (a newer pause or delete replaced it).
+    pub source_recovery: String,
+    /// `reflink` or `copy`, once the source is captured.
+    #[serde(default)]
+    pub capture_mode: Option<String>,
+    /// Why the current step waits (`software_install`, `legacy_chisel`, `busy`,
+    /// `host_offline`, `capacity`); `None` while it moves.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
+    /// The retry ladder's position for the current step.
+    #[serde(default)]
+    pub attempt: u32,
+    /// When the current step is retried next.
+    #[serde(default)]
+    pub next_attempt_at: Option<String>,
+    /// When a cancel was asked for.
+    #[serde(default)]
+    pub cancel_requested_at: Option<String>,
+    /// Why a `failed` fork ended.
+    #[serde(default)]
+    pub error: Option<ForkError>,
+    /// When the fork was accepted.
+    #[serde(default)]
+    pub created_at: String,
+    /// When the fork last changed.
+    #[serde(default)]
+    pub updated_at: String,
+    /// When the fork reached `complete`, `cancelled` or `failed`.
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// Undocumented fields.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Options for [`crate::Sandboxes::delete_with`].
@@ -459,6 +620,31 @@ impl Language {
     }
 }
 
+/// What [`crate::Sandboxes::cancel_transition`] did. A change past its point of no
+/// return is refused with [`crate::ErrorCode::Conflict`] carrying the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransitionCancelOutcome {
+    /// Nothing was executing on a host: the queued change was dropped and the box is
+    /// already back where it was.
+    Cleared,
+    /// The host is executing the change; its abort is on the way.
+    Cancelling,
+    /// The box had no change in flight.
+    None,
+}
+
+impl TransitionCancelOutcome {
+    /// The wire value: `cleared`, `cancelling` or `none`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransitionCancelOutcome::Cleared => "cleared",
+            TransitionCancelOutcome::Cancelling => "cancelling",
+            TransitionCancelOutcome::None => "none",
+        }
+    }
+}
+
 /// What a directory entry is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -545,5 +731,38 @@ mod tests {
             !debug.contains("bt_secret") && debug.contains("<redacted>"),
             "{debug}"
         );
+    }
+
+    #[test]
+    fn fork_options_wait_by_default_and_never_print_the_auth_key() {
+        let mut options = ForkOptions::new("demo-2", ForkSourcePolicy::PauseAndResume);
+        assert!(options.wait);
+        assert!(options.tailscale_auth_key.is_none());
+        assert!(options.private.is_none());
+        assert!(format!("{options:?}").contains("private: None"));
+        options.tailscale_auth_key = Some("tskey-auth-secret".into());
+        options.private = Some(true);
+        let debug = format!("{options:?} {options:#?}");
+        assert!(
+            !debug.contains("tskey-auth-secret") && debug.contains("<redacted>"),
+            "{debug}"
+        );
+        assert!(debug.contains("demo-2"), "{debug}");
+        assert!(debug.contains("private: Some(true)"), "{debug}");
+        assert_eq!(
+            serde_json::to_value(ForkSourcePolicy::PauseAndResume).unwrap(),
+            "pause_and_resume"
+        );
+    }
+
+    #[test]
+    fn fork_projection_parses_values_this_sdk_does_not_know() {
+        let fork: SandboxFork = serde_json::from_str(
+            r#"{"operationId":"fork_1","sourceSandboxId":"sbx_1","childSandboxId":"sbx_2","sourcePolicy":"require_paused","phase":"later_phase","sourceRecovery":"later_recovery","waitingOn":"later_wait","attempt":2,"createdAt":"t","updatedAt":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(fork.phase, "later_phase");
+        assert_eq!(fork.waiting_on.as_deref(), Some("later_wait"));
+        assert!(fork.error.is_none());
     }
 }

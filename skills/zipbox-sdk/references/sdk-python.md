@@ -64,7 +64,7 @@ zb = Zipbox(
     # retry backoff: first delay and cap, with jitter
     retry_base_delay_s=0.5,
     retry_max_delay_s=30.0,
-    # readiness checks in create: first delay and cap
+    # readiness checks: first delay and cap; grows 1.25x per check, jittered
     poll_interval_s=1.0,
     poll_max_interval_s=10.0,
     # PTY reconnects: first delay and cap (no attempt limit)
@@ -77,17 +77,24 @@ No request has a timeout. To bound one, pass your own `http_client=httpx.Client(
 
 ## Boxes
 
-| Method                                                                                         | Returns                                            |
-| ---------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `zb.sandboxes.create(name=None, tier=None, ssh_public_key=None, mailbox=None, private=None)`   | `Sandbox`, ready (with `private`, running)         |
-| `zb.sandboxes.get_or_create(name, tier=None, ssh_public_key=None, mailbox=None, private=None)` | `Sandbox`                                          |
-| `zb.sandboxes.wait_ready(id)`                                                                  | `Sandbox`, ready (private and not joined: running) |
-| `zb.sandboxes.list()`                                                                          | `list[SandboxInfo]`                                |
-| `zb.sandboxes.get(id)`                                                                         | `Sandbox`                                          |
-| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`                                          | `None`                                             |
-| `zb.sandboxes.set_tier(id, tier)`                                                              | `None`                                             |
-| `zb.sandboxes.delete(id, archive=None)`                                                        | `None`                                             |
-| `zb.sandbox(id)`                                                                               | `Sandbox` handle, no network call                  |
+| Method                                                                                           | Returns                                                                          |
+| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `zb.sandboxes.create(name=None, tier=None, ssh_public_key=None, mailbox=None, private=None)`     | `Sandbox`, ready (with `private`, running)                                       |
+| `zb.sandboxes.get_or_create(name, tier=None, ssh_public_key=None, mailbox=None, private=None)`   | `Sandbox`                                                                        |
+| `zb.sandboxes.wait_ready(id)`                                                                    | `Sandbox`, ready (private and not joined: running)                               |
+| `zb.sandboxes.list()`                                                                            | `list[SandboxInfo]`                                                              |
+| `zb.sandboxes.get(id)`                                                                           | `Sandbox`                                                                        |
+| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`                                            | `None`                                                                           |
+| `zb.sandboxes.cancel_transition(id)`                                                             | `"cleared"` / `"cancelling"` / `"none"` (`conflict` past the point of no return) |
+| `zb.sandboxes.fork(id, name=, source_policy=, private=None, tailscale_auth_key=None, wait=True)` | `Sandbox`: the new box, ready (private: running; `wait=False`: as accepted)      |
+| `zb.sandboxes.get_fork(id)`                                                                      | `SandboxFork` of the new box `id`                                                |
+| `zb.sandboxes.set_tier(id, tier)`                                                                | `None`                                                                           |
+| `zb.sandboxes.delete(id, archive=None)`                                                          | `None`                                                                           |
+| `zb.sandbox(id)`                                                                                 | `Sandbox` handle, no network call                                                |
+
+Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+
+A created box's `base_url` changes once, a few minutes after create: from its boot address to `box--<name>`. The SDK follows it. A box call whose request never left (a refused connect, DNS, a TLS handshake) waits a rung of its backoff, re-reads the box with the same wait and retries there, with no attempt ceiling; a paused, failed or deleted box ends the call with that wait's error. A PTY whose dial fails does the same before it redials.
 
 `get_or_create` takes every `create` option except `name` and applies them only when it creates the box. A box that already has the name is returned as it is, even when it differs (another tier, not private): that is not an error and nothing is resized.
 
@@ -95,7 +102,15 @@ No request has a timeout. To bound one, pass your own `http_client=httpx.Client(
 box = zb.sandboxes.get_or_create("ci-runner", tier="l", mailbox=True)
 ```
 
-A `Sandbox` has `id`, `info` (the last `SandboxDetail` read), `refresh()`, `wait_ready()`, `start()` / `stop()` / `restart()` / `set_tier(tier)` / `delete(archive=None)`, and the methods below.
+A `Sandbox` has `id`, `info` (the last `SandboxDetail` read), `refresh()`, `wait_ready()`, `start()` / `stop()` / `restart()` / `cancel_transition()` / `set_tier(tier)` / `delete(archive=None)`, `fork(name=, source_policy=, …)` / `fork_status()`, and the methods below.
+
+### Fork
+
+`fork` makes a new box from a consistent capture of the source's disk: its files, software and settings, with a new name and identity ([Fork a box](https://zipbox.ai/docs/fork.md)). `source_policy` is required: `"require_paused"` refuses a running source with `pause_required`, `"pause_and_resume"` pauses it for the capture and resumes it right after. One `Idempotency-Key` per call is reused on every retry. `tailscale_auth_key` stays on your machine: it is sealed to the new box once that box runs, never part of the fork request, and needs `wait` (default `True`). A new box its fork removed (a cancel or a failure) raises its fork's error code, or `conflict` when the fork was cancelled. Interrupting the wait does not cancel the fork; `cancel_transition(child.id)` does. `AsyncZipbox` has the same methods.
+
+```python
+child = box.fork(name="ci-runner-2", source_policy="pause_and_resume")
+```
 
 ## Tailscale and private mode
 

@@ -1,6 +1,8 @@
+import { sleep } from './backoff.js'
 import { ZipboxError } from './errors.js'
 import { isSandboxDetail, readJson } from './guards.js'
-import type { HttpBody, HttpClient, HttpMethod } from './http.js'
+import { type HttpBody, type HttpClient, type HttpMethod, isUnsentFailure } from './http.js'
+import { boxNotReadyError } from './readiness.js'
 import type { SandboxDetail } from './types.js'
 
 export interface ApiRequest {
@@ -46,6 +48,12 @@ export class ControlPlane {
   }
 }
 
+/**
+ * The readiness wait `create` uses: re-reads the box until it may be called, raising
+ * the verdict of a box that will not come back by itself. Its reads seed the cache.
+ */
+export type ReadinessWait = (id: string, signal: AbortSignal | undefined) => Promise<SandboxDetail>
+
 /** Where a box answers and the token it accepts. */
 export interface ResolvedBox {
   baseUrl: string
@@ -78,6 +86,13 @@ function resolvedFromDetail(detail: SandboxDetail): ResolvedBox | null {
  * is cached for the life of the client. A 401 from the box re-reads the detail
  * once and retries once; a second 401 is the caller's `unauthorized`.
  *
+ * A request nothing was sent for (connect, DNS, TLS handshake) means the cached
+ * origin may be gone: a claimed box's baseUrl moves once, to its chosen name. It
+ * sleeps one rung of the call's unsent ladder, re-reads the box with the readiness
+ * wait and retries on what that returned, with no attempt ceiling: the wait's
+ * verdict (paused, failed, deleted) or the caller's signal ends it. The ladder
+ * resets only when the box answers.
+ *
  * That second 401 is NOT a deleted key: a deleted key fails the re-read itself,
  * at the control plane. The control plane just vouched for the key, so the box has
  * not received its token yet — say so, and leave the retry to the caller.
@@ -91,7 +106,8 @@ export class BoxTransport {
 
   constructor(
     private readonly api: ControlPlane,
-    private readonly http: HttpClient
+    private readonly http: HttpClient,
+    private readonly waitReady: ReadinessWait
   ) {}
 
   /** Remember a detail the caller already fetched (create/get), so the box costs no extra GET. */
@@ -113,6 +129,9 @@ export class BoxTransport {
   async resolve(id: string, signal?: AbortSignal): Promise<ResolvedBox> {
     const cached = this.#boxes.get(id)
     if (cached !== undefined) return cached
+    // A shared read is bound to the signal of whoever started it: a caller with a
+    // signal of its own reads alone, so another caller's abort never ends its call.
+    if (signal !== undefined) return this.fetch(id, signal)
     const pending = this.#inFlight.get(id)
     if (pending !== undefined) return pending
     const promise = this.fetch(id, signal).finally(() => this.#inFlight.delete(id))
@@ -127,28 +146,53 @@ export class BoxTransport {
     return box
   }
 
+  /**
+   * Drop the cached target and run the readiness wait; its read cached the target it
+   * returns. A box the wait returns but that cannot be called (a private box with no
+   * tailnet yet) raises the same error a first read would. The reachability proof goes
+   * with the target, as in the other SDKs: a private box this device lost its tailnet
+   * path to is probed again and fails fast, instead of dialling it forever.
+   */
+  async reresolve(id: string, signal?: AbortSignal): Promise<ResolvedBox> {
+    this.invalidate(id)
+    const detail = await this.waitReady(id, signal)
+    const box = this.#boxes.get(id)
+    if (box === undefined) throw boxNotReadyError(id, detail)
+    await this.assertReachable(id, box, signal)
+    return box
+  }
+
   async request(id: string, request: ApiRequest): Promise<Response> {
-    const box = await this.reach(id, request.signal)
-    try {
-      return await this.send(box, request)
-    } catch (error) {
-      if (!(error instanceof ZipboxError) || error.status !== 401) throw error
-      this.invalidate(id)
-      const fresh = await this.resolve(id, request.signal)
+    let box = await this.reach(id, request.signal)
+    let unsentAttempt = 0
+    let refreshed = false
+    for (;;) {
       try {
-        return await this.send(fresh, request)
-      } catch (second) {
-        if (!(second instanceof ZipboxError) || second.status !== 401) throw second
-        throw new ZipboxError({
-          code: 'unauthorized',
-          message:
-            `box ${id} has not received this API key's token yet: the control plane ` +
-            'accepts the key, the box does not. A key created moments ago reaches its ' +
-            'running boxes within seconds; retry then.',
-          status: 401,
-          retryable: true,
-          requestId: second.requestId
-        })
+        return await this.send(box, request)
+      } catch (error) {
+        if (!(error instanceof ZipboxError) && isUnsentFailure(error)) {
+          await sleep(this.http.unsentDelay(unsentAttempt++), request.signal)
+          box = await this.reresolve(id, request.signal)
+          continue
+        }
+        if (!(error instanceof ZipboxError) || error.status !== 401) throw error
+        if (refreshed) {
+          throw new ZipboxError({
+            code: 'unauthorized',
+            message:
+              `box ${id} has not received this API key's token yet: the control plane ` +
+              'accepts the key, the box does not. A key created moments ago reaches its ' +
+              'running boxes within seconds; retry then.',
+            status: 401,
+            retryable: true,
+            requestId: error.requestId
+          })
+        }
+        // The box answered: the unsent ladder starts over.
+        unsentAttempt = 0
+        refreshed = true
+        this.invalidate(id)
+        box = await this.resolve(id, request.signal)
       }
     }
   }
@@ -177,6 +221,7 @@ export class BoxTransport {
       headers: { authorization: `Bearer ${box.token}`, ...request.headers },
       ...(request.body === undefined ? {} : { body: request.body }),
       ...(request.retry === undefined ? {} : { retry: request.retry }),
+      raiseUnsent: true,
       signal: request.signal
     })
   }
@@ -184,14 +229,7 @@ export class BoxTransport {
   private async fetch(id: string, signal?: AbortSignal): Promise<ResolvedBox> {
     const detail = await this.api.getDetail(id, signal)
     const resolved = resolvedFromDetail(detail)
-    if (resolved === null) {
-      throw new ZipboxError({
-        code: 'box_not_running',
-        message: `box ${id} is not ready (status: ${detail.status}); start it with sandboxes.start`,
-        // Booting or restarting comes back by itself; stopped or deleted does not.
-        retryable: detail.status === 'provisioning' || detail.status === 'running'
-      })
-    }
+    if (resolved === null) throw boxNotReadyError(id, detail)
     this.#boxes.set(id, resolved)
     return resolved
   }

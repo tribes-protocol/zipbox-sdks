@@ -48,7 +48,7 @@ export type FakeOptions = {
   /** Programs this computer does not have. */
   missing?: string[]
   /** Box b-1 is private; how its `/challenge` probe goes from this computer. */
-  privateBox?: 'answers' | 'refused' | 'silent'
+  privateBox?: 'answers' | 'refused' | 'silent' | 'tls'
 }
 
 const sse = (stdout: string, exitCode = 0) =>
@@ -69,6 +69,10 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
   /** The prompts this window queued as turns of its own. */
   const submitted: string[] = []
   let token = 'bt-1'
+  let origin = options.boxOrigin ?? 'https://dev.zbox.sh'
+  /** An origin the box moved away from: every dial to it is refused. */
+  let retired: string | null = null
+  let keyDeleted = false
   mock.env(on, options.env ?? { ZIPBOX_API_KEY: KEY })
   const clock = mock.clock(on)
   const session = mock.session(on)
@@ -94,8 +98,8 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
       }
     })
     if (url.origin === 'https://api.tribes.xyz') {
-      if (headers.authorization !== `Bearer ${KEY}`)
-        return answer(401, { error: { message: 'no' } })
+      if (keyDeleted || headers.authorization !== `Bearer ${KEY}`)
+        return answer(401, { error: { code: 'unauthorized', message: 'no' } })
       if (path === '/sandbox')
         return answer(200, [
           { id: 'b-1', name: 'dev', status: 'running', tier: 's' },
@@ -107,7 +111,7 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
           name: 'dev',
           status: 'running',
           ready: true,
-          baseUrl: options.boxOrigin ?? 'https://dev.zbox.sh',
+          baseUrl: origin,
           boxToken: token,
           privateMode: options.privateBox !== undefined
         })
@@ -115,13 +119,19 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
         return answer(200, { userId: 'u-1', apiKey: { name: 'CLI', kind: 'cli', last4: 'aaaa' } })
       return answer(404, { error: { message: 'not found' } })
     }
+    // A refused dial: the engine rejects the plugin's fetch with this reason. A throw
+    // would read as a hook that failed, not as the network refusing.
+    if (url.origin === retired) return { deny: 'connect ECONNREFUSED' }
     if (path === '/challenge' && options.privateBox !== undefined) {
       if (options.privateBox === 'refused') throw new Error('connect ECONNREFUSED')
+      // The box answered; its certificate has not landed yet.
+      if (options.privateBox === 'tls') return { deny: 'unable to verify the first certificate' }
       // Off the tailnet a 100.x address is not routed: the connect never ends.
       if (options.privateBox === 'silent') return new Promise<never>(() => undefined)
       return answer(404, { error: 'no owner yet' })
     }
-    if (headers.authorization !== `Bearer ${token}`) return answer(401, { error: 'unauthorized' })
+    if (keyDeleted || headers.authorization !== `Bearer ${token}`)
+      return answer(401, { error: 'unauthorized' })
     const own = options.box?.(method, path, body)
     if (own) return answer(own.status, own.body)
     if (path === '/command-center/sessions')
@@ -227,6 +237,15 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
     /** The box hands out a new token, as after a restart: the old one gets 401. */
     rotateToken: () => {
       token = 'bt-2'
+    },
+    /** The box's address moves, as after a claim: the old origin refuses every dial. */
+    moveBox: (to: string) => {
+      retired = new URL(origin).origin
+      origin = to
+    },
+    /** The key is deleted in Settings: the control plane and the box both refuse it. */
+    deleteKey: () => {
+      keyDeleted = true
     }
   }
 }

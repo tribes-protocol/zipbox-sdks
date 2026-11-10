@@ -9,7 +9,8 @@ import {
   readFrom,
   sendMessage,
   type Task,
-  transcriptFile
+  transcriptFile,
+  ZipboxError
 } from './client'
 
 // One window follows one agent task of a box. Each prompt of the task's Pi
@@ -172,7 +173,8 @@ function status($: EngineInterface, f: Following, extra = '') {
 // never holds, and $.http.fetch reads whole bodies, so this window reads the task
 // on a timer while it follows one: every 2 s while the agent works, 6 s otherwise.
 // A failure backs off exponentially with jitter, capped at 30 s, and never gives
-// up (AGENTS.md §0.0): only /zipbox leave or another task ends it.
+// up (AGENTS.md §0.0). Only an answered verdict ends it, with a note: the key
+// refused (401) or the box or task gone (404). /zipbox leave and another task do too.
 function schedule($: EngineInterface, f: Following, ms: number) {
   if (following !== f) return
   f.timer = $.clock.after(ms, () => void tick($, f))
@@ -211,7 +213,17 @@ async function tick($: EngineInterface, f: Following) {
     f.failures = 0
     status($, f)
     schedule($, f, ACTIVE.has(f.state ?? '') ? FAST_MS : IDLE_MS)
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof ZipboxError &&
+      !error.retryable &&
+      (error.status === 401 || error.status === 404)
+    ) {
+      if (following !== f) return
+      await leave($)
+      await note($, `Stopped following “${f.title}” on ${f.boxName}: ${error.message}`)
+      return
+    }
     f.failures++
     status($, f, 'reconnecting')
     const backoff = Math.min(CAP_MS, FAST_MS * 2 ** f.failures)

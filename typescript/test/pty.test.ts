@@ -165,6 +165,64 @@ describe('pty', () => {
     pty.detach()
   })
 
+  // A claimed box's baseUrl moves once, to its chosen name. A dial the old origin
+  // refused used to be redialled there; it now re-reads the box with the readiness wait.
+  it('re-reads the box with the readiness wait after a refused dial, and dials where it moved', async () => {
+    const reads: unknown[] = [
+      { ...detail, baseUrl: 'https://box--old.zbox.sh', boxToken: 'bt_old' },
+      { ...detail, ready: false, readiness: 'settling', baseUrl: null, boxToken: null },
+      { ...detail, readiness: 'ready', baseUrl: 'https://box--demo.zbox.sh', boxToken: 'bt_new' }
+    ]
+    let served = 0
+    const zb = new Zipbox({
+      apiKey: 'zb_test',
+      baseUrl: 'https://api.test',
+      fetch: () => {
+        const body = reads[Math.min(served, reads.length - 1)]
+        served++
+        return Promise.resolve(new Response(JSON.stringify(body)))
+      },
+      WebSocket: FakeSocket
+    })
+    const pty = await zb.sandbox('sbx_1').pty.create()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(new URL(last().url).origin).toBe('wss://box--old.zbox.sh')
+    // The old origin refuses: the socket closes without ever opening.
+    last().serverClose()
+    await vi.advanceTimersByTimeAsync(5_000)
+    // The settling read kept the wait going; the ready one is dialled.
+    expect(served).toBe(3)
+    expect(sockets).toHaveLength(2)
+    expect(new URL(last().url).origin).toBe('wss://box--demo.zbox.sh')
+    expect(last().protocols).toEqual(['tribes.session', 'bt_new'])
+    pty.detach()
+  })
+
+  it('ends with an error when the box re-read after a refused dial is paused', async () => {
+    let served = 0
+    const zb = new Zipbox({
+      apiKey: 'zb_test',
+      baseUrl: 'https://api.test',
+      fetch: () => {
+        served++
+        const body =
+          served === 1
+            ? detail
+            : { ...detail, status: 'archived', ready: false, readiness: 'paused', baseUrl: null }
+        return Promise.resolve(new Response(JSON.stringify(body)))
+      },
+      WebSocket: FakeSocket
+    })
+    const pty = await zb.sandbox('sbx_1').pty.create()
+    await vi.advanceTimersByTimeAsync(0)
+    const ends: string[] = []
+    pty.onEnd((reason) => ends.push(reason))
+    last().serverClose()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(ends).toEqual(['error'])
+    expect(sockets).toHaveLength(1)
+  })
+
   it('stops on exit and reports the code', async () => {
     const pty = await client().sandbox('sbx_1').pty.create()
     await vi.advanceTimersByTimeAsync(0)

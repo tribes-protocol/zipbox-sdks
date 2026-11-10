@@ -21,15 +21,17 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Version is the SDK version, sent in the User-Agent header.
-const Version = "0.1.6"
+const Version = "0.1.7"
 
 // DefaultBaseURL is the Zipbox control plane.
 const DefaultBaseURL = "https://api.tribes.xyz"
@@ -87,7 +89,7 @@ func WithBackoff(base, max time.Duration) Option {
 }
 
 // WithPollInterval sets how often Create re-reads a box while it boots: the
-// first delay and the cap. Default 1s and 10s.
+// first delay and the cap. Default 1s and 10s; each delay grows 1.25x, with jitter.
 func WithPollInterval(min, max time.Duration) Option {
 	return func(c *Client) { c.pollMin, c.pollMax = min, max }
 }
@@ -143,6 +145,9 @@ type request struct {
 	// retry marks the request safe to repeat on a retryable error: GETs, and a
 	// create that carries an Idempotency-Key.
 	retry bool
+	// box marks a box-plane request: an unsent failure is returned to Box.do, which
+	// re-reads the box before it retries, since a box's origin can move.
+	box bool
 }
 
 func jsonBody(v any) (func() (io.Reader, error), error) {
@@ -157,8 +162,9 @@ func jsonBody(v any) (func() (io.Reader, error), error) {
 // a 2xx response with its body open, or an error (a *Error for HTTP failures).
 //
 // A failure to connect or to complete the TLS handshake is retried for EVERY
-// method with no attempt ceiling: nothing was sent, and a box's certificate can
-// trail its readiness. The ladder is capped and jittered; ctx is the only bound.
+// method with no attempt ceiling: nothing was sent. The ladder is capped and
+// jittered; ctx is the only bound. A box request returns that failure instead:
+// Box.do re-reads the box, then retries.
 func (c *Client) do(ctx context.Context, req *request) (*http.Response, error) {
 	unsentAttempt := 0
 	for attempt := 0; ; attempt++ {
@@ -168,6 +174,9 @@ func (c *Client) do(ctx context.Context, req *request) (*http.Response, error) {
 		}
 		zerr, ok := asError(err)
 		if ok && zerr.unsent {
+			if req.box {
+				return nil, err
+			}
 			if err := sleep(ctx, c.backoff(unsentAttempt)); err != nil {
 				return nil, err
 			}
@@ -175,8 +184,7 @@ func (c *Client) do(ctx context.Context, req *request) (*http.Response, error) {
 			attempt--
 			continue
 		}
-		if !req.retry || !ok || attempt >= c.maxRetries ||
-			(zerr.Code != CodeRateLimited && zerr.Code != CodeUnavailable) {
+		if !req.retry || !ok || attempt >= c.maxRetries || !zerr.Retryable {
 			return nil, err
 		}
 		wait := c.backoff(attempt)
@@ -202,7 +210,8 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 		}
 		body = b
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, req.method, target, body)
+	var sent sendTrace
+	httpReq, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, sent.hooks()), req.method, target, body)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +228,7 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 			return nil, ctx.Err()
 		}
 		zerr := newError(CodeUnavailable, err.Error())
-		zerr.unsent = isUnsent(err)
+		zerr.unsent = sent.unsent(err)
 		return nil, zerr
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -228,6 +237,36 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return nil, errorFromResponse(resp, data)
+}
+
+// sendTrace records, from the standard transport's own trace, whether the request's
+// headers were written. Each connection attempt (GetConn) starts over, so it
+// describes the attempt the error came from.
+type sendTrace struct {
+	attempted atomic.Bool
+	wrote     atomic.Bool
+}
+
+func (t *sendTrace) hooks() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GetConn: func(string) {
+			t.attempted.Store(true)
+			t.wrote.Store(false)
+		},
+		WroteHeaders: func() { t.wrote.Store(true) },
+	}
+}
+
+// unsent reports whether a failed request never reached the server. A traced
+// attempt that failed before its headers were written was not sent: a connect, DNS
+// or TLS handshake failure, including a handshake the server ended at once (Go
+// returns a bare io.EOF or a read reset then). Anything after the headers counts as
+// sent. A transport that reports no trace falls back to isUnsent.
+func (t *sendTrace) unsent(err error) bool {
+	if t.attempted.Load() {
+		return !t.wrote.Load()
+	}
+	return isUnsent(err)
 }
 
 // isUnsent reports whether a transport error provably happened before the request
@@ -291,13 +330,25 @@ func (c *Client) api(ctx context.Context, method, path string, in any, out any, 
 // backoff is exponential with jitter: a delay in [d/2, d) where d doubles from
 // the base up to the cap.
 func (c *Client) backoff(attempt int) time.Duration {
-	return jitter(c.ladder(attempt, c.backoffBase, c.backoffMax), c)
+	return jitter(c.ladder(attempt, c.backoffBase, c.backoffMax, 2), c)
 }
 
-func (c *Client) ladder(attempt int, base, max time.Duration) time.Duration {
+// pollFactor is how much each re-read of a readiness wait grows. A box turns ready
+// about a second after it serves, and nothing tells the client when, so each rung
+// is time spent asleep after it did. Doubling overshot by up to several seconds;
+// 1.25 keeps the same base, cap and jitter and reaches the cap gently.
+const pollFactor = 1.25
+
+// poll is the delay before a wait's next re-read: a delay in [d/2, d) where d
+// grows by pollFactor from the poll interval up to its cap.
+func (c *Client) poll(attempt int) time.Duration {
+	return jitter(c.ladder(attempt, c.pollMin, c.pollMax, pollFactor), c)
+}
+
+func (c *Client) ladder(attempt int, base, max time.Duration, factor float64) time.Duration {
 	d := base
 	for i := 0; i < attempt && d < max; i++ {
-		d *= 2
+		d = time.Duration(float64(d) * factor)
 	}
 	if d > max {
 		d = max

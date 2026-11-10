@@ -1,13 +1,16 @@
 import {
+  cancelTransition,
   type ClientContext,
   deleteBox,
   getDetail,
   lifecycle,
+  readDetailInWait,
   setTier,
   startBox,
   waitUntilReady
 } from './context.js'
 import { ZipboxError } from './errors.js'
+import { forkBox, getFork } from './fork.js'
 import { isArrayOf, isJsonObject, isRecord, isSandboxInfo, readJson } from './guards.js'
 import { HttpClient } from './http.js'
 import { Sandbox } from './sandbox.js'
@@ -16,9 +19,12 @@ import type {
   CallOptions,
   CreateSandboxOptions,
   DeleteSandboxOptions,
+  ForkSandboxOptions,
   JsonObject,
+  SandboxFork,
   SandboxInfo,
   SandboxTier,
+  TransitionCancelOutcome,
   ZipboxOptions
 } from './types.js'
 
@@ -99,8 +105,24 @@ export class Sandboxes {
     )
     if (existing === undefined) return this.create({ ...options, name })
     // `stopping`: a stop is still landing; startBox waits it out, then starts.
-    if (existing.status === 'archived' || existing.status === 'stopping') {
-      await startBox(this.ctx, existing.id, options.signal)
+    // `pausing`: paused while its backup uploads; the start boots it at once.
+    if (
+      existing.status === 'archived' ||
+      existing.status === 'stopping' ||
+      existing.status === 'pausing'
+    ) {
+      try {
+        await startBox(this.ctx, existing.id, options.signal)
+      } catch (error) {
+        if (!(error instanceof ZipboxError)) throw error
+        // The name was being deleted: it is gone now, so make it.
+        if (error.code === 'not_found') return this.create({ ...options, name })
+        // Another caller started it first: the server's idempotent answer to a
+        // second restore. A box now coming up is waited on like any other.
+        if (error.code !== 'conflict') throw error
+        const detail = await readDetailInWait(this.ctx, existing.id, options.signal)
+        if (detail.status !== 'provisioning' && detail.status !== 'running') throw error
+      }
     }
     return this.waitReady(existing.id, options)
   }
@@ -108,7 +130,9 @@ export class Sandboxes {
   /**
    * Re-read a box with backoff until it is ready. No deadline; pass a signal to
    * stop waiting. A private box that has not joined a tailnet yet is returned once
-   * it is running with its key, since it is not ready until it joins.
+   * it is running with its key, since it is not ready until it joins. A box that
+   * will not become ready by itself raises: paused `box_not_running`, a failed
+   * start `start_failed`, deleting or gone `conflict`, none of them retryable.
    */
   async waitReady(id: string, options: CallOptions = {}): Promise<Sandbox> {
     return new Sandbox(this.ctx, id, await waitUntilReady(this.ctx, id, options.signal))
@@ -130,6 +154,37 @@ export class Sandboxes {
   /** Hard-restart a running box; files survive, running processes do not. */
   restart(id: string, options: CallOptions = {}): Promise<void> {
     return lifecycle(this.ctx, id, 'reset', options.signal)
+  }
+
+  /**
+   * Cancel the box's state change in flight - a stop, a start, a restart, a tier
+   * change - and return it to where it was. Returns what happened: `cleared` (it is
+   * back already), `cancelling` (the host's abort is on its way) or `none` (nothing
+   * was in flight). Past the point of no return it raises `conflict` with the reason.
+   */
+  cancelTransition(id: string, options: CallOptions = {}): Promise<TransitionCancelOutcome> {
+    return cancelTransition(this.ctx, id, options.signal)
+  }
+
+  /**
+   * Fork a box: a new box with the source's files, installed software and
+   * settings, its own name and a fresh identity. RAM and running processes are
+   * not copied. It starts public unless `private: true`. A running source needs `sourcePolicy: 'pause_and_resume'` (it
+   * pauses for the capture and resumes right after); `require_paused` answers
+   * `pause_required` instead. Safe to retry: the request carries an
+   * Idempotency-Key. Waits until the new box is ready unless `wait: false`; a
+   * `tailscaleAuthKey` is sealed on this machine to the new box once it runs.
+   * The signal stops only this wait: cancel the fork with `cancelTransition`
+   * on the new box.
+   */
+  async fork(sourceId: string, options: ForkSandboxOptions): Promise<Sandbox> {
+    const child = await forkBox(this.ctx, sourceId, options)
+    return new Sandbox(this.ctx, child.id, child)
+  }
+
+  /** The fork that is making box `id` (the new box): phase, source recovery, waits, error. */
+  getFork(id: string, options: CallOptions = {}): Promise<SandboxFork> {
+    return getFork(this.ctx, id, options.signal)
   }
 
   /** Delete a box. By default a recoverable copy is kept for 30 days. */
@@ -222,7 +277,8 @@ export class Zipbox {
     const api = new ControlPlane(http, baseUrl, apiKey)
     this.ctx = {
       api,
-      boxes: new BoxTransport(api, http),
+      // A box request that reached nothing re-reads the box with the wait create uses.
+      boxes: new BoxTransport(api, http, (id, signal) => waitUntilReady(this.ctx, id, signal)),
       retryBaseDelayMs,
       retryMaxDelayMs,
       pollIntervalMs: options.pollIntervalMs ?? 1000,

@@ -12,10 +12,12 @@ from websockets.sync.server import ServerConnection, serve
 
 from zipbox import AsyncZipbox, Zipbox, ZipboxError
 from zipbox._core import BoxTarget, ClientConfig, Core
-from zipbox._effects import Emit, HttpRequest, HttpResponse, Sleep
+from zipbox._effects import Emit, HttpRequest, HttpResponse, Sleep, Streams
 from zipbox._pty import (
+    Pty,
     PtyEnded,
     PtyOutput,
+    PtyStopped,
     WsClose,
     WsClosed,
     WsConnect,
@@ -26,6 +28,7 @@ from zipbox._pty import (
     pty_loop,
     socket_url,
 )
+from zipbox._transport import HttpxSyncTransport
 
 KEY = "zb_" + "T" * 43
 
@@ -65,7 +68,8 @@ def test_reconnect_ladder_grows_without_ceiling_and_resets_only_on_a_frame() -> 
         assert isinstance(effect, WsConnect)
         assert effect.subprotocols == ("tribes.session", "bt")
         assert "resume=1" not in effect.url
-        script.fail(WsRefused(None))
+        # An answered failure: the origin is right, so the loop redials without a re-read.
+        script.fail(WsRefused(502))
         sleep = script.next()
         assert isinstance(sleep, Sleep)
         delays.append(sleep.seconds)
@@ -151,7 +155,9 @@ def _detail_response(token: str) -> HttpResponse:
     return HttpResponse(200, {}, json.dumps({**body, "boxToken": token}).encode())
 
 
-def test_box_401_refetches_the_token_once_then_raises_unauthorized() -> None:
+def test_a_box_401_after_the_control_plane_accepts_the_key_stays_on_the_ladder() -> None:
+    # AX-14: the control plane just vouched for the key, so the box has not received
+    # it yet. Each attempt re-reads it; a deleted key fails that re-read, which ends it.
     core = _core()
     script = Script(pty_loop(core, "sbx", new_state(None, 80, 24)))
     assert isinstance(script.next(), WsConnect)
@@ -162,6 +168,16 @@ def test_box_401_refetches_the_token_once_then_raises_unauthorized() -> None:
     connect = script.next()
     assert isinstance(connect, WsConnect) and connect.subprotocols[1] == "bt_rotated"
     script.fail(WsRefused(401))
+    assert isinstance(script.next(), Sleep)
+    refetch = script.next()
+    assert isinstance(refetch, HttpRequest) and refetch.url.endswith("/sandbox/sbx")
+    script.reply(_detail_response("bt_rotated"))
+    assert isinstance(script.next(), WsConnect)
+    script.fail(WsRefused(401))
+    assert isinstance(script.next(), Sleep)
+    assert isinstance(script.next(), HttpRequest)
+    deleted = {"error": {"code": "unauthorized", "message": "Invalid or deleted API key"}}
+    script.reply(HttpResponse(401, {}, json.dumps(deleted).encode()))
     with pytest.raises(ZipboxError) as caught:
         script.next()
     assert caught.value.code == "unauthorized" and caught.value.status == 401
@@ -183,6 +199,46 @@ def test_a_401_after_the_box_accepted_a_handshake_refetches_again() -> None:
     script.fail(WsRefused(401))
     refetch = script.next()
     assert isinstance(refetch, HttpRequest)
+
+
+def test_a_refused_dial_rereads_the_box_and_redials_its_new_origin() -> None:
+    # A box's baseUrl moves once after create; redialling the cached origin hung forever.
+    core = _core()
+    script = Script(pty_loop(core, "sbx", new_state(None, 80, 24)))
+    first = script.next()
+    assert isinstance(first, WsConnect) and first.url.startswith("wss://demo.zbox.sh/")
+    script.fail(WsRefused(None))
+    assert isinstance(script.next(), Sleep)
+    reread = script.next()
+    assert isinstance(reread, HttpRequest) and reread.url.endswith("/sandbox/sbx")
+    assert "sbx" not in core._targets
+    body = {"id": "sbx", "status": "running", "ready": True, "baseUrl": "https://box--demo.zbox.sh"}
+    script.reply(HttpResponse(200, {}, json.dumps({**body, "boxToken": "bt_live"}).encode()))
+    redial = script.next()
+    assert isinstance(redial, WsConnect) and redial.url.startswith("wss://box--demo.zbox.sh/")
+    assert redial.subprotocols[1] == "bt_live"
+
+    # The wait's verdict ends it: a paused box is not redialled forever.
+    script.fail(WsRefused(None))
+    assert isinstance(script.next(), Sleep)
+    assert isinstance(script.next(), HttpRequest)
+    paused = {"id": "sbx", "status": "archived", "ready": False, "readiness": "paused"}
+    script.reply(HttpResponse(200, {}, json.dumps(paused).encode()))
+    with pytest.raises(ZipboxError) as caught:
+        script.next()
+    assert caught.value.code == "box_not_running" and caught.value.retryable is False
+
+
+def test_a_detached_pty_sends_no_more_requests() -> None:
+    # Once detached a Sleep returns at once, so a re-read in progress must end, not spin.
+    transport = HttpxSyncTransport()
+    pty = Pty(_core(), transport, "sbx", new_state(None, 80, 24))
+    pty._stop.set()
+    try:
+        with pytest.raises(PtyStopped):
+            pty._perform(HttpRequest("GET", "http://api.invalid/sandbox/sbx", {}), Streams())
+    finally:
+        transport.close()
 
 
 class Box:

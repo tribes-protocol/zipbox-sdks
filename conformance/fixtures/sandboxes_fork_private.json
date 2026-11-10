@@ -1,0 +1,126 @@
+{
+  "name": "sandboxes_fork_private",
+  "description": "private: true is the only way a fork starts private: the POST body is exactly {name, sourcePolicy, private: true} (absent = public, never private: false), and the 202 child is privateMode. fork then waits on the CHILD until it is running with its own key (a private box is not ready until it joins a tailnet) and returns it; with no tailscaleAuthKey nothing is sent to the child.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "pause_and_resume",
+      "private": true
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "pause_and_resume",
+          "private": true
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "operationId": "fork_1",
+          "sandbox": {
+            "id": "sbx_2",
+            "name": "demo-2",
+            "domain": "zbox.sh",
+            "ipv6": null,
+            "status": "provisioning",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": false,
+            "privateMode": true,
+            "tailscale": null,
+            "agentPublicKey": null,
+            "fork": {
+              "operationId": "fork_1",
+              "sourceSandboxId": "sbx_1",
+              "childSandboxId": "sbx_2",
+              "sourcePolicy": "pause_and_resume",
+              "phase": "queued",
+              "sourceRecovery": "pending",
+              "captureMode": null,
+              "waitingOn": null,
+              "attempt": 0,
+              "nextAttemptAt": null,
+              "cancelRequestedAt": null,
+              "error": null,
+              "createdAt": "2026-11-05T00:00:00.000Z",
+              "updatedAt": "2026-11-05T00:00:00.000Z",
+              "completedAt": null
+            },
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "fork": {
+            "operationId": "fork_1",
+            "sourceSandboxId": "sbx_1",
+            "childSandboxId": "sbx_2",
+            "sourcePolicy": "pause_and_resume",
+            "phase": "queued",
+            "sourceRecovery": "pending",
+            "captureMode": null,
+            "waitingOn": null,
+            "attempt": 0,
+            "nextAttemptAt": null,
+            "cancelRequestedAt": null,
+            "error": null,
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z",
+            "completedAt": null
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_2",
+          "name": "demo-2",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::2",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "privateMode": true,
+          "tailscale": null,
+          "agentPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENj+qimupfFq/bb5ok8+RD0Bh7Opby1hPK28tSUvvLn58j9QLIPm1e1mfo7z5H/kbmtn7lKcNZp7cT+1Lf5Enog==",
+          "fork": null,
+          "createdAt": "2026-11-05T00:00:00.000Z",
+          "updatedAt": "2026-11-05T00:00:00.000Z",
+          "ready": false,
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_2",
+      "status": "running",
+      "privateMode": true,
+      "ready": false
+    }
+  }
+}

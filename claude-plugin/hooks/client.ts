@@ -14,7 +14,10 @@ type Account = { key: string; source: KeySource; api: string }
 type Box = { baseUrl: string; token: string }
 
 let account: Account | null = null
-/** Each box's origin and token, read once from the control plane; a 401 reads it again. */
+/**
+ * Each box's origin and token, read once from the control plane; a 401, or a call
+ * that reached nothing, reads it again.
+ */
 const boxes = new Map<string, Box>()
 
 const isAbsolute = (path: string) => /^(\/|[A-Za-z]:[\\/])/.test(path)
@@ -94,21 +97,48 @@ export function forget() {
   reached.clear()
 }
 
-/** The message a refusal carries, in the control plane's envelope or a box's. */
-function reason(res: HttpResponse): string {
-  try {
-    const body = JSON.parse(res.text) as {
-      error?: string | { message?: string }
-      message?: string
-    }
-    const error = typeof body.error === 'string' ? body.error : body.error?.message
-    return body.message ?? error ?? `HTTP ${res.status}`
-  } catch {
-    return `HTTP ${res.status}`
+type Failure = { status?: number | null; code?: string | null; retryable?: boolean }
+
+export class ZipboxError extends Error {
+  /** The HTTP status Zipbox answered, or null when the failure was no answer. */
+  readonly status: number | null
+  /** The code the refusal's envelope carried, or null. */
+  readonly code: string | null
+  /** Whether the same call may succeed later without anything changing here. */
+  readonly retryable: boolean
+
+  constructor(message: string, failure: Failure = {}) {
+    super(message)
+    this.status = failure.status ?? null
+    this.code = failure.code ?? null
+    this.retryable =
+      failure.retryable ?? (this.status === 429 || (this.status !== null && this.status >= 500))
   }
 }
 
-export class ZipboxError extends Error {}
+/** A refusal, with the message and code of the control plane's envelope or a box's. */
+function refusal(res: HttpResponse): ZipboxError {
+  try {
+    const body = JSON.parse(res.text) as {
+      error?: string | { code?: string; message?: string }
+      message?: string
+    }
+    const error = typeof body.error === 'string' ? body.error : body.error?.message
+    // A box names its code in `error` when it also sends a `message`.
+    const code =
+      typeof body.error === 'string'
+        ? body.message === undefined
+          ? null
+          : body.error
+        : body.error?.code
+    return new ZipboxError(body.message ?? error ?? `HTTP ${res.status}`, {
+      status: res.status,
+      code
+    })
+  } catch {
+    return new ZipboxError(`HTTP ${res.status}`, { status: res.status })
+  }
+}
 
 /** A control-plane call with the account key. */
 export async function api<T>(
@@ -126,9 +156,10 @@ export async function api<T>(
     throw new ZipboxError(
       account.source === 'env'
         ? 'Zipbox refused ZIPBOX_API_KEY.'
-        : 'Zipbox refused the stored key. /zipbox login signs in again.'
+        : 'Zipbox refused the stored key. /zipbox login signs in again.',
+      { status: 401, code: 'unauthorized' }
     )
-  if (!res.ok) throw new ZipboxError(reason(res))
+  if (!res.ok) throw refusal(res)
   return JSON.parse(res.text) as T
 }
 
@@ -146,10 +177,35 @@ const PRIVATE_PROBE_MS = 5_000
 const reached = new Set<string>()
 
 /**
+ * A rejection that was the TLS handshake: the box answered and only lacks its
+ * certificate yet. `$.http.fetch` documents no rejection shape and passes no code,
+ * only the host's reason in the message, so this reads the message; a rejection
+ * that does not name a TLS failure counts as no answer, as before.
+ */
+function tlsFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /certificate|handshake|tlsv1[ _]alert|err_tls_|err_ssl_|ssl routines/i.test(message)
+}
+
+/**
+ * A rejection from before anything was sent: the connect, the DNS lookup or the TLS
+ * handshake failed. Read from the message, as {@link tlsFailure} is.
+ */
+function unsentFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    tlsFailure(error) ||
+    /econnrefused|enotfound|eai_again|ehostunreach|enetunreach|before secure tls connection/i.test(
+      message
+    )
+  )
+}
+
+/**
  * Whether anything answers at `url` within the probe deadline. Any HTTP answer
- * counts. A private box's name points at its tailnet address, which off the
- * tailnet is not routed, so without the deadline a call would hang instead of
- * failing.
+ * counts, and so does a failed TLS handshake. A private box's name points at its
+ * tailnet address, which off the tailnet is not routed, so without the deadline a
+ * call would hang instead of failing.
  */
 function answers($: EngineInterface, url: string): Promise<boolean> {
   return new Promise((done) => {
@@ -159,9 +215,9 @@ function answers($: EngineInterface, url: string): Promise<boolean> {
         timer.cancel()
         done(true)
       },
-      () => {
+      (error: unknown) => {
         timer.cancel()
-        done(false)
+        done(tlsFailure(error))
       }
     )
   })
@@ -196,7 +252,10 @@ export async function boxOrigin($: EngineInterface, id: string): Promise<string>
 
 /**
  * A call to the box itself with its box token. A 401 reads the token again and
- * retries once, as the SDKs do.
+ * retries once, as the SDKs do. A deleted key fails that read, at the control plane;
+ * a box that still answers 401 has not received a key the control plane just
+ * accepted, which it does within seconds. A call that reached nothing reads the box
+ * again and retries once: a created box's address moves once, to `box--<name>`.
  */
 async function boxFetch(
   $: EngineInterface,
@@ -214,9 +273,23 @@ async function boxFetch(
       },
       body: init.body === undefined ? undefined : JSON.stringify(init.body)
     })
-  let res = await send(boxes.get(id) ?? (await resolve($, id)))
+  const box = boxes.get(id) ?? (await resolve($, id))
+  let res: HttpResponse
+  try {
+    res = await send(box)
+  } catch (error) {
+    if (!unsentFailure(error)) throw error
+    boxes.delete(id)
+    res = await send(await resolve($, id))
+  }
   if (res.status === 401) res = await send(await resolve($, id))
-  if (!res.ok) throw new ZipboxError(reason(res))
+  if (res.status === 401)
+    throw new ZipboxError('The box has not received this key yet.', {
+      status: 401,
+      code: 'unauthorized',
+      retryable: true
+    })
+  if (!res.ok) throw refusal(res)
   return res
 }
 

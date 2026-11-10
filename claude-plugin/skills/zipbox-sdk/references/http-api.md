@@ -20,23 +20,26 @@ Requests that carry an `Origin` header are refused with `403`: keys are for serv
 
 ## Routes
 
-| Method and path                 | Does                                                                         |
-| ------------------------------- | ---------------------------------------------------------------------------- |
-| `GET /account/whoami`           | `{userId, apiKey}` - who the key belongs to                                  |
-| `GET /billing/summary`          | Credit balance and auto top-up state                                         |
-| `GET /billing/usage`            | Recent metered usage                                                         |
-| `GET /sandbox`                  | Your boxes                                                                   |
-| `GET /sandbox/:id`              | One box, plus `ready`, `baseUrl` and `boxToken`                              |
-| `POST /sandbox/identity/claim`  | Create a box: `{name?, tier?, sshPublicKey?, timeZone?, mailbox?, private?}` |
-| `POST /sandbox/:id/pause`       | Stop: archive the disk; bills nothing while stopped                          |
-| `POST /sandbox/:id/restore`     | Start a stopped box                                                          |
-| `POST /sandbox/:id/reset`       | Restart: hard reboot, files survive                                          |
-| `POST /sandbox/:id/tier`        | Resize: `{tier}`                                                             |
-| `DELETE /sandbox/:id`           | Delete: `{archiveBeforeDestroy?}` (default keeps a 30-day recoverable copy)  |
-| `GET /sandbox/:id/tailscale`    | The box's tailnet status: `{tailscale, privateMode}`                         |
-| `PUT /sandbox/:id/tailscale`    | Join your tailnet: `{envelope, agentPublicKey}` (a sealed auth key) → `202`  |
-| `DELETE /sandbox/:id/tailscale` | Leave the tailnet → `200`                                                    |
-| `PUT /sandbox/:id/private`      | Private mode on or off: `{enabled}`                                          |
+| Method and path                       | Does                                                                                         |
+| ------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET /account/whoami`                 | `{userId, apiKey}` - who the key belongs to                                                  |
+| `GET /billing/summary`                | Credit balance and auto top-up state                                                         |
+| `GET /billing/usage`                  | Recent metered usage                                                                         |
+| `GET /sandbox`                        | Your boxes                                                                                   |
+| `GET /sandbox/:id`                    | One box, plus `ready`, `baseUrl` and `boxToken`                                              |
+| `POST /sandbox/identity/claim`        | Create a box: `{name?, tier?, sshPublicKey?, timeZone?, mailbox?, private?}`                 |
+| `POST /sandbox/:id/pause`             | Stop: archive the disk; bills nothing while stopped                                          |
+| `POST /sandbox/:id/restore`           | Start a stopped box                                                                          |
+| `POST /sandbox/:id/reset`             | Restart: hard reboot, files survive                                                          |
+| `POST /sandbox/:id/transition/cancel` | Cancel the stop, start, restart, resize or fork in flight; `409` past the point of no return |
+| `POST /sandbox/:id/fork`              | Fork a box: `{name, sourcePolicy}` with an `Idempotency-Key` → `202` ([Fork](https://zipbox.ai/docs/fork.md))    |
+| `GET /sandbox/:id/fork`               | The fork making this (new) box: phase, source recovery, waits, error                         |
+| `POST /sandbox/:id/tier`              | Resize: `{tier}`                                                                             |
+| `DELETE /sandbox/:id`                 | Delete: `{archiveBeforeDestroy?}` (default keeps a 30-day recoverable copy)                  |
+| `GET /sandbox/:id/tailscale`          | The box's tailnet status: `{tailscale, privateMode}`                                         |
+| `PUT /sandbox/:id/tailscale`          | Join your tailnet: `{envelope, agentPublicKey}` (a sealed auth key) → `202`                  |
+| `DELETE /sandbox/:id/tailscale`       | Leave the tailnet → `200`                                                                    |
+| `PUT /sandbox/:id/private`            | Private mode on or off: `{enabled}`                                                          |
 
 Three more routes exist for the dashboard and answer `403` to a key: `GET /account/apikeys`, `POST /account/apikeys` and `DELETE /account/apikeys/:id` (key management), and `POST /oauth/consent` (the [OAuth](https://zipbox.ai/docs/oauth.md) consent page).
 
@@ -44,30 +47,79 @@ Three more routes exist for the dashboard and answer `403` to a key: `GET /accou
 
 `GET /sandbox` and `GET /sandbox/:id` return box rows. The documented fields:
 
-| Field                                                                   | Meaning                                                                                                                                                                                                                                                |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id`                                                                    | The box id used in every route                                                                                                                                                                                                                         |
-| `name`, `domain`                                                        | The box's name: `<name>.<domain>`, e.g. `demo.zbox.sh`, and its previews                                                                                                                                                                               |
-| `status`                                                                | `provisioning`, `running`, `stopping` (a stop, delete or resize has been accepted and the box has not finished going down; never `ready`), `stopped`, `archived`, `deleting` (signing out of its tailnet before deletion; never billed) or `destroyed` |
-| `tier`, `pendingTier`, `machineSize`                                    | Current size, a resize in flight, and the vCPU / memory / disk it runs at                                                                                                                                                                              |
-| `isArchived`                                                            | The disk is in cold storage (stopped, or being stopped)                                                                                                                                                                                                |
-| `ipv6`                                                                  | The box's public IPv6 address (SSH goes straight here, unless private)                                                                                                                                                                                 |
-| `privateMode`                                                           | Only devices on your tailnet can reach the box ([Tailscale](https://zipbox.ai/docs/tailscale.md))                                                                                                                                                                          |
-| `tailscale`                                                             | Its tailnet status, or null when it never joined ([Tailscale](https://zipbox.ai/docs/tailscale.md#read-the-status))                                                                                                                                                        |
-| `agentPublicKey`                                                        | The box's own P-256 public key (SPKI DER, base64), to seal credentials to. Null until the box has started; re-read it right before sealing                                                                                                             |
-| `cpuPct`, `memPct`, `diskPct`, `netRxBps`, `netTxBps`, `statsUpdatedAt` | The latest resource sample, the same one the dashboard shows                                                                                                                                                                                           |
-| `startFailedAt`                                                         | Set when the last start failed                                                                                                                                                                                                                         |
-| `claimedAt`, `createdAt`, `updatedAt`                                   | Timestamps                                                                                                                                                                                                                                             |
+| Field                                                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                                                                    | The box id used in every route                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `name`, `domain`                                                        | The box's name: `<name>.<domain>`, e.g. `demo.zbox.sh`, and its previews                                                                                                                                                                                                                                                                                                                                                       |
+| `status`                                                                | `provisioning`, `running`, `stopping` (a stop, delete or resize has been accepted and the box has not finished going down; never `ready`), `pausing` (paused: the machine is stopped and its disk is safe on its host while its backup uploads; never `ready`), `stopped`, `archived` or `deleting` (signing out of its tailnet before deletion; never billed). See [Status, phase and readiness](#status-phase-and-readiness) |
+| `phase`                                                                 | What the box is doing now, read from every lifecycle field at once (below)                                                                                                                                                                                                                                                                                                                                                     |
+| `allowedActions`                                                        | The lifecycle verbs the box accepts in its current state (below)                                                                                                                                                                                                                                                                                                                                                               |
+| `tier`, `pendingTier`, `machineSize`                                    | Current size, a resize in flight, and the vCPU / memory / disk it runs at                                                                                                                                                                                                                                                                                                                                                      |
+| `isArchived`                                                            | The disk is in cold storage (stopped, or being stopped)                                                                                                                                                                                                                                                                                                                                                                        |
+| `ipv6`                                                                  | The box's public IPv6 address (SSH goes straight here, unless private)                                                                                                                                                                                                                                                                                                                                                         |
+| `privateMode`                                                           | Only devices on your tailnet can reach the box ([Tailscale](https://zipbox.ai/docs/tailscale.md))                                                                                                                                                                                                                                                                                                                                                  |
+| `tailscale`                                                             | Its tailnet status, or null when it never joined ([Tailscale](https://zipbox.ai/docs/tailscale.md#read-the-status))                                                                                                                                                                                                                                                                                                                                |
+| `agentPublicKey`                                                        | The box's own P-256 public key (SPKI DER, base64), to seal credentials to. Null until the box has started; re-read it right before sealing                                                                                                                                                                                                                                                                                     |
+| `cpuPct`, `memPct`, `diskPct`, `netRxBps`, `netTxBps`, `statsUpdatedAt` | The latest resource sample, the same one the dashboard shows                                                                                                                                                                                                                                                                                                                                                                   |
+| `startFailedAt`                                                         | Set when the last start failed                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `fork`                                                                  | The fork still making this box ([Fork](https://zipbox.ai/docs/fork.md#rest-reference)); null on every box that is not being forked into                                                                                                                                                                                                                                                                                                            |
+| `claimedAt`, `createdAt`, `updatedAt`                                   | Timestamps                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 Other fields are internal and may change without notice.
 
+## Status, phase and readiness
+
+`status` is the stored lifecycle state. A deleted box is not served at all: it reads `404 not_found`, never `destroyed`.
+
+| `status`       | Means                                                                                                                                               | What follows                                                                                                            |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `provisioning` | Booting, restoring, or a fork's new box being made                                                                                                  | `running`, or back to `archived` when a restore fails or is cancelled                                                   |
+| `running`      | Up. It may still be finishing a boot, a restart, or the start of a pause or delete (`phase` says which)                                             | `stopping`, `pausing` once a pause has stopped the machine, or `deleting` for a box on a tailnet                        |
+| `stopping`     | A stop, a delete or the first leg of a resize has been accepted and the disk is on its way out                                                      | `archived`, or gone (`404`) for a delete                                                                                |
+| `pausing`      | Paused: the machine is stopped and its disk is safe on its host; its backup is still uploading. Not billed. A start boots it at once from that disk | `archived` once the backup lands, `provisioning` on a start, or gone (`404`) after a delete, which waits for the backup |
+| `archived`     | The disk is in cold storage. Paused, or between the legs of a resize, or its last restore failed                                                    | `provisioning` on a start                                                                                               |
+| `stopped`      | A cold boot that failed (`startFailedAt` set), or a retained record of a box that will not come back                                                | Nothing. Its name is free: create it again                                                                              |
+| `deleting`     | Signing out of its tailnet before the delete. Never billed                                                                                          | Gone (`404`)                                                                                                            |
+
+`phase` reads the status together with the change in flight, the fork making the box, a pending resize and the last start, so you never re-derive them:
+
+| `phase`         | The box is                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------- |
+| `starting`      | Booting, restoring, restarting, or coming back after a cancelled resize                  |
+| `running`       | Up, with nothing in flight                                                               |
+| `stopping`      | Being paused                                                                             |
+| `paused`        | Archived or `pausing`, with nothing in flight that will start it                         |
+| `resizing`      | Moving to `pendingTier`, including the wait for room between the archive and the restore |
+| `forking`       | Being made by a fork, or having its disk captured for one                                |
+| `deleting`      | Being deleted, including the backup a delete takes first                                 |
+| `delete_failed` | A delete was refused. The box still runs; delete it again                                |
+| `start_failed`  | Its last start failed                                                                    |
+| `gone`          | A retained record of a box that will not come back                                       |
+
+`allowedActions` lists the verbs the box's state accepts now: `start`, `stop`, `restart`, `delete`, `cancel_transition` and `fork`. A verb it does not list would be refused. A listed verb can still be refused for a reason outside the box: credit (`402`), capacity (`503`), or an argument (a fork's `sourcePolicy`, a name). A listed `fork` can also answer `409 source_busy` while an operator holds the box for maintenance, or while a running box's serving epoch lags a claim: neither is on the row, so retry the fork later.
+
+`readiness` (on `GET /sandbox/:id` only) says whether the box will answer. It is what every SDK wait reads:
+
+| `readiness`      | Means                                                                                                                                                   | A wait                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `ready`          | Running, and its connection gate passed                                                                                                                 | Returns                                     |
+| `settling`       | Coming up, going through a change, or not connectable yet. Every transient is here: no room, a host offline, a busy host, an upgrade waiting to restore | Keeps reading, with backoff and no deadline |
+| `awaits_tailnet` | A private box running with its key that has not joined a tailnet. Only your auth key moves it on                                                        | Returns, so you can connect it              |
+| `paused`         | Archived or `pausing`, with nothing in flight that will start it                                                                                        | Raises `box_not_running`, not retryable     |
+| `start_failed`   | The server answered its last start as failed                                                                                                            | Raises `start_failed`, not retryable        |
+| `deleting`       | A delete is in flight                                                                                                                                   | Raises `conflict`, not retryable            |
+| `gone`           | It will not come back                                                                                                                                   | Raises `conflict`, not retryable            |
+
+`readiness` is computed only where the connection gate runs, on `GET /sandbox/:id`. `GET /sandbox` does not run that gate for every row, so it carries `phase` and `allowedActions` but no `readiness`: the same box never reads `ready` on one route and `settling` on the other. `readiness` is `ready` only when `ready` is true; `ready` can be true while `readiness` is still `settling` (a restart that has not taken the box down yet). Wait on `readiness`.
+
 ## GET /sandbox/:id and the box token
 
-`GET /sandbox/:id` adds four fields to the row:
+`GET /sandbox/:id` adds five fields to the row:
 
 - `ready` - the box is running and serving you, and accepts every live key's token. Only then can you call it.
+- `readiness` - whether the box will answer, from the same gate as `ready` ([above](#status-phase-and-readiness)).
 - `httpsReady` - `baseUrl` completes a TLS handshake with a trusted certificate. A box never waits for its certificate to boot, so a freshly named or restarted box can be `ready` a few seconds to minutes before this turns true; until then a request fails in the TLS handshake, before anything is sent, and is safe to retry. The SDKs retry it for you.
-- `baseUrl` - the box's HTTPS origin, e.g. `https://box--demo.zbox.sh`, or `https://box.demo.zbox.sh` while the box is [private](https://zipbox.ai/docs/tailscale.md#make-a-box-private). Null until `ready`. Previews live under the name, not this origin: `https://<label>.demo.zbox.sh`.
+- `baseUrl` - the box's HTTPS origin, e.g. `https://box--demo.zbox.sh`, or `https://box.demo.zbox.sh` while the box is [private](https://zipbox.ai/docs/tailscale.md#make-a-box-private). Null until `ready`. Previews live under the name, not this origin: `https://<label>.demo.zbox.sh`. It is not permanent: a freshly created box answers first on the machine's boot address (`box--<another-name>.zbox.sh`), and its `baseUrl` changes once, to `box--<name>`, a few minutes after create, when its own name resolves everywhere. Both origins answer while it changes. A client that gets a connect or TLS failure on a box call (nothing was sent) reads `GET /sandbox/:id` again and retries on the `baseUrl` it returns. The SDKs do this for you.
 - `boxToken` - the bearer the box accepts for **this key on this box**. Null until `ready`, and always null when the dashboard calls the route.
 
 ```sh
@@ -87,7 +139,7 @@ curl https://api.tribes.xyz/sandbox/$ID \
 }
 ```
 
-The token is the same every time you ask (it is derived from your key and the box, never stored), has no expiry, and is accepted by no other box. Deleting the key kills every token derived from it. If the box answers `401`, fetch this route again and retry once. If this route answers but the box still says `401`, the key is live and the box has not received its token yet (a key created moments ago reaches running boxes within seconds): retry shortly. A deleted key fails this route itself.
+The token is the same every time you ask (it is derived from your key and the box, never stored), has no expiry, and is accepted by no other box, so it stays valid when `baseUrl` changes. Deleting the key kills every token derived from it. If the box answers `401`, fetch this route again and retry once. If this route answers but the box still says `401`, the key is live and the box has not received its token yet (a key created moments ago reaches running boxes within seconds): retry shortly. A deleted key fails this route itself.
 
 ## Create a box
 
@@ -99,7 +151,7 @@ curl -X POST https://api.tribes.xyz/sandbox/identity/claim \
   -d '{"name":"demo","tier":"s"}'
 ```
 
-The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) until `ready` is true. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`. A name the account has never used, once it already holds 250, answers `403 machine_limit_reached`; claim one of its existing names instead (the name of a box you deleted boots again under the same subdomain, mailbox and wallets), see [Machine limit](https://zipbox.ai/docs/machine-limit.md).
+The answer is `{sandboxId, name, status, created, …}`. The box boots in the background; read `GET /sandbox/:id` (with backoff) while `readiness` is `settling`. It ends `ready` (or `awaits_tailnet` for a private box); `paused`, `start_failed`, `deleting` and `gone` mean it will not come up by itself. `name` is the box's permanent subdomain: lower case letters, digits and hyphens. With no credit balance the answer is `402 insufficient_credits`. A name the account has never used, once it already holds 250, answers `403 machine_limit_reached`; claim one of its existing names instead (the name of a box you deleted boots again under the same subdomain, mailbox and wallets), see [Machine limit](https://zipbox.ai/docs/machine-limit.md).
 
 A box is created without a mailbox. Its address `<name>@zbox.sh` is reserved with the name, and the mailbox itself is created the first time the box or its owner uses mail: the first `tribes-email` call from inside the box, the first time the box is opened in the dashboard, or the first `/sandbox/:id/email` request. Pass `"mailbox": true` to create it at claim time instead, for a box that must be able to receive mail before anything on it has asked. Either way the mailbox belongs to the name, not the box: reusing a name (`getOrCreate`) reuses its mailbox, so prefer one long-lived name per recurring job over a fresh box per run.
 
@@ -132,9 +184,23 @@ The how-to, with samples in every language, is [Tailscale and private boxes](htt
 | 409    | `tailnet_not_connected`                 | `PUT …/private` `{enabled: true}` while the box is not connected with a tailnet IPv4  |
 | 409    | `tailscale_requires_update`             | The box's ZipOS predates Tailscale or private mode: update it first                   |
 
+## Fork a box
+
+```sh
+curl -X POST https://api.tribes.xyz/sandbox/$ID/fork \
+  -H "Authorization: Bearer $ZIPBOX_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"name":"demo-2","sourcePolicy":"require_paused"}'
+```
+
+`:id` is the source. The answer is `202 {operationId, sandbox, fork}`: the new box's row (`status: provisioning`) and the fork, which runs on without your request. Follow it with `GET /sandbox/:id/fork` on the **new** box's id, or that box's own row, which carries `fork` while it runs; cancel it with `POST /sandbox/:id/transition/cancel` on the new box. `sourcePolicy` is `require_paused` (a running source answers `409 pause_required`) or `pause_and_resume` (a running source pauses for its capture and resumes right after). `private: true` starts the new box private; absent or false, it starts public whatever the source is. The body takes nothing else: no Tailscale key, which you deliver to the new box afterwards with `PUT /sandbox/:id/tailscale`. What is copied, the errors and the private-box flow: [Fork a box](https://zipbox.ai/docs/fork.md).
+
 ## Idempotency
 
 `POST /sandbox/identity/claim` accepts an `Idempotency-Key` header. Replaying the same key within 24 hours returns the original answer instead of creating a second box, so a create that timed out on your side is always safe to retry. The SDKs send one automatically.
+
+`POST /sandbox/:id/fork` **requires** one (`400 invalid_request` without it). The same key with the same body returns the same `202`, operation and new box, also after the fork has been cancelled; the same key with a different body answers `409 idempotency_mismatch`. Generate one per fork you mean to make and reuse it on every retry of that fork; the SDKs do.
 
 ## Error envelope
 

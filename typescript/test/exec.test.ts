@@ -214,6 +214,38 @@ describe('exec', () => {
     expect(await run('archived')).toMatchObject({ code: 'box_not_running', retryable: false })
   })
 
+  // audit-ax AX-03: `retryable` follows the server's readiness, and a private box
+  // awaiting its tailnet names the remedy instead of "start it".
+  it.each([
+    ['settling', 'archived', { code: 'box_not_running', retryable: true }],
+    ['paused', 'archived', { code: 'box_not_running', retryable: false }],
+    ['start_failed', 'archived', { code: 'box_not_running', retryable: false }],
+    ['awaits_tailnet', 'running', { code: 'tailnet_not_connected', retryable: false }]
+  ])(
+    'a detail reading %s (%s) raises %o without calling the box',
+    async (readiness, status, expected) => {
+      const calls: string[] = []
+      const zb = new Zipbox({
+        apiKey: 'zb_test',
+        baseUrl: 'https://api.test',
+        fetch: (input: string) => {
+          calls.push(input)
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ ...detail, status, readiness, ready: false, boxToken: null })
+            )
+          )
+        }
+      })
+      const error = await zb
+        .sandbox('sbx_1')
+        .exec('true')
+        .catch((caught: unknown) => caught)
+      expect(error).toMatchObject(expected)
+      expect(calls).toEqual(['https://api.test/sandbox/sbx_1'])
+    }
+  )
+
   it('never exposes the API key or a box token on a logged or serialized object', async () => {
     const zb = new Zipbox({
       apiKey: 'zb_secretkey',

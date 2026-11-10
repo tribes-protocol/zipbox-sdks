@@ -1,0 +1,72 @@
+{
+  "name": "sandboxes_wait_ready_without_readiness_uses_fallback",
+  "description": "A control plane that predates readiness: the wait falls back to ready and status. provisioning keeps polling, and deleting raises conflict.",
+  "call": {
+    "op": "sandboxes.waitReady",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "deleting",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "conflict",
+      "retryable": false
+    }
+  }
+}

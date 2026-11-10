@@ -85,7 +85,7 @@ func TestBackoffLadder(t *testing.T) {
 	c := New("k", WithBackoff(500*time.Millisecond, 30*time.Second))
 	want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
 	for i, w := range want {
-		if got := c.ladder(i, c.backoffBase, c.backoffMax); got != w {
+		if got := c.ladder(i, c.backoffBase, c.backoffMax, 2); got != w {
 			t.Errorf("ladder(%d) = %v, want %v", i, got, w)
 		}
 		for j := 0; j < 50; j++ {
@@ -94,7 +94,27 @@ func TestBackoffLadder(t *testing.T) {
 			}
 		}
 	}
-	if got := c.ladder(1000, c.backoffBase, c.backoffMax); got != 30*time.Second {
+	if got := c.ladder(1000, c.backoffBase, c.backoffMax, 2); got != 30*time.Second {
+		t.Fatalf("no ceiling on attempts, capped delay: got %v", got)
+	}
+}
+
+// A box turns ready ~1 s after it serves; doubling slept up to seconds past it.
+func TestPollLadder(t *testing.T) {
+	c := New("k")
+	want := []float64{1, 1.25, 1.5625, 1.953125, 2.44140625, 3.0517578125, 3.814697, 4.768372, 5.960464, 7.450581, 9.313226, 10, 10, 10}
+	for i, w := range want {
+		step := c.ladder(i, c.pollMin, c.pollMax, pollFactor)
+		if diff := step.Seconds() - w; diff > 1e-6 || diff < -1e-6 {
+			t.Errorf("poll ladder(%d) = %v, want %vs", i, step, w)
+		}
+		for j := 0; j < 50; j++ {
+			if d := c.poll(i); d < step/2 || d >= step {
+				t.Fatalf("poll(%d) = %v outside [%v, %v)", i, d, step/2, step)
+			}
+		}
+	}
+	if got := c.ladder(1000, c.pollMin, c.pollMax, pollFactor); got != 10*time.Second {
 		t.Fatalf("no ceiling on attempts, capped delay: got %v", got)
 	}
 }
@@ -578,5 +598,290 @@ func TestPreviewPendingBeyondExecDeadline(t *testing.T) {
 	}
 	if calls.Load() != 2 || preview.URL != "https://web.127.0.0.1" {
 		t.Fatalf("calls=%d preview=%+v", calls.Load(), preview)
+	}
+}
+
+func TestForkOptionsNeverPrintTheAuthKey(t *testing.T) {
+	const key = "tskey-auth-kUnitTest1CNTRL-NotARealKey0123456789"
+	opts := ForkOptions{Name: "demo-2", SourcePolicy: ForkPauseAndResume, TailscaleAuthKey: key}
+	nested := struct{ Opts ForkOptions }{opts}
+	var printed []string
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {
+		printed = append(printed, fmt.Sprintf(verb, opts), fmt.Sprintf(verb, &opts), fmt.Sprintf(verb, nested))
+	}
+	printed = append(printed, opts.String(), opts.GoString(), fmt.Sprint(opts), fmt.Sprintln(opts))
+	data, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	printed = append(printed, string(data))
+	for _, out := range printed {
+		if strings.Contains(out, key) || strings.Contains(out, "tskey-") {
+			t.Fatalf("printed the auth key: %s", out)
+		}
+	}
+	if got := fmt.Sprintf("%+v", opts); !strings.Contains(got, "demo-2") || !strings.Contains(got, "[redacted]") {
+		t.Fatalf("%%+v = %s", got)
+	}
+	if got := fmt.Sprintf("%+v", ForkOptions{Name: "demo-2"}); strings.Contains(got, "[redacted]") {
+		t.Fatalf("an absent key reads as set: %s", got)
+	}
+}
+
+func TestForkOptionsPrintPrivate(t *testing.T) {
+	opts := ForkOptions{Name: "demo-2", SourcePolicy: ForkRequirePaused, Private: true}
+	if got := opts.String(); got != "{Name:demo-2 SourcePolicy:require_paused Private:true TailscaleAuthKey: NoWait:false}" {
+		t.Fatalf("String = %s", got)
+	}
+	if got := opts.GoString(); got != `zipbox.ForkOptions{Name:"demo-2", SourcePolicy:"require_paused", Private:true, TailscaleAuthKey:"", NoWait:false}` {
+		t.Fatalf("GoString = %s", got)
+	}
+	if got := fmt.Sprintf("%+v", opts); !strings.Contains(got, "Private:true") {
+		t.Fatalf("%%+v = %s", got)
+	}
+	if got := fmt.Sprintf("%v", ForkOptions{Name: "demo-2"}); !strings.Contains(got, "Private:false") {
+		t.Fatalf("%%v = %s", got)
+	}
+}
+
+// A blank key is refused before anything is sent, so no fork is made.
+func TestForkRefusesABlankAuthKeyBeforeAnyRequest(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+	c := New("zb_test", WithBaseURL(server.URL))
+	_, err := c.Sandboxes.Fork(context.Background(), "sbx_1", ForkOptions{Name: "demo-2", SourcePolicy: ForkRequirePaused, TailscaleAuthKey: "  \n"})
+	if !IsCode(err, CodeInvalidRequest) || calls.Load() != 0 {
+		t.Fatalf("err %v, %d requests", err, calls.Load())
+	}
+}
+
+// A ctx that ends while Fork waits stops only the wait: nothing cancels the fork.
+func TestForkWaitEndsWithCtxAndLeavesTheForkRunning(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /sandbox/sbx_1/fork":
+			w.WriteHeader(202)
+			io.WriteString(w, `{"operationId":"fork_1","sandbox":{"id":"sbx_2","name":"demo-2","status":"provisioning","createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"},"fork":{"operationId":"fork_1","sourceSandboxId":"sbx_1","childSandboxId":"sbx_2","sourcePolicy":"require_paused","phase":"queued","sourceRecovery":"not_needed","attempt":0,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"}}`)
+		case "GET /sandbox/sbx_2":
+			io.WriteString(w, `{"id":"sbx_2","name":"demo-2","status":"provisioning","createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z","ready":false}`)
+		default:
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	c := New("zb_test", WithBaseURL(server.URL), WithPollInterval(time.Millisecond, 2*time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := c.Sandboxes.Fork(ctx, "sbx_1", ForkOptions{Name: "demo-2", SourcePolicy: ForkRequirePaused})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 2 || seen[0] != "POST /sandbox/sbx_1/fork" {
+		t.Fatalf("requests %v", seen)
+	}
+	for _, s := range seen[1:] {
+		if s != "GET /sandbox/sbx_2" {
+			t.Fatalf("the wait sent %s", s)
+		}
+	}
+}
+
+// The conformance matcher's {{SAME}} rejects a header that changed since the previous request.
+func TestConformanceSameHeaderPlaceholder(t *testing.T) {
+	var ex exchange
+	ex.Request.Method, ex.Request.Path = "POST", "/sandbox/sbx_1/fork"
+	ex.Request.Headers = map[string]string{"idempotency-key": "{{SAME}}"}
+	req := httptest.NewRequest("POST", "/sandbox/sbx_1/fork", nil)
+	req.Header.Set("Idempotency-Key", "k1")
+	if p := matchRequest(ex, req, nil, http.Header{"Idempotency-Key": {"k1"}}); p != "" {
+		t.Fatalf("same key rejected: %s", p)
+	}
+	if p := matchRequest(ex, req, nil, http.Header{"Idempotency-Key": {"k2"}}); p == "" {
+		t.Fatal("a changed key passed")
+	}
+	if p := matchRequest(ex, req, nil, nil); p == "" {
+		t.Fatal("{{SAME}} on a first request passed")
+	}
+}
+
+// audit-ax AX-03: a box call's error follows the server's readiness. A paused box is
+// not retryable, so a follower ends instead of spinning, and a private box awaiting
+// its tailnet names the remedy.
+func TestBoxNotReadyFollowsReadiness(t *testing.T) {
+	cases := []struct {
+		readiness, status string
+		code              ErrorCode
+		retryable         bool
+	}{
+		{"settling", "archived", CodeBoxNotRunning, true},
+		{"paused", "archived", CodeBoxNotRunning, false},
+		{"start_failed", "archived", CodeBoxNotRunning, false},
+		{"awaits_tailnet", "running", CodeTailnetNotConnected, false},
+	}
+	for _, tc := range cases {
+		var boxCalls atomic.Int32
+		mux := http.NewServeMux()
+		mux.HandleFunc("/sandbox/sbx_1", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"id":"sbx_1","status":%q,"readiness":%q,"createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":false}`, tc.status, tc.readiness)
+		})
+		mux.HandleFunc("/exec/cmd_1/events", func(w http.ResponseWriter, r *http.Request) { boxCalls.Add(1) })
+		server := httptest.NewServer(mux)
+		c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := c.Sandbox("sbx_1").Command("cmd_1").Wait(ctx)
+		cancel()
+		server.Close()
+		var zerr *Error
+		if tc.retryable {
+			// A settling box comes back by itself: the follower keeps its ladder.
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("%s: want the follower still waiting, got %v", tc.readiness, err)
+			}
+			continue
+		}
+		if !errors.As(err, &zerr) || zerr.Code != tc.code || zerr.Retryable {
+			t.Errorf("%s: got %v", tc.readiness, err)
+		}
+		if boxCalls.Load() != 0 {
+			t.Errorf("%s: the box was called", tc.readiness)
+		}
+	}
+}
+
+// audit-ax AX-10: a read that shows the box not ready, and every lifecycle call,
+// drop its cached credentials, so the next box call never dials the old address.
+func TestNotReadyReadAndLifecycleCallsDropCachedCredentials(t *testing.T) {
+	var base string
+	var mu sync.Mutex
+	ready := true
+	var execCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sandbox/sbx_1", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ready {
+			detailHandler(&base, "bt")(w, r)
+			return
+		}
+		io.WriteString(w, `{"id":"sbx_1","status":"archived","readiness":"paused","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":false}`)
+	})
+	for _, action := range []string{"/restore", "/reset", "/tier"} {
+		mux.HandleFunc("/sandbox/sbx_1"+action, func(w http.ResponseWriter, r *http.Request) {})
+	}
+	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		execCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "id: 0-0\nevent: start\ndata: {\"id\":\"c\"}\n\nid: 1-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	ctx := context.Background()
+	c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	box := c.Sandbox("sbx_1")
+	setReady := func(value bool) {
+		mu.Lock()
+		ready = value
+		mu.Unlock()
+	}
+	for _, step := range []struct {
+		name string
+		run  func() error
+	}{
+		{"Refresh", func() error { _, err := box.Refresh(ctx); return err }},
+		{"Start", func() error { return box.Start(ctx) }},
+		{"Restart", func() error { return box.Restart(ctx) }},
+		{"SetTier", func() error { return box.SetTier(ctx, "m") }},
+	} {
+		setReady(true)
+		if _, err := box.Exec(ctx, "true"); err != nil {
+			t.Fatalf("%s: warm-up exec: %v", step.name, err)
+		}
+		setReady(false)
+		if err := step.run(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		before := execCalls.Load()
+		if _, err := box.Exec(ctx, "true"); !IsCode(err, CodeBoxNotRunning) {
+			t.Fatalf("%s: want box_not_running from a fresh read, got %v", step.name, err)
+		}
+		if execCalls.Load() != before {
+			t.Fatalf("%s: dialled the box's old address", step.name)
+		}
+	}
+}
+
+// audit-ax AX-23: a follower's ladder never retries sooner than the server asked.
+func TestFollowerWaitsOutRetryAfter(t *testing.T) {
+	var base string
+	var mu sync.Mutex
+	var opened []time.Time
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	mux.HandleFunc("/exec/cmd_1/events", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		opened = append(opened, time.Now())
+		n := len(opened)
+		mu.Unlock()
+		if n == 2 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, `{"error":"busy"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			// Dropped mid-command: no exit event.
+			io.WriteString(w, "id: 0-0\nevent: start\ndata: {\"id\":\"cmd_1\"}\n\n")
+			return
+		}
+		io.WriteString(w, "id: 6-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL), WithMaxRetries(0), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	if _, err := c.Sandbox("sbx_1").Command("cmd_1").Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 3 {
+		t.Fatalf("opened %d times", len(opened))
+	}
+	if gap := opened[2].Sub(opened[1]); gap < 900*time.Millisecond {
+		t.Fatalf("re-attached %v after a Retry-After of 1s", gap)
+	}
+}
+
+// audit-ax AX-17: one retry rule in every SDK. An envelope that says it is not
+// retryable is never retried, a 502 on a GET is, and a code this SDK does not know
+// maps by status.
+func TestOneRetryRule(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, `{"error":{"code":"unavailable","message":"no","retryable":false}}`)
+	}))
+	defer server.Close()
+	c := New("zb_x", WithBaseURL(server.URL), WithBackoff(time.Millisecond, 2*time.Millisecond))
+	if _, err := c.Sandboxes.List(context.Background()); !IsCode(err, CodeUnavailable) || calls.Load() != 1 {
+		t.Fatalf("err %v after %d calls", err, calls.Load())
+	}
+	resp := &http.Response{StatusCode: 409, Header: http.Header{}}
+	zerr := errorFromResponse(resp, []byte(`{"error":{"code":"a_code_from_later","message":"m"}}`))
+	if zerr.Code != CodeConflict || zerr.DocsURL != "https://zipbox.ai/docs/errors#conflict" {
+		t.Fatalf("%+v", zerr)
 	}
 }

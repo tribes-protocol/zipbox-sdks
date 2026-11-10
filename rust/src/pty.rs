@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::backoff::Backoff;
-use crate::client::{encode, Body};
+use crate::client::{encode, key_not_received, Body};
 use crate::error::{Error, ErrorCode, Result};
 use crate::sandbox::Sandbox;
 use crate::types::PtyOptions;
@@ -68,9 +68,9 @@ pub enum PtyEvent {
     Taken,
     /// The shell exited. The `Pty` stops here.
     Exit(Option<i32>),
-    /// The box ended the session: the session no longer exists, the box is
-    /// gone, or the credential was refused after one re-fetch. The `Pty` stops
-    /// here.
+    /// The session ended on an answered verdict: the session no longer exists, the
+    /// box is gone, the control plane refused the key, or the box revoked this
+    /// client again right after a re-fetch. The `Pty` stops here.
     Closed(String),
 }
 
@@ -122,15 +122,36 @@ impl Pty {
             client_id: &client_id,
             label: &label,
         };
-        // The first connection's failure is the caller's to see (after one token
-        // re-fetch on a 401); every later drop is recovered automatically.
-        let socket = match connect(&sandbox, &target, false, false).await {
-            Err(err) if err.status == Some(401) => connect(&sandbox, &target, false, true).await?,
-            other => other?,
+        // The first connection fails only on an answered verdict. A 401 re-fetches the
+        // token at once. A box that has not answered yet (its connect or TLS handshake
+        // failed: nothing was sent, and a certificate can trail a box's readiness) or
+        // that refuses a key the control plane just accepted is waited out on the same
+        // ladder as a reconnect; dropping the future is the only bound. A dial the
+        // box never answered re-reads the box before the next one: its origin may
+        // have moved.
+        let inner = &sandbox.client.inner;
+        let mut first = Backoff::new(inner.pty_base_delay, inner.pty_max_delay);
+        let mut refresh = false;
+        let mut reresolve = false;
+        let socket = loop {
+            match connect(&sandbox, &target, false, refresh, reresolve).await {
+                Ok(socket) => break socket,
+                Err(err) if err.status == Some(401) && !refresh => {
+                    refresh = true;
+                    reresolve = false;
+                }
+                Err(err) if unanswered(&err) => {
+                    reresolve = true;
+                    tokio::time::sleep(first.next_delay()).await;
+                }
+                Err(err) if err.code == ErrorCode::Unauthorized && err.retryable => {
+                    tokio::time::sleep(first.next_delay()).await;
+                }
+                Err(err) => return Err(err),
+            }
         };
         let (control, control_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
-        let inner = &sandbox.client.inner;
         let backoff = Backoff::new(inner.pty_base_delay, inner.pty_max_delay);
         let task = Session {
             sandbox: sandbox.clone(),
@@ -235,11 +256,14 @@ enum Outcome {
 
 impl Session {
     // Reconnects forever on a transient failure. It stops only on an ANSWERED
-    // verdict: the box or the control plane refusing the credential after one
-    // re-fetch, or saying the box no longer exists.
+    // verdict: the control plane refusing the key (a box that refuses a re-fetched
+    // token has not received the key yet, and stays on the ladder), the box revoking
+    // this client again right after a re-fetch, or the box or session gone.
     async fn run(mut self, first: Socket) {
         let mut socket = Some(first);
         let mut refresh = false;
+        // The last dial was never answered: re-read the box before the next one.
+        let mut reresolve = false;
         // A re-fetched token was refused again with no frame in between.
         let mut refetched = false;
         loop {
@@ -276,18 +300,31 @@ impl Session {
                 client_id: &self.client_id,
                 label: &self.label,
             };
-            match connect(&self.sandbox, &target, true, refresh).await {
+            match connect(&self.sandbox, &target, true, refresh, reresolve).await {
                 Ok(ws) => {
                     refetched = refresh;
                     refresh = false;
+                    reresolve = false;
                     socket = Some(ws);
                 }
-                Err(err) if err.code == ErrorCode::Unauthorized && !refresh => refresh = true,
+                Err(err) if unanswered(&err) => reresolve = true,
+                Err(err) if err.code == ErrorCode::Unauthorized && !refresh => {
+                    refresh = true;
+                    reresolve = false;
+                }
+                // An answered verdict ends the session: the key refused, the session or
+                // box gone, or the re-read's wait verdict (paused, failed, deleted).
                 Err(err)
-                    if matches!(
-                        err.code,
-                        ErrorCode::Unauthorized | ErrorCode::NotFound | ErrorCode::Forbidden
-                    ) =>
+                    if !err.retryable
+                        && matches!(
+                            err.code,
+                            ErrorCode::Unauthorized
+                                | ErrorCode::NotFound
+                                | ErrorCode::Forbidden
+                                | ErrorCode::BoxNotRunning
+                                | ErrorCode::StartFailed
+                                | ErrorCode::Conflict
+                        ) =>
                 {
                     self.close(&err.message);
                     return;
@@ -438,8 +475,13 @@ async fn connect(
     target: &Target<'_>,
     resume: bool,
     refresh: bool,
+    reresolve: bool,
 ) -> Result<Socket> {
-    let access = sandbox.client.box_access(sandbox.id(), refresh).await?;
+    let access = if reresolve {
+        sandbox.client.reresolve(sandbox.id()).await?
+    } else {
+        sandbox.client.box_access(sandbox.id(), refresh).await?
+    };
     let ws_origin = if let Some(rest) = access.base_url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = access.base_url.strip_prefix("http://") {
@@ -469,6 +511,7 @@ async fn connect(
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             let status = response.status().as_u16();
             let body = response.body().clone().unwrap_or_default();
+            let err = Error::from_response(status, None, &body);
             if status == 401 {
                 sandbox
                     .client
@@ -477,9 +520,26 @@ async fn connect(
                     .lock()
                     .expect("box cache")
                     .remove(sandbox.id());
+                // A deleted key fails the re-fetch itself, at the control plane. A box
+                // that refuses the token the re-fetch just handed out has not received
+                // the key yet.
+                if refresh {
+                    return Err(key_not_received(sandbox.id(), err));
+                }
             }
-            Err(Error::from_response(status, None, &body))
+            Err(err)
         }
         Err(err) => Err(Error::transport(err)),
     }
+}
+
+/// A dial the box never answered. tokio-tungstenite reports a failed TCP connect and
+/// a failed TLS handshake as I/O errors; so is an I/O failure during the upgrade,
+/// which it cannot tell apart, and the upgrade is safe to repeat (same session, same
+/// client id).
+fn unanswered(err: &Error) -> bool {
+    err.source
+        .as_deref()
+        .and_then(|source| source.downcast_ref::<tokio_tungstenite::tungstenite::Error>())
+        .is_some_and(|source| matches!(source, tokio_tungstenite::tungstenite::Error::Io(_)))
 }

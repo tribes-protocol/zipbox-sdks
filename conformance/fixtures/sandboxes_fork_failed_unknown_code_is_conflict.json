@@ -1,0 +1,145 @@
+{
+  "name": "sandboxes_fork_failed_unknown_code_is_conflict",
+  "description": "A fork that failed with a code this SDK does not know yet raises conflict, not retryable, with the server's message, in every SDK: the same as an unknown envelope code mapped by status, and never the raw code.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "operationId": "fork_1",
+          "sandbox": {
+            "id": "sbx_2",
+            "name": "demo-2",
+            "domain": "zbox.sh",
+            "ipv6": null,
+            "status": "provisioning",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": false,
+            "privateMode": false,
+            "tailscale": null,
+            "agentPublicKey": null,
+            "fork": {
+              "operationId": "fork_1",
+              "sourceSandboxId": "sbx_1",
+              "childSandboxId": "sbx_2",
+              "sourcePolicy": "require_paused",
+              "phase": "queued",
+              "sourceRecovery": "not_needed",
+              "captureMode": null,
+              "waitingOn": null,
+              "attempt": 0,
+              "nextAttemptAt": null,
+              "cancelRequestedAt": null,
+              "error": null,
+              "createdAt": "2026-11-05T00:00:00.000Z",
+              "updatedAt": "2026-11-05T00:00:00.000Z",
+              "completedAt": null
+            },
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "fork": {
+            "operationId": "fork_1",
+            "sourceSandboxId": "sbx_1",
+            "childSandboxId": "sbx_2",
+            "sourcePolicy": "require_paused",
+            "phase": "queued",
+            "sourceRecovery": "not_needed",
+            "captureMode": null,
+            "waitingOn": null,
+            "attempt": 0,
+            "nextAttemptAt": null,
+            "cancelRequestedAt": null,
+            "error": null,
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z",
+            "completedAt": null
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "Sandbox not found",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#not_found"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "operationId": "fork_1",
+          "sourceSandboxId": "sbx_1",
+          "childSandboxId": "sbx_2",
+          "sourcePolicy": "require_paused",
+          "phase": "failed",
+          "sourceRecovery": "not_needed",
+          "captureMode": null,
+          "waitingOn": null,
+          "attempt": 0,
+          "nextAttemptAt": null,
+          "cancelRequestedAt": null,
+          "error": {
+            "code": "a_fork_code_from_later",
+            "message": "The fork failed for a reason this SDK does not know yet."
+          },
+          "createdAt": "2026-11-05T00:00:00.000Z",
+          "updatedAt": "2026-11-05T00:01:00.000Z",
+          "completedAt": "2026-11-05T00:01:00.000Z"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "conflict",
+      "retryable": false,
+      "docsUrl": "https://zipbox.ai/docs/errors#conflict"
+    }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "name": "sandboxes_get_or_create_starts_pausing",
+  "description": "getOrCreate on a name whose box is pausing (Paused: the VM is stopped and its disk is safe on its host while its backup still uploads) starts it as it starts an archived box: the restore is accepted at once, then the wait reads it ready. It never hands back the paused box and never creates a second one.",
+  "call": {
+    "op": "sandboxes.getOrCreate",
+    "args": {
+      "name": "worker-1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "sbx_1",
+            "name": "worker-1",
+            "domain": "zbox.sh",
+            "ipv6": "2a01::1",
+            "status": "pausing",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": true,
+            "cpuPct": null,
+            "memPct": null,
+            "diskPct": null,
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T00:00:00.000Z",
+            "phase": "paused",
+            "allowedActions": ["start", "delete"]
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/restore",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "success": true
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "starting",
+          "allowedActions": ["cancel_transition", "delete"],
+          "readiness": "settling"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "readiness": "ready"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true,
+      "baseUrl": "{{BASE}}"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "sandboxes_get",
-  "description": "GET /sandbox/:id returns the box with ready/baseUrl/boxToken.",
+  "description": "GET /sandbox/:id returns the box with ready/baseUrl/boxToken and its lifecycle view: phase, allowedActions and readiness.",
   "call": {
     "op": "sandboxes.get",
     "args": {
@@ -34,7 +34,10 @@
           "updatedAt": "2026-10-19T00:00:00.000Z",
           "ready": true,
           "baseUrl": "{{BASE}}",
-          "boxToken": "bt_test_token"
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "readiness": "ready"
         }
       }
     }
@@ -44,7 +47,10 @@
       "id": "sbx_1",
       "status": "running",
       "ready": true,
-      "baseUrl": "{{BASE}}"
+      "baseUrl": "{{BASE}}",
+      "phase": "running",
+      "allowedActions": ["stop", "restart", "delete", "fork"],
+      "readiness": "ready"
     }
   }
 }

@@ -58,7 +58,9 @@ impl Tailscale {
                             self.id, detail.info.status
                         ),
                     );
-                    err.retryable = false;
+                    // A box that is settling grows its key by itself; one that is
+                    // paused or gone does not.
+                    err.retryable = crate::sandboxes::readiness_of(&detail) == "settling";
                     return Err(err);
                 }
             };

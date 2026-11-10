@@ -24,6 +24,26 @@ export type ZipboxErrorCode =
   | 'tailscale_requires_update'
   /** A private box, and this device is not on its tailnet. */
   | 'box_private_unreachable'
+  /** Fork: the requested name is in use. */
+  | 'name_taken'
+  /** Fork: the source is not a box a fork supports (its class, or its disk layout). */
+  | 'source_unsupported'
+  /** Fork: the source is busy with another change; retry once it settles. */
+  | 'source_busy'
+  /** Fork: the source is running; fork with `sourcePolicy: 'pause_and_resume'`. */
+  | 'pause_required'
+  /** Fork: the source holds machine-scoped credentials; fork it from the dashboard. */
+  | 'requires_interactive'
+  /** The Idempotency-Key was already used for a different request. */
+  | 'idempotency_mismatch'
+  /** Fork: the source was deleted before it was captured. */
+  | 'source_gone'
+  /** Fork: the new box came up with its source's identity, so it was discarded. */
+  | 'identity_reused'
+  /** Fork: the copy could not produce a verified filesystem. */
+  | 'copy_failed'
+  /** Fork: the new box failed to boot. */
+  | 'start_failed'
 
 const ERROR_CODES: readonly ZipboxErrorCode[] = [
   'invalid_request',
@@ -40,7 +60,17 @@ const ERROR_CODES: readonly ZipboxErrorCode[] = [
   'tailnet_not_connected',
   'tailscale_unavailable_egress_lockdown',
   'tailscale_requires_update',
-  'box_private_unreachable'
+  'box_private_unreachable',
+  'name_taken',
+  'source_unsupported',
+  'source_busy',
+  'pause_required',
+  'requires_interactive',
+  'idempotency_mismatch',
+  'source_gone',
+  'identity_reused',
+  'copy_failed',
+  'start_failed'
 ]
 
 const DOCS_ERRORS_URL = 'https://zipbox.ai/docs/errors'
@@ -112,6 +142,16 @@ function isRetryableCode(code: ZipboxErrorCode): boolean {
     case 'tailscale_unavailable_egress_lockdown':
     case 'tailscale_requires_update':
     case 'box_private_unreachable':
+    case 'name_taken':
+    case 'source_unsupported':
+    case 'source_busy':
+    case 'pause_required':
+    case 'requires_interactive':
+    case 'idempotency_mismatch':
+    case 'source_gone':
+    case 'identity_reused':
+    case 'copy_failed':
+    case 'start_failed':
       return false
   }
 }
@@ -146,7 +186,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isErrorCode(value: unknown): value is ZipboxErrorCode {
+export function isErrorCode(value: unknown): value is ZipboxErrorCode {
   return typeof value === 'string' && ERROR_CODES.some((code) => code === value)
 }
 

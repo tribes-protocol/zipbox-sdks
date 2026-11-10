@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from mock_server import MockServer, substitute
+from mock_server import MockServer, dead_origin, substitute
 from zipbox import AsyncZipbox, Zipbox, ZipboxError
 from zipbox._async_client import AsyncCommand, AsyncSandbox
 from zipbox._client import Command, Sandbox
@@ -93,6 +93,20 @@ def _create_options(a: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fork_options(a: dict[str, Any]) -> dict[str, Any]:
+    """The fork options a fixture passes, as keyword arguments."""
+    options: dict[str, Any] = {
+        "name": a["name"],
+        "source_policy": a["sourcePolicy"],
+        "tailscale_auth_key": a.get("tailscaleAuthKey"),
+    }
+    if "private" in a:
+        options["private"] = a["private"]
+    if "wait" in a:
+        options["wait"] = a["wait"]
+    return options
+
+
 def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
     box = zb.sandbox(a["id"]) if "id" in a else None
     match op:
@@ -112,6 +126,12 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
             return zb.sandboxes.stop(a["id"])
         case "sandboxes.restart":
             return zb.sandboxes.restart(a["id"])
+        case "sandboxes.cancelTransition":
+            return zb.sandboxes.cancel_transition(a["id"])
+        case "sandboxes.fork":
+            return zb.sandboxes.fork(a["id"], **_fork_options(a))
+        case "sandboxes.getFork":
+            return zb.sandboxes.get_fork(a["id"])
         case "sandboxes.setTier":
             return zb.sandboxes.set_tier(a["id"], a["tier"])
         case "sandboxes.delete":
@@ -182,6 +202,12 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
             return await zb.sandboxes.stop(a["id"])
         case "sandboxes.restart":
             return await zb.sandboxes.restart(a["id"])
+        case "sandboxes.cancelTransition":
+            return await zb.sandboxes.cancel_transition(a["id"])
+        case "sandboxes.fork":
+            return await zb.sandboxes.fork(a["id"], **_fork_options(a))
+        case "sandboxes.getFork":
+            return await zb.sandboxes.get_fork(a["id"])
         case "sandboxes.setTier":
             return await zb.sandboxes.set_tier(a["id"], a["tier"])
         case "sandboxes.delete":
@@ -244,7 +270,12 @@ def server() -> Iterator[MockServer]:
 def _load(server: MockServer, path: Path) -> dict[str, Any]:
     base = server.base_url
     fixture: dict[str, Any] = substitute(
-        json.loads(path.read_text()), {"{{BASE}}": base, "{{HOST}}": urlparse(base).hostname or ""}
+        json.loads(path.read_text()),
+        {
+            "{{BASE}}": base,
+            "{{HOST}}": urlparse(base).hostname or "",
+            "{{DEAD}}": dead_origin(),
+        },
     )
     server.load(fixture["exchanges"])
     server.errors.clear()
@@ -252,11 +283,17 @@ def _load(server: MockServer, path: Path) -> dict[str, Any]:
     return fixture
 
 
+def _auth_key(fixture: dict[str, Any]) -> Any:
+    """The Tailscale auth key a fixture hands the SDK, if any (connect or fork)."""
+    args = fixture["call"]["args"]
+    return args.get("authKey", args.get("tailscaleAuthKey"))
+
+
 def _verify(
     server: MockServer, fixture: dict[str, Any], result: Any, error: ZipboxError | None
 ) -> None:
     problems = list(server.errors)
-    auth_key = fixture["call"]["args"].get("authKey")
+    auth_key = _auth_key(fixture)
     if isinstance(auth_key, str) and any(auth_key.encode() in body for body in server.bodies):
         problems.append("the auth key left the client in a request body")
     if server.unserved():
@@ -271,6 +308,7 @@ def _verify(
                 "status": error.status,
                 "requestId": error.request_id,
                 "docsUrl": error.docs_url,
+                "retryable": error.retryable,
             }
             problems += matches(expect["error"], actual, "error")
     elif error is not None:
@@ -281,7 +319,7 @@ def _verify(
 
 
 def _assert_key_absent(fixture: dict[str, Any], text: str) -> None:
-    auth_key = fixture["call"]["args"].get("authKey")
+    auth_key = _auth_key(fixture)
     assert not (isinstance(auth_key, str) and auth_key in text), "auth key in an error"
 
 
@@ -328,4 +366,4 @@ async def test_async(server: MockServer, path: Path) -> None:
 
 
 def test_every_fixture_is_loaded() -> None:
-    assert len(_fixtures()) >= 27
+    assert len(_fixtures()) >= 88

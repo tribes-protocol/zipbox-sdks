@@ -2,11 +2,17 @@
 // The rules this runner implements are sdks/conformance/README.md.
 import { readdirSync, readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer as createTcpServer } from 'node:net'
 import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { type CreateSandboxOptions, Zipbox, ZipboxError } from '../src/index.js'
+import {
+  type CreateSandboxOptions,
+  type ForkSandboxOptions,
+  Zipbox,
+  ZipboxError
+} from '../src/index.js'
 
 const FIXTURE_DIR = join(import.meta.dirname, '..', '..', 'conformance', 'fixtures')
 const API_KEY = `zb_${'T'.repeat(43)}`
@@ -42,10 +48,11 @@ function isFixture(value: unknown): value is Fixture {
   return isRecord(value) && typeof value.name === 'string' && Array.isArray(value.exchanges)
 }
 
-function loadFixture(file: string, base: string): Fixture {
+function loadFixture(file: string, base: string, dead: string): Fixture {
   const raw = readFileSync(join(FIXTURE_DIR, file), 'utf8')
     .replaceAll('{{BASE}}', base)
     .replaceAll('{{HOST}}', new URL(base).hostname)
+    .replaceAll('{{DEAD}}', dead)
   const parsed: unknown = JSON.parse(raw)
   if (!isFixture(parsed)) throw new Error(`bad fixture ${file}`)
   return parsed
@@ -59,6 +66,22 @@ function bodyMatcher(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bodyMatcher(item)]))
   }
   return value
+}
+
+/** `{{DEAD}}`: an origin on a port bound and closed again, so every dial is refused. */
+async function deadOrigin(): Promise<string> {
+  const server = createTcpServer()
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no address')
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve()
+    })
+  })
+  return `http://127.0.0.1:${address.port}`
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -75,6 +98,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 class MockServer {
   private server: Server | null = null
   private queue: Fixture['exchanges'] = []
+  // The previous request's headers, for `{{SAME}}`.
+  private previous: IncomingMessage['headers'] = {}
   mismatches: string[] = []
   base = ''
 
@@ -90,6 +115,7 @@ class MockServer {
 
   load(exchanges: Fixture['exchanges']): void {
     this.queue = [...exchanges]
+    this.previous = {}
     this.mismatches = []
   }
 
@@ -115,6 +141,7 @@ class MockServer {
       return
     }
     const problem = this.match(next.request, req, text)
+    this.previous = req.headers
     if (problem !== null) {
       this.mismatches.push(`${label}: ${problem}`)
       res.writeHead(599).end()
@@ -135,11 +162,21 @@ class MockServer {
   private match(expected: FixtureRequest, req: IncomingMessage, text: string): string | null {
     if (req.method !== expected.method) return `method ${req.method ?? ''} ≠ ${expected.method}`
     if (req.url !== expected.path) return `path ≠ ${expected.path}`
+    const header = (headers: IncomingMessage['headers'], name: string): string | undefined => {
+      const actual = headers[name]
+      return Array.isArray(actual) ? actual.join(',') : actual
+    }
     for (const [name, value] of Object.entries(expected.headers ?? {})) {
-      const actual = req.headers[name]
-      const got = Array.isArray(actual) ? actual.join(',') : actual
-      if (value === '{{ANY}}' ? !got : got !== value)
-        return `header ${name}=${got ?? '∅'} ≠ ${value}`
+      const got = header(req.headers, name)
+      const previous = header(this.previous, name)
+      const ok =
+        value === '{{ANY}}'
+          ? Boolean(got)
+          : value === '{{SAME}}'
+            ? Boolean(got) && got === previous
+            : got === value
+      if (!ok)
+        return `header ${name}=${got ?? '∅'} ≠ ${value === '{{SAME}}' ? `${previous ?? '∅'} (same)` : value}`
     }
     if (expected.body !== undefined) {
       let parsed: unknown
@@ -185,6 +222,20 @@ function createOptions(args: Record<string, unknown>): Omit<CreateSandboxOptions
   }
 }
 
+function forkOptions(args: Record<string, unknown>): ForkSandboxOptions {
+  const tailscaleAuthKey = optionalArg(args, 'tailscaleAuthKey')
+  const wait = args.wait
+  const privateBox = args.private
+  return {
+    name: arg(args, 'name'),
+    sourcePolicy:
+      arg(args, 'sourcePolicy') === 'pause_and_resume' ? 'pause_and_resume' : 'require_paused',
+    ...(typeof privateBox === 'boolean' ? { private: privateBox } : {}),
+    ...(tailscaleAuthKey === undefined ? {} : { tailscaleAuthKey }),
+    ...(typeof wait === 'boolean' ? { wait } : {})
+  }
+}
+
 async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promise<unknown> {
   const box = (): ReturnType<Zipbox['sandbox']> => zb.sandbox(arg(args, 'id'))
   switch (op) {
@@ -209,6 +260,12 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return zb.sandboxes.stop(arg(args, 'id'))
     case 'sandboxes.restart':
       return zb.sandboxes.restart(arg(args, 'id'))
+    case 'sandboxes.cancelTransition':
+      return zb.sandboxes.cancelTransition(arg(args, 'id'))
+    case 'sandboxes.fork':
+      return zb.sandboxes.fork(arg(args, 'id'), forkOptions(args))
+    case 'sandboxes.getFork':
+      return zb.sandboxes.getFork(arg(args, 'id'))
     case 'sandboxes.setTier':
       return zb.sandboxes.setTier(arg(args, 'id'), arg(args, 'tier') === 'm' ? 'm' : 's')
     case 'sandboxes.delete': {
@@ -318,9 +375,11 @@ const files = readdirSync(FIXTURE_DIR)
 
 describe('conformance', () => {
   const server = new MockServer()
+  let dead = ''
 
   beforeAll(async () => {
     await server.start()
+    dead = await deadOrigin()
   })
 
   afterAll(async () => {
@@ -328,12 +387,12 @@ describe('conformance', () => {
   })
 
   it('has fixtures', () => {
-    expect(files.length).toBeGreaterThanOrEqual(38)
+    expect(files.length).toBeGreaterThanOrEqual(88)
   })
 
   for (const file of files) {
     it(file.replace(/\.json$/, ''), async () => {
-      const fixture = loadFixture(file, server.base)
+      const fixture = loadFixture(file, server.base, dead)
       server.load(fixture.exchanges)
       const zb = new Zipbox({
         apiKey: API_KEY,

@@ -1,0 +1,33 @@
+{
+  "name": "sandboxes_cancel_transition",
+  "description": "sandboxes.cancelTransition → POST /sandbox/sbx_1/transition/cancel; returns the server's outcome as it came.",
+  "call": {
+    "op": "sandboxes.cancelTransition",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/transition/cancel",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "outcome": "cleared",
+          "reason": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "text": "cleared"
+    }
+  }
+}

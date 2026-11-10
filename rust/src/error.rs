@@ -42,6 +42,32 @@ pub enum ErrorCode {
     TailscaleRequiresUpdate,
     /// The box is private and this device is not on its tailnet.
     BoxPrivateUnreachable,
+    /// The name asked for a new box (a fork) is already in use (409).
+    NameTaken,
+    /// The source is not a box a fork supports: an external, warm-pool, company or
+    /// enterprise box, a legacy tier, or a filesystem layout the copier cannot copy
+    /// (409, or a fork's own error).
+    SourceUnsupported,
+    /// The source is busy with another state change or maintenance (409).
+    SourceBusy,
+    /// The source is running and the fork was sent with
+    /// [`crate::ForkSourcePolicy::RequirePaused`]: fork with
+    /// [`crate::ForkSourcePolicy::PauseAndResume`] to let it pause for the capture (409).
+    PauseRequired,
+    /// Copying the source's machine-scoped credentials needs the owner signed in to
+    /// the dashboard, not an API key: fork it from the dashboard (403).
+    RequiresInteractive,
+    /// The `Idempotency-Key` was already used for a different request (409).
+    IdempotencyMismatch,
+    /// A fork's error: the source was deleted before it was captured.
+    SourceGone,
+    /// A fork's error: the new box reported its source's identity, so it was stopped
+    /// before it served and its disk discarded.
+    IdentityReused,
+    /// A fork's error: the copy could not produce a verified filesystem.
+    CopyFailed,
+    /// A fork's error: the new box's first boot failed.
+    StartFailed,
 }
 
 impl ErrorCode {
@@ -65,12 +91,27 @@ impl ErrorCode {
             }
             ErrorCode::TailscaleRequiresUpdate => "tailscale_requires_update",
             ErrorCode::BoxPrivateUnreachable => "box_private_unreachable",
+            ErrorCode::NameTaken => "name_taken",
+            ErrorCode::SourceUnsupported => "source_unsupported",
+            ErrorCode::SourceBusy => "source_busy",
+            ErrorCode::PauseRequired => "pause_required",
+            ErrorCode::RequiresInteractive => "requires_interactive",
+            ErrorCode::IdempotencyMismatch => "idempotency_mismatch",
+            ErrorCode::SourceGone => "source_gone",
+            ErrorCode::IdentityReused => "identity_reused",
+            ErrorCode::CopyFailed => "copy_failed",
+            ErrorCode::StartFailed => "start_failed",
         }
     }
 
     /// Parses a wire name. Unknown names classify as [`ErrorCode::Unavailable`].
     pub fn parse(value: &str) -> ErrorCode {
-        match value {
+        ErrorCode::known(value).unwrap_or(ErrorCode::Unavailable)
+    }
+
+    /// The code for a wire name this SDK documents; `None` for any other.
+    pub(crate) fn known(value: &str) -> Option<ErrorCode> {
+        Some(match value {
             "invalid_request" => ErrorCode::InvalidRequest,
             "unauthorized" => ErrorCode::Unauthorized,
             "forbidden" => ErrorCode::Forbidden,
@@ -87,8 +128,18 @@ impl ErrorCode {
             }
             "tailscale_requires_update" => ErrorCode::TailscaleRequiresUpdate,
             "box_private_unreachable" => ErrorCode::BoxPrivateUnreachable,
-            _ => ErrorCode::Unavailable,
-        }
+            "name_taken" => ErrorCode::NameTaken,
+            "source_unsupported" => ErrorCode::SourceUnsupported,
+            "source_busy" => ErrorCode::SourceBusy,
+            "pause_required" => ErrorCode::PauseRequired,
+            "requires_interactive" => ErrorCode::RequiresInteractive,
+            "idempotency_mismatch" => ErrorCode::IdempotencyMismatch,
+            "source_gone" => ErrorCode::SourceGone,
+            "identity_reused" => ErrorCode::IdentityReused,
+            "copy_failed" => ErrorCode::CopyFailed,
+            "start_failed" => ErrorCode::StartFailed,
+            _ => return None,
+        })
     }
 
     /// The code for an HTTP status that carried no error envelope.
@@ -184,16 +235,19 @@ impl Error {
             .and_then(|v| v.get("error"))
             .filter(|e| e.is_object())
         {
+            // A code from a later server maps by status, as in every SDK.
             let code = envelope
                 .get("code")
                 .and_then(|c| c.as_str())
-                .map(ErrorCode::parse)
+                .and_then(ErrorCode::known)
                 .unwrap_or_else(|| ErrorCode::for_status(status));
-            let retry_after = envelope
-                .get("retryAfterMs")
-                .and_then(|v| v.as_u64())
-                .map(Duration::from_millis)
-                .or(retry_after);
+            // Retry-After wins over the envelope's hint, as in every SDK.
+            let retry_after = retry_after.or_else(|| {
+                envelope
+                    .get("retryAfterMs")
+                    .and_then(|v| v.as_u64())
+                    .map(Duration::from_millis)
+            });
             return Error {
                 code,
                 status: Some(status),
@@ -282,6 +336,25 @@ mod tests {
             ErrorCode::TailscaleUnavailableEgressLockdown,
             ErrorCode::TailscaleRequiresUpdate,
             ErrorCode::BoxPrivateUnreachable,
+        ] {
+            assert_eq!(ErrorCode::parse(code.as_str()), code);
+            assert!(!code.is_retryable());
+        }
+    }
+
+    #[test]
+    fn fork_codes_round_trip_and_are_not_retried() {
+        for code in [
+            ErrorCode::NameTaken,
+            ErrorCode::SourceUnsupported,
+            ErrorCode::SourceBusy,
+            ErrorCode::PauseRequired,
+            ErrorCode::RequiresInteractive,
+            ErrorCode::IdempotencyMismatch,
+            ErrorCode::SourceGone,
+            ErrorCode::IdentityReused,
+            ErrorCode::CopyFailed,
+            ErrorCode::StartFailed,
         ] {
             assert_eq!(ErrorCode::parse(code.as_str()), code);
             assert!(!code.is_retryable());

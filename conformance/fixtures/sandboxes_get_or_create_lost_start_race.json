@@ -1,0 +1,155 @@
+{
+  "name": "sandboxes_get_or_create_lost_start_race",
+  "description": "Two callers start one paused name: the loser's restore answers 409, and the box reads provisioning. That is the server's idempotent answer, so getOrCreate waits on the box instead of raising conflict.",
+  "call": {
+    "op": "sandboxes.getOrCreate",
+    "args": {
+      "name": "demo"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "sbx_1",
+            "name": "demo",
+            "domain": "zbox.sh",
+            "ipv6": "2a01::1",
+            "status": "archived",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": true,
+            "createdAt": "2026-11-09T00:00:00.000Z",
+            "updatedAt": "2026-11-09T00:00:00.000Z",
+            "phase": "paused",
+            "allowedActions": ["start", "delete", "fork"]
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/restore",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "conflict",
+            "message": "Sandbox is not archived",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "starting",
+          "allowedActions": ["delete"],
+          "readiness": "settling"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "starting",
+          "allowedActions": ["delete"],
+          "readiness": "settling"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "readiness": "ready"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true
+    }
+  }
+}

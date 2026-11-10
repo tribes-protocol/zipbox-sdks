@@ -38,19 +38,28 @@ zipbox login
 
 ## Boxes
 
-| Command                                                                                  | Does                                                            |
-| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]` | Create a box and wait until it is ready                         |
-| `zipbox sandbox create --private [--tailscale-auth-key-file <file>]`                     | Create a box that is never public, then join it to your tailnet |
-| `zipbox sandbox list`                                                                    | Your boxes                                                      |
-| `zipbox sandbox get <box>`                                                               | One box                                                         |
-| `zipbox sandbox start <box>`                                                             | Start a stopped box; one still stopping, once its stop lands    |
-| `zipbox sandbox stop <box>`                                                              | Stop (disk archived, nothing billed)                            |
-| `zipbox sandbox restart <box>`                                                           | Hard restart; files survive                                     |
-| `zipbox sandbox tier <box> <tier>`                                                       | Resize                                                          |
-| `zipbox sandbox delete <box> [--yes]`                                                    | Delete (30-day recoverable copy by default)                     |
+| Command                                                                                    | Does                                                            |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]`   | Create a box and wait until it is ready                         |
+| `zipbox sandbox create --private [--tailscale-auth-key-file <file>]`                       | Create a box that is never public, then join it to your tailnet |
+| `zipbox sandbox list`                                                                      | Your boxes                                                      |
+| `zipbox sandbox get <box>`                                                                 | One box                                                         |
+| `zipbox sandbox start <box>`                                                               | Start a stopped box; one still stopping, once its stop lands    |
+| `zipbox sandbox stop <box>`                                                                | Stop (disk archived, nothing billed)                            |
+| `zipbox sandbox restart <box>`                                                             | Hard restart; files survive                                     |
+| `zipbox sandbox cancel <box>`                                                              | Cancel the stop, start, restart, resize or fork in flight       |
+| `zipbox fork <box> --name <name> [--pause] [--tailscale-auth-key-file <file>] [--no-wait]` | Fork a box into a new box with its files and a fresh identity   |
+| `zipbox sandbox tier <box> <tier>`                                                         | Resize                                                          |
+| `zipbox sandbox delete <box> [--yes]`                                                      | Delete (30-day recoverable copy by default)                     |
 
 `<box>` is a box id or its name. `sandbox` also answers to `box`; `sandbox list` to `sandbox ls`. `delete` asks for confirmation unless you pass `--yes` (`-y`).
+
+`zipbox fork` makes a new box from a consistent capture of `<box>`'s disk: its files, software and settings, with a new name and identity ([Fork a box](https://zipbox.ai/docs/fork.md)). A running source answers `pause_required` unless you pass `--pause`, which pauses it for the capture (its sessions disconnect) and resumes it right after. The new box and the fork's operation id print as soon as the fork is accepted; the command then waits until the new box is ready. Ctrl-C stops only that wait, the fork keeps running: `zipbox sandbox get <name>` shows its phase and `zipbox sandbox cancel <name>` cancels it. `--no-wait` returns right after acceptance. `--tailscale-auth-key-file` (a file, or `-` for stdin) joins the new box to your tailnet once it runs; like every Tailscale key, it is never taken from the command line.
+
+```sh
+zipbox fork rent-jesse --name rent-jesse-2 --pause
+zipbox fork build --name build-2 --tailscale-auth-key-file ./ts.key
+```
 
 An account holds 250 machine names and a deleted box keeps its name, so reuse names: look the box up with `zipbox sandbox get worker-07` and run `zipbox sandbox create --name worker-07` only when there is none; `create` with the name of a box you deleted brings that name back. A new name past the limit prints `machine_limit_reached` with its docs link ([Machine limit](https://zipbox.ai/docs/machine-limit.md)).
 
@@ -141,7 +150,19 @@ Any slug from [/llms.txt](https://zipbox.ai/llms.txt) works. Agents in a termina
 
 ## JSON output
 
-Every command takes `--json` and prints one JSON document with stable field names: the same shapes as the [REST API](https://zipbox.ai/docs/http-api.md) - box rows from `sandbox`, command results `{id, exitCode, stdout, stderr, timedOut}` from `exec` and `run` (collected, then printed once the command exits; `exec --background` prints the command record), file entries `{name, kind, sizeBytes, modifiedAtMs}` from `files ls`. Errors print `{error: {code, message, requestId, retryable, docsUrl, …}}` on stderr and exit non-zero.
+Every command takes `--json` and prints one JSON document with stable field names: the same shapes as the [REST API](https://zipbox.ai/docs/http-api.md) - box rows from `sandbox`, command results `{id, exitCode, stdout, stderr, timedOut}` from `exec` and `run` (collected, then printed once the command exits; `exec --background` prints the command record), file entries `{name, kind, sizeBytes, modifiedAtMs}` from `files ls`. Errors print `{error: {code, status, message, requestId, retryable, retryAfterMs, docsUrl}}` on stderr (`retryAfterMs` only when Zipbox said how long to wait) and exit non-zero.
+
+## Errors and exit status
+
+Without `--json`, an error prints its message and code, the request id to quote to support, whether a retry may succeed (and after how long, when Zipbox said), and its docs link, on stderr.
+
+| Exit status       | When                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0`               | Success                                                                                                                                    |
+| The command's own | `exec` and `run`: the remote command's status (`1` when the box could not tell how it ended). `shell`: the shell's. `ssh --exec`: `ssh`'s. |
+| `1`               | The CLI itself failed: an error was printed on stderr                                                                                      |
+
+A remote command can exit `1` too, so a script that must tell a failed call from a failed command runs with `--json`: a failed call prints `{error: …}` on stderr, a command prints its result `{id, exitCode, …}` on stdout.
 
 ## In CI
 

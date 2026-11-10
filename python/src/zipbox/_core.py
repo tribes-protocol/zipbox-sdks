@@ -29,28 +29,34 @@ from zipbox._effects import (
     StreamOp,
 )
 from zipbox._envelope import seal, tailscale_info
-from zipbox._errors import ZipboxError, error_from_response
+from zipbox._errors import ErrorCode, ZipboxError, error_from_response, is_error_code
 from zipbox._models import (
     CommandInfo,
     ExecEvent,
     ExecResult,
     FileEntry,
+    ForkSourcePolicy,
     Language,
     Preview,
     SandboxDetail,
+    SandboxFork,
     SandboxInfo,
     Signal,
     SshInfo,
     TailscaleStatus,
+    TransitionCancelOutcome,
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
+# get_or_create's list filter: GET /sandbox rows carry no readiness, so the list reads status.
 _DEAD_STATUSES = frozenset({"destroyed", "stopped", "deleting"})
-_RETRY_CODES = frozenset({"rate_limited", "unavailable"})
+_READINESS = frozenset(
+    {"ready", "settling", "awaits_tailnet", "paused", "start_failed", "deleting", "gone"}
+)
 # A box accepts a sealed credential while it is booting or running.
 _SEALABLE_STATUSES = frozenset({"provisioning", "running"})
 # How long a private box's reachability probe may take before the box counts as off
@@ -70,6 +76,28 @@ _SCREENSHOT = (
 )
 
 CommandLine = str | Sequence[str]
+
+
+def fork_ended_error(fork: SandboxFork) -> ZipboxError | None:
+    """The error a fork that ended without its box answers: its own code (an answered
+    verdict, not retried), or ``conflict`` for a cancel. None while it has not ended so."""
+    error = fork.error
+    if error is not None:
+        code: ErrorCode = error.code if is_error_code(error.code) else "conflict"
+        return ZipboxError(code, error.message, retryable=False)
+    if fork.phase == "cancelled":
+        return ZipboxError(
+            "conflict",
+            f"the fork making box {fork.child_sandbox_id} was cancelled",
+            retryable=False,
+        )
+    return None
+
+
+# A box turns ready about a second after it serves, and nothing tells the client when,
+# so each poll rung is time spent asleep after it did. Doubling overshot by up to
+# several seconds; 1.25 keeps the same base, cap and jitter and reaches the cap gently.
+POLL_FACTOR = 1.25
 
 
 @dataclass
@@ -106,14 +134,91 @@ def resolve_config(
     return ClientConfig(api_key=key, base_url=url.rstrip("/"), max_retries=max_retries, **overrides)
 
 
-def awaits_tailnet(detail: SandboxDetail) -> bool:
-    """A private box that is running with its key but has not joined a tailnet yet."""
+def _fallback_readiness(detail: SandboxDetail) -> str:
+    """The rule before ``readiness``, for a control plane that does not send it: ready,
+    private and waiting for a tailnet, ended (destroyed, stopped, deleting), or still
+    settling. Remove once every control plane sends ``readiness``."""
+    if detail.ready:
+        return "ready"
     joined = detail.tailscale is not None and bool(detail.tailscale.ipv4)
-    return (
+    if (
         detail.private_mode
         and not joined
         and detail.status == "running"
         and bool(detail.agent_public_key)
+    ):
+        return "awaits_tailnet"
+    if detail.status in ("destroyed", "stopped"):
+        return "gone"
+    if detail.status == "deleting":
+        return "deleting"
+    return "settling"
+
+
+def readiness_of(detail: SandboxDetail) -> str:
+    """Whether the box will answer, as the server decided it (``readiness``)."""
+    if detail.readiness in _READINESS:
+        return detail.readiness
+    return _fallback_readiness(detail)
+
+
+def _paused_remedy(detail: SandboxDetail) -> str:
+    """Start it, unless the server says it cannot start now."""
+    actions = detail.allowed_actions
+    if actions is None or "start" in actions:
+        return "start it first"
+    return "it cannot be started now; see its allowed_actions"
+
+
+def ended_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError | None:
+    """The error a wait raises for a box that will not become ready by itself, or None
+    while it may (ready, settling, awaits_tailnet). Never retryable: an answered verdict."""
+    readiness = readiness_of(detail)
+    if readiness == "paused":
+        return ZipboxError(
+            "box_not_running",
+            f"Box {sandbox_id} is paused and nothing will start it; {_paused_remedy(detail)}.",
+            retryable=False,
+        )
+    if readiness == "start_failed":
+        remedy = (
+            "its name was released; create it again"
+            if detail.status == "stopped"
+            else "start it again"
+        )
+        return ZipboxError(
+            "start_failed", f"Box {sandbox_id} failed to start; {remedy}.", retryable=False
+        )
+    if readiness in ("deleting", "gone"):
+        return ZipboxError(
+            "conflict",
+            f"Box {sandbox_id} is {detail.status} and will not become ready.",
+            retryable=False,
+        )
+    return None
+
+
+def box_not_ready_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError:
+    """The error a box call raises on a detail it cannot call: ``tailnet_not_connected``
+    for a private box awaiting its tailnet, else ``box_not_running``, retryable only
+    while the box is settling."""
+    stated = detail.readiness if detail.readiness in _READINESS else None
+    readiness = stated or _fallback_readiness(detail)
+    if readiness == "awaits_tailnet":
+        return ZipboxError(
+            "tailnet_not_connected",
+            f"Box {sandbox_id} is private and has not joined a tailnet yet; connect it "
+            "with box.tailscale.connect.",
+            retryable=False,
+        )
+    return ZipboxError(
+        "box_not_running",
+        f"Box {sandbox_id} is {detail.status} and not ready; start it first.",
+        # Without readiness (an older control plane), the rule before it: booting or
+        # restarting comes back by itself, and nothing else does.
+        retryable=detail.status in ("provisioning", "running")
+        if stated is None
+        else stated == "settling",
     )
 
 
@@ -301,14 +406,31 @@ class Core:
             self.config.retry_base_delay_s, self.config.retry_max_delay_s, rng=self.config.rng
         )
 
+    def _poll_backoff(self) -> Backoff:
+        return Backoff(
+            self.config.poll_interval_s,
+            self.config.poll_max_interval_s,
+            factor=POLL_FACTOR,
+            rng=self.config.rng,
+        )
+
     def send(
-        self, request: HttpRequest, *, retry: bool, passthrough: frozenset[int] = frozenset()
+        self,
+        request: HttpRequest,
+        *,
+        retry: bool,
+        passthrough: frozenset[int] = frozenset(),
+        box_ladder: Backoff | None = None,
     ) -> Op[HttpResponse]:
         """Send with the SDK retry rule; raise ``ZipboxError`` on a non-2xx status.
 
         A failure to connect or to complete the TLS handshake is retried for EVERY
         method with no attempt ceiling (CLAUDE.md §0): nothing was sent, and a box's
         certificate can trail its readiness. The ladder is capped and jittered.
+
+        With ``box_ladder`` (a box call's unsent ladder) that failure is raised instead,
+        for the caller to re-read the box, and the ladder resets whenever a request is
+        answered.
         """
         attempt = 0
         backoff = self._backoff()
@@ -318,17 +440,21 @@ class Core:
                 response: HttpResponse = yield request
             except ZipboxError as network_error:
                 if network_error.unsent:
+                    if box_ladder is not None:
+                        raise
                     yield Sleep(unsent_backoff.next())
                     continue
                 error = network_error
             else:
+                if box_ladder is not None:
+                    box_ladder.reset()
                 if 200 <= response.status < 300 or response.status in passthrough:
                     return response
                 body = response.body
                 if response.handle is not None:
                     body = yield ReadAll(response)
                 error = error_from_response(response.status, response.headers, body)
-            if not retry or error.code not in _RETRY_CODES or attempt >= self.config.max_retries:
+            if not retry or not error.retryable or attempt >= self.config.max_retries:
                 raise error
             delay = (
                 error.retry_after_ms / 1000 if error.retry_after_ms is not None else backoff.next()
@@ -367,12 +493,7 @@ class Core:
             detail = yield from self.get(sandbox_id)
             cached = self._targets.get(sandbox_id)
             if cached is None:
-                raise ZipboxError(
-                    "box_not_running",
-                    f"Box {sandbox_id} is {detail.status} and not ready; start it first.",
-                    # Booting or restarting comes back by itself; stopped or deleted does not.
-                    retryable=detail.status in ("provisioning", "running"),
-                )
+                raise box_not_ready_error(sandbox_id, detail)
         if cached.private and sandbox_id not in self._reachable:
             yield from self.probe_private(sandbox_id, cached)
         return cached
@@ -412,6 +533,18 @@ class Core:
         self._targets.pop(sandbox_id, None)
         self._reachable.discard(sandbox_id)
 
+    def reresolve(self, sandbox_id: str) -> Op[None]:
+        """Drop the cached box and wait for it the way ``create`` does, caching the
+        target that wait read. A created box's ``baseUrl`` moves once, from its boot
+        name to ``box--<name>``. Raises the wait's verdict on a paused, failed,
+        deleting or gone box, and ``tailnet_not_connected`` on a private box that
+        has not joined a tailnet."""
+        self.forget(sandbox_id)
+        detail = yield from self.wait_ready(sandbox_id)
+        if sandbox_id not in self._targets:
+            raise box_not_ready_error(sandbox_id, detail)
+        return None
+
     def box(
         self,
         sandbox_id: str,
@@ -424,8 +557,14 @@ class Core:
         stream: bool = False,
         accept: str = "application/json",
     ) -> Op[HttpResponse]:
-        """Call a box route with its token; a 401 re-fetches the token once."""
+        """Call a box route with its token; a 401 re-fetches the token once.
+
+        A request that never reached the box (connect, DNS, TLS handshake) waits a
+        rung of one unsent ladder for the whole call, re-reads the box with
+        ``reresolve`` and retries there, with no attempt ceiling.
+        """
         refetched = False
+        unsent_backoff = self._backoff()
         while True:
             target = yield from self.target(sandbox_id)
             hdrs = {
@@ -441,9 +580,19 @@ class Core:
                 hdrs["content-type"] = "application/octet-stream"
             url = target.base_url + path + _query(query or {})
             request = HttpRequest(method, url, hdrs, payload, stream=stream)
-            response = yield from self.send(
-                request, retry=method == "GET", passthrough=frozenset({401})
-            )
+            try:
+                response = yield from self.send(
+                    request,
+                    retry=method == "GET",
+                    passthrough=frozenset({401}),
+                    box_ladder=unsent_backoff,
+                )
+            except ZipboxError as error:
+                if not error.unsent:
+                    raise
+                yield Sleep(unsent_backoff.next())
+                yield from self.reresolve(sandbox_id)
+                continue
             if response.status != 401:
                 return response
             if response.handle is not None:
@@ -496,26 +645,46 @@ class Core:
             self.forget(sandbox_id)
         return detail
 
+    def get_in_wait(self, sandbox_id: str) -> Op[SandboxDetail]:
+        """One read of the box inside a wait. A read that fails with a retryable error
+        (a control-plane deploy) is read again on the poll ladder, never sooner than
+        its ``retry_after_ms``, with no ceiling; any other error is raised."""
+        backoff = self._poll_backoff()
+        while True:
+            try:
+                return (yield from self.get(sandbox_id))
+            except ZipboxError as error:
+                if not error.retryable:
+                    raise
+                yield Sleep(max((error.retry_after_ms or 0) / 1000, backoff.next()))
+
     def wait_ready(self, sandbox_id: str) -> Op[SandboxDetail]:
         """Re-read the box with backoff until it is ready. No deadline.
 
-        A private box that has not joined a tailnet (no tailnet IPv4 yet) cannot be
-        ready, so for one this returns as soon as it is running with its
+        The server's ``readiness`` decides: ``settling`` keeps reading; a paused box
+        raises ``box_not_running``, a failed start ``start_failed``, a deleting or gone
+        box ``conflict``, none of them retryable. A private box that has not joined a
+        tailnet (``awaits_tailnet``) is returned as soon as it is running with its
         ``agent_public_key``: the point at which a Tailscale auth key can be sealed to
-        it. A private box that has joined waits for ready like any other.
+        it. A read that fails with a retryable error goes on the same ladder, never
+        sooner than its ``retry_after_ms``.
         """
-        backoff = Backoff(
-            self.config.poll_interval_s, self.config.poll_max_interval_s, rng=self.config.rng
-        )
+        backoff = self._poll_backoff()
         while True:
-            detail = yield from self.get(sandbox_id)
-            if detail.ready:
-                return detail
-            if awaits_tailnet(detail):
-                return detail
-            if detail.status in _DEAD_STATUSES:
-                raise ZipboxError("conflict", f"Box {sandbox_id} is {detail.status}.")
-            yield Sleep(backoff.next())
+            retry_after_s = 0.0
+            try:
+                detail = yield from self.get(sandbox_id)
+            except ZipboxError as error:
+                if not error.retryable:
+                    raise
+                retry_after_s = (error.retry_after_ms or 0) / 1000
+            else:
+                ended = ended_error(sandbox_id, detail)
+                if ended is not None:
+                    raise ended
+                if readiness_of(detail) != "settling":
+                    return detail
+            yield Sleep(max(retry_after_s, backoff.next()))
 
     def create(
         self,
@@ -563,8 +732,21 @@ class Core:
         for box in boxes:
             if box.name == name and box.status not in _DEAD_STATUSES:
                 # "stopping": a stop is still landing; start() waits it out, then starts.
-                if box.status in ("archived", "stopping"):
-                    yield from self.start(box.id)
+                # "pausing": paused while its backup uploads; the start boots it at once.
+                if box.status in ("archived", "stopping", "pausing"):
+                    try:
+                        yield from self.start(box.id)
+                    except ZipboxError as error:
+                        # The name was being deleted: it is gone now, so make it.
+                        if error.code == "not_found":
+                            break
+                        # Another caller started it first: the server's idempotent
+                        # answer to a second restore. A box coming up is waited on.
+                        if error.code != "conflict":
+                            raise
+                        detail = yield from self.get_in_wait(box.id)
+                        if detail.status not in ("provisioning", "running"):
+                            raise
                 return (yield from self.wait_ready(box.id))
         return (
             yield from self.create(
@@ -576,6 +758,104 @@ class Core:
             )
         )
 
+    def fork(
+        self,
+        source_id: str,
+        *,
+        name: str,
+        source_policy: ForkSourcePolicy,
+        private: bool | None = None,
+        tailscale_auth_key: str | None = None,
+        wait: bool = True,
+    ) -> Op[SandboxDetail]:
+        """POST /sandbox/:id/fork (idempotent), then wait on the new box.
+
+        One Idempotency-Key per call, reused by every retry, so a retried fork never
+        makes two boxes. The body is exactly ``{name, sourcePolicy}``, plus
+        ``private: true`` when ``private=True`` (absent = public): the Tailscale
+        auth key never leaves this machine except sealed to the new box's own key,
+        after the wait. ``wait=False`` returns the accepted box as the 202 described it.
+        """
+        auth_key: str | None = None
+        if tailscale_auth_key is not None:
+            auth_key = tailscale_auth_key.strip()
+            if not auth_key:
+                raise ZipboxError("invalid_request", "the Tailscale auth key is empty")
+            if not wait:
+                raise ZipboxError(
+                    "invalid_request",
+                    "tailscale_auth_key needs wait=True: the key is sealed to the new box "
+                    "once it is running",
+                )
+        body: dict[str, Any] = {"name": name, "sourcePolicy": source_policy}
+        if private:
+            body["private"] = True
+        # A running source pauses for its capture: its cached address goes with it.
+        self.forget(source_id)
+        accepted = yield from self.control(
+            "POST",
+            f"/sandbox/{quote(source_id, safe='')}/fork",
+            body=body,
+            headers={"idempotency-key": str(uuid.uuid4())},
+            retry=True,
+        )
+        child = accepted.get("sandbox") if isinstance(accepted, dict) else None
+        if child is None:
+            # The key found a fork that already ended and removed its box: that fork's
+            # verdict, never an "unexpected response".
+            fork = SandboxFork.parse(accepted.get("fork")) if isinstance(accepted, dict) else None
+            if fork is not None:
+                raise fork_ended_error(fork) or ZipboxError(
+                    "conflict",
+                    f"the fork making box {fork.child_sandbox_id} ended",
+                    retryable=False,
+                )
+        if not isinstance(child, dict) or not isinstance(child.get("id"), str):
+            raise ZipboxError(
+                "unavailable", "unexpected response for POST /sandbox/:id/fork", retryable=False
+            )
+        child_id: str = child["id"]
+        if not wait:
+            # The 202's own fork is the one making this box; no token exists yet.
+            return SandboxDetail.from_json({**child, "fork": accepted.get("fork"), "ready": False})
+        try:
+            detail = yield from self.wait_ready(child_id)
+        except ZipboxError as error:
+            if error.code != "not_found":
+                raise
+            # A cancelled or failed fork removes its box: the box reads not_found
+            # while the fork still says why.
+            yield from self.raise_fork_error(child_id)
+            raise
+        if auth_key is not None:
+            yield from self.tailscale_connect(child_id, auth_key)
+        return detail
+
+    def raise_fork_error(self, child_id: str) -> Op[None]:
+        """A fork's box that went away: raise the fork's verdict (its own error, or
+        ``conflict`` for a cancel), if it has one. A fork that could not be read (a
+        retryable error) is no verdict: that error is raised."""
+        try:
+            fork = yield from self.get_fork(child_id)
+        except ZipboxError as failure:
+            if failure.retryable:
+                raise
+            return None
+        error = fork_ended_error(fork)
+        if error is not None:
+            raise error
+        return None
+
+    def get_fork(self, child_id: str) -> Op[SandboxFork]:
+        """GET /sandbox/:id/fork: the fork that is making (or made) this box."""
+        data = yield from self.control("GET", f"/sandbox/{quote(child_id, safe='')}/fork")
+        fork = SandboxFork.parse(data)
+        if fork is None:
+            raise ZipboxError(
+                "unavailable", "unexpected response for GET /sandbox/:id/fork", retryable=False
+            )
+        return fork
+
     def lifecycle(self, sandbox_id: str, action: str, body: Any = None) -> Op[None]:
         """POST /sandbox/:id/<action>."""
         self.forget(sandbox_id)
@@ -583,6 +863,25 @@ class Core:
             "POST", f"/sandbox/{quote(sandbox_id, safe='')}/{action}", body=body
         )
         return None
+
+    def cancel_transition(self, sandbox_id: str) -> Op[TransitionCancelOutcome]:
+        """POST /sandbox/:id/transition/cancel; the server's outcome, not retried."""
+        self.forget(sandbox_id)
+        body = yield from self.control(
+            "POST", f"/sandbox/{quote(sandbox_id, safe='')}/transition/cancel"
+        )
+        outcome = body.get("outcome") if isinstance(body, dict) else None
+        if outcome == "cleared":
+            return "cleared"
+        if outcome == "cancelling":
+            return "cancelling"
+        if outcome == "none":
+            return "none"
+        raise ZipboxError(
+            "unavailable",
+            "unexpected response for POST /sandbox/:id/transition/cancel",
+            retryable=False,
+        )
 
     def set_private(self, sandbox_id: str, enabled: bool) -> Op[None]:
         """PUT /sandbox/:id/private."""
@@ -615,7 +914,9 @@ class Core:
                 raise ZipboxError(
                     "box_not_running",
                     f"Box {sandbox_id} is {detail.status}; start it before connecting Tailscale.",
-                    retryable=False,
+                    # A box that is settling grows its key by itself; one that is paused
+                    # or gone does not.
+                    retryable=readiness_of(detail) == "settling",
                 )
             envelope = seal(box_key, tailscale_info(sandbox_id), auth_key)
             try:
@@ -651,21 +952,17 @@ class Core:
             except ZipboxError as error:
                 if error.code != "conflict":
                     raise
-                detail = yield from self.get(sandbox_id)
+                detail = yield from self.get_in_wait(sandbox_id)
                 if detail.status != "stopping":
                     # A second conflict after a stop was waited out: the box restored
                     # itself, or it is archived and will not restore (that is final).
                     if waited and detail.status in ("provisioning", "running"):
                         return None
                     raise error
-                backoff = Backoff(
-                    self.config.poll_interval_s,
-                    self.config.poll_max_interval_s,
-                    rng=self.config.rng,
-                )
+                backoff = self._poll_backoff()
                 while detail.status == "stopping":
                     yield Sleep(backoff.next())
-                    detail = yield from self.get(sandbox_id)
+                    detail = yield from self.get_in_wait(sandbox_id)
                 waited = True
                 if detail.status in ("provisioning", "running"):
                     return None
@@ -780,6 +1077,10 @@ class Core:
             except ZipboxError as error:
                 if not error.retryable:
                     raise
+                # Never sooner than the server asked.
+                retry_after_s = (error.retry_after_ms or 0) / 1000
+                yield Sleep(max(retry_after_s, backoff.next()))
+                continue
             yield Sleep(backoff.next())
 
     def wait(self, sandbox_id: str, command_id: str) -> Op[ExecResult]:

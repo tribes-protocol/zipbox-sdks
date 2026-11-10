@@ -3,6 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -164,6 +168,30 @@ func TestErrorsPrintDocsURL(t *testing.T) {
 	}
 	if !strings.Contains(h.err.String(), "bad key (unauthorized)") || !strings.Contains(h.err.String(), "https://zipbox.ai/docs/errors#unauthorized") {
 		t.Fatalf("stderr %q", h.err)
+	}
+}
+
+// AX-09: a failure says whether a retry may succeed and which request failed, in
+// both outputs. It still exits 1, like every failure of the CLI itself.
+func TestErrorsSayWhetherToRetryAndTheRequestID(t *testing.T) {
+	server := fakeZipbox(t)
+	h := newHarness(t, server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = "zb_" + strings.Repeat("X", 43)
+	if code := h.run("sandbox", "list"); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if stderr := h.err.String(); !strings.Contains(stderr, "  request id: r\n") || !strings.Contains(stderr, "  retryable: no\n") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	h.err.Reset()
+	if code := h.run("sandbox", "list", "--json"); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	var out struct {
+		Error map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal(h.err.Bytes(), &out); err != nil || out.Error["requestId"] != "r" || out.Error["retryable"] != false {
+		t.Fatalf("stderr %s (%v)", h.err, err)
 	}
 }
 
@@ -433,5 +461,280 @@ func TestMCPInit(t *testing.T) {
 	json.Unmarshal(h.out.Bytes(), &claude)
 	if !strings.HasPrefix(claude["command"], "claude mcp add --transport http zipbox https://mcp.zipbox.ai/mcp") {
 		t.Fatalf("claude %v", claude)
+	}
+}
+
+// fakeFork serves a running source sbx_1 ("demo") and the box it forks into,
+// sbx_2 ("demo-2"). The new box is private (with agent key priv) when private is
+// set; failed makes its copy_failed fork remove it (it answers not_found).
+type fakeFork struct {
+	server  *httptest.Server
+	priv    *ecdh.PrivateKey
+	private bool
+	failed  bool
+	mu      sync.Mutex
+	reqs    []recorded
+	keys    []string
+}
+
+const forkRow = `"operationId":"fork_1","sourceSandboxId":"sbx_1","childSandboxId":"sbx_2","sourceRecovery":"pending","attempt":0,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"`
+
+func newFakeFork(t *testing.T, private, failed bool) *fakeFork {
+	t.Helper()
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(priv.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentKey := base64.StdEncoding.EncodeToString(spki)
+	f := &fakeFork{priv: priv, private: private, failed: failed}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.reqs = append(f.reqs, recorded{r.Method, r.URL.Path, string(body)})
+		if r.Method == "POST" {
+			f.keys = append(f.keys, r.Header.Get("Idempotency-Key"))
+		}
+		f.mu.Unlock()
+		switch r.Method + " " + r.URL.Path {
+		case "GET /sandbox":
+			io.WriteString(w, `[{"id":"sbx_1","name":"demo","status":"running","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}]`)
+		case "POST /sandbox/sbx_1/fork":
+			var req struct {
+				SourcePolicy string `json:"sourcePolicy"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if req.SourcePolicy != "pause_and_resume" {
+				w.WriteHeader(409)
+				io.WriteString(w, `{"error":{"code":"pause_required","message":"demo is running.","requestId":"r","retryable":false,"docsUrl":"https://zipbox.ai/docs/errors#pause_required"}}`)
+				return
+			}
+			w.WriteHeader(202)
+			fmt.Fprintf(w, `{"operationId":"fork_1","sandbox":{"id":"sbx_2","name":"demo-2","status":"provisioning","privateMode":%t,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"},"fork":{%s,"sourcePolicy":"pause_and_resume","phase":"queued"}}`, f.private, forkRow)
+		case "GET /sandbox/sbx_2":
+			switch {
+			case f.failed:
+				// The failed fork removed its box: the API answers not_found for it.
+				w.WriteHeader(404)
+				io.WriteString(w, `{"error":{"code":"not_found","message":"Sandbox not found","requestId":"r","retryable":false,"docsUrl":"https://zipbox.ai/docs/errors#not_found"}}`)
+			case f.private:
+				fmt.Fprintf(w, `{"id":"sbx_2","name":"demo-2","status":"running","privateMode":true,"agentPublicKey":%q,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z","ready":false}`, agentKey)
+			default:
+				fmt.Fprintf(w, `{"id":"sbx_2","name":"demo-2","status":"running","agentPublicKey":%q,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z","ready":true,"baseUrl":%q,"boxToken":"bt_cli"}`, agentKey, f.server.URL)
+			}
+		case "GET /sandbox/sbx_2/fork":
+			fmt.Fprintf(w, `{%s,"sourcePolicy":"pause_and_resume","phase":"failed","error":{"code":"copy_failed","message":"The copy could not produce a verified filesystem."}}`, forkRow)
+		case "PUT /sandbox/sbx_2/tailscale":
+			w.WriteHeader(202)
+			io.WriteString(w, `{"pending":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+func (f *fakeFork) requests() []recorded {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recorded(nil), f.reqs...)
+}
+
+func (f *fakeFork) find(method, path string) *recorded {
+	for _, r := range f.requests() {
+		if r.method == method && r.path == path {
+			return &r
+		}
+	}
+	return nil
+}
+
+func (f *fakeFork) assertKeyNeverInClear(t *testing.T, h *harness) {
+	t.Helper()
+	for _, r := range f.requests() {
+		if strings.Contains(r.body, testAuthKey) || strings.Contains(r.path, testAuthKey) {
+			t.Fatalf("the auth key left in the clear: %s %s %s", r.method, r.path, r.body)
+		}
+	}
+	if strings.Contains(h.out.String(), testAuthKey) || strings.Contains(h.err.String(), testAuthKey) {
+		t.Fatalf("the auth key was printed: stdout %q stderr %q", h.out, h.err)
+	}
+}
+
+func TestForkPauseSendsPauseAndResumeAndPrintsTheOperation(t *testing.T) {
+	f := newFakeFork(t, false, false)
+	h := newHarness(t, f.server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("fork", "demo", "--name", "demo-2", "--pause"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	post := f.find("POST", "/sandbox/sbx_1/fork")
+	if post == nil || post.body != `{"name":"demo-2","sourcePolicy":"pause_and_resume"}` {
+		t.Fatalf("fork %+v", post)
+	}
+	if len(f.keys) != 1 || f.keys[0] == "" {
+		t.Fatalf("Idempotency-Key %v", f.keys)
+	}
+	stderr := h.err.String()
+	if !strings.Contains(stderr, "demo-2 (sbx_2) accepted, operation fork_1") || !strings.Contains(stderr, "Ctrl-C stops only this wait") || !strings.Contains(stderr, "zipbox sandbox cancel demo-2") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	if !strings.Contains(h.out.String(), "sbx_2") || !strings.Contains(h.out.String(), "ready   true") {
+		t.Fatalf("stdout %q", h.out)
+	}
+}
+
+func TestForkWithoutPauseOnARunningSourceHintsAtPause(t *testing.T) {
+	f := newFakeFork(t, false, false)
+	h := newHarness(t, f.server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("fork", "demo", "--name", "demo-2"); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	post := f.find("POST", "/sandbox/sbx_1/fork")
+	if post == nil || post.body != `{"name":"demo-2","sourcePolicy":"require_paused"}` {
+		t.Fatalf("fork %+v", post)
+	}
+	if n := len(f.keys); n != 1 {
+		t.Fatalf("pause_required was retried: %d POSTs", n)
+	}
+	stderr := h.err.String()
+	if !strings.Contains(stderr, "Re-run with --pause") || !strings.Contains(stderr, "(pause_required)") {
+		t.Fatalf("stderr %q", stderr)
+	}
+}
+
+func TestForkReadsTheTailscaleKeyFromAFileOrStdin(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tskey.txt")
+	if err := os.WriteFile(file, []byte(testAuthKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		stdin string
+		path  string
+	}{{"", file}, {testAuthKey + "\n", "-"}} {
+		f := newFakeFork(t, true, false)
+		h := newHarness(t, f.server.URL, tc.stdin)
+		h.env["ZIPBOX_API_KEY"] = testKey
+		if code := h.run("fork", "demo", "--name", "demo-2", "--pause", "--private", "--tailscale-auth-key-file", tc.path); code != 0 {
+			t.Fatalf("%s: exit %d: %s", tc.path, code, h.err)
+		}
+		post := f.find("POST", "/sandbox/sbx_1/fork")
+		if post == nil || post.body != `{"name":"demo-2","sourcePolicy":"pause_and_resume","private":true}` {
+			t.Fatalf("%s: fork %+v", tc.path, post)
+		}
+		put := f.find("PUT", "/sandbox/sbx_2/tailscale")
+		if put == nil {
+			t.Fatalf("%s: the key was not sent to the new box: %v", tc.path, f.requests())
+		}
+		if got := openEnvelope(t, f.priv, put.body, "sbx_2"); got != testAuthKey {
+			t.Fatalf("%s: the new box opened %q", tc.path, got)
+		}
+		f.assertKeyNeverInClear(t, h)
+	}
+}
+
+func TestForkNeverTakesTheKeyFromArgv(t *testing.T) {
+	for _, args := range [][]string{
+		{"fork", "demo", "--name", "demo-2", "--tailscale-auth-key", testAuthKey},
+		{"fork", "demo", "--name", "demo-2", "--tailscale-auth-key=" + testAuthKey},
+		{"fork", "demo", "--name", "demo-2", "--auth-key", testAuthKey},
+		{"fork", "demo", testAuthKey, "--name", "demo-2"},
+	} {
+		f := newFakeFork(t, true, false)
+		h := newHarness(t, f.server.URL, "")
+		h.env["ZIPBOX_API_KEY"] = testKey
+		if code := h.run(args...); code == 0 {
+			t.Fatalf("%v: accepted a key on argv", args)
+		}
+		if len(f.requests()) != 0 {
+			t.Fatalf("%v: sent %v", args, f.requests())
+		}
+		f.assertKeyNeverInClear(t, h)
+	}
+	// The key's only way in is a file or stdin: no flag of `fork` takes a value but
+	// the name and the key's file path.
+	h := newHarness(t, "http://127.0.0.1:1", "")
+	flags := h.app.forkCommand().Flags()
+	checked := 0
+	for _, field := range strings.Fields(flags.FlagUsages()) {
+		name := strings.TrimPrefix(field, "--")
+		flag := flags.Lookup(name)
+		if name == field || flag == nil {
+			continue
+		}
+		checked++
+		if flag.Value.Type() != "bool" && name != "name" && name != "tailscale-auth-key-file" {
+			t.Errorf("flag --%s takes a value", name)
+		}
+	}
+	if checked != 5 {
+		t.Fatalf("checked %d flags, want --name, --pause, --private, --tailscale-auth-key-file, --no-wait", checked)
+	}
+}
+
+func TestForkNoWaitWithAKeyIsAUsageError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tskey.txt")
+	if err := os.WriteFile(file, []byte(testAuthKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeFork(t, true, false)
+	h := newHarness(t, f.server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("fork", "demo", "--name", "demo-2", "--pause", "--no-wait", "--tailscale-auth-key-file", file); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if len(f.requests()) != 0 || !strings.Contains(h.err.String(), "needs the wait") {
+		t.Fatalf("requests %v stderr %q", f.requests(), h.err)
+	}
+	f.assertKeyNeverInClear(t, h)
+}
+
+func TestForkJSON(t *testing.T) {
+	f := newFakeFork(t, false, false)
+	h := newHarness(t, f.server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("fork", "demo", "--name", "demo-2", "--pause", "--no-wait", "--json"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	var accepted map[string]any
+	if err := json.Unmarshal(h.out.Bytes(), &accepted); err != nil {
+		t.Fatalf("--no-wait --json: %v: %s", err, h.out)
+	}
+	fork, _ := accepted["fork"].(map[string]any)
+	if accepted["id"] != "sbx_2" || accepted["status"] != "provisioning" || accepted["ready"] != false || fork["operationId"] != "fork_1" || fork["phase"] != "queued" {
+		t.Fatalf("--no-wait --json %v", accepted)
+	}
+	if f.find("GET", "/sandbox/sbx_2") != nil {
+		t.Fatal("--no-wait waited")
+	}
+
+	h.out.Reset()
+	if code := h.run("fork", "demo", "--name", "demo-2", "--pause", "--json"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	var ready map[string]any
+	if err := json.Unmarshal(h.out.Bytes(), &ready); err != nil {
+		t.Fatalf("--json: %v: %s", err, h.out)
+	}
+	if ready["id"] != "sbx_2" || ready["ready"] != true || strings.Contains(h.out.String(), "bt_cli") {
+		t.Fatalf("--json %s", h.out)
+	}
+}
+
+func TestForkReportsWhyTheForkEnded(t *testing.T) {
+	f := newFakeFork(t, false, true)
+	h := newHarness(t, f.server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	if code := h.run("fork", "demo", "--name", "demo-2", "--pause"); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	stderr := h.err.String()
+	if !strings.Contains(stderr, "(copy_failed)") || !strings.Contains(stderr, "https://zipbox.ai/docs/errors#copy_failed") {
+		t.Fatalf("stderr %q", stderr)
 	}
 }

@@ -1,0 +1,20 @@
+{
+  "name": "sandboxes_fork_tailscale_requires_wait",
+  "description": "tailscaleAuthKey needs the wait (the key is sealed to the child once it is running): with wait: false the call is refused as invalid_request before any request, so no fork is made.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused",
+      "tailscaleAuthKey": "tskey-auth-kConformance1CNTRL-ZipboxSdkVectorNotARealKey0123456789",
+      "wait": false
+    }
+  },
+  "exchanges": [],
+  "expect": {
+    "error": {
+      "code": "invalid_request"
+    }
+  }
+}

@@ -5,7 +5,7 @@ mod common;
 use std::time::Duration;
 
 use serde_json::json;
-use zipbox::{CreateOptions, ErrorCode, Zipbox};
+use zipbox::{CreateOptions, ErrorCode, ForkOptions, ForkSourcePolicy, Zipbox};
 
 use common::MockServer;
 
@@ -289,4 +289,213 @@ async fn get_or_create_with_rejects_a_different_options_name() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidRequest);
+}
+
+// A caller's deadline (dropping the future) stops only its own wait: the POST is the
+// only write, nothing cancels or deletes the new box, and nothing is sent afterwards.
+#[tokio::test]
+async fn a_dropped_fork_wait_leaves_the_fork_running() {
+    let (api, listener) = MockServer::bind().await;
+    let accepted = json!({
+        "operationId": "fork_1",
+        "sandbox": { "id": "sbx_2", "name": "demo-2", "status": "provisioning" },
+        "fork": {
+            "operationId": "fork_1", "sourceSandboxId": "sbx_1", "childSandboxId": "sbx_2",
+            "sourcePolicy": "require_paused", "phase": "queued", "sourceRecovery": "not_needed",
+            "attempt": 0, "createdAt": "2026-11-05T00:00:00Z", "updatedAt": "2026-11-05T00:00:00Z"
+        }
+    });
+    let mut exchanges = vec![json!({
+        "request": { "method": "POST", "path": "/sandbox/sbx_1/fork" },
+        "response": { "status": 202, "body": accepted }
+    })];
+    // The new box keeps provisioning for longer than the caller waits.
+    exchanges.extend((0..10_000).map(|_| {
+        json!({
+            "request": { "method": "GET", "path": "/sandbox/sbx_2" },
+            "response": { "status": 200, "body": { "id": "sbx_2", "name": "demo-2", "status": "provisioning", "ready": false } }
+        })
+    }));
+    api.state.lock().unwrap().exchanges = exchanges;
+    api.serve(listener);
+    // A flat 1-2 ms poll, so a wait that went on after the deadline would show.
+    let zb = Zipbox::builder()
+        .api_key("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+        .base_url(&api.base)
+        .poll_interval(Duration::from_millis(1))
+        .poll_max_interval(Duration::from_millis(2))
+        .build()
+        .unwrap();
+    let waited = tokio::time::timeout(
+        Duration::from_millis(200),
+        zb.sandboxes().fork(
+            "sbx_1",
+            ForkOptions::new("demo-2", ForkSourcePolicy::RequirePaused),
+        ),
+    )
+    .await;
+    assert!(waited.is_err(), "the deadline ends the wait");
+    let served = api.state.lock().unwrap().next;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let state = api.state.lock().unwrap();
+    assert!(served >= 2, "the wait read the new box: {served}");
+    // At most the one read already in flight when the deadline fired: no poll goes on.
+    assert!(
+        state.next <= served + 1,
+        "sent after the wait ended: {} > {served}",
+        state.next
+    );
+    // Every request past the POST matched a GET of the new box: no cancel, no delete.
+    assert!(state.failures.is_empty(), "{:?}", state.failures);
+}
+
+fn ready_row(base: &str) -> serde_json::Value {
+    json!({
+        "id": "sbx_1", "status": "running", "ready": true, "readiness": "ready",
+        "baseUrl": base, "boxToken": "bt_test"
+    })
+}
+
+fn exchange(method: &str, path: &str, body: serde_json::Value) -> serde_json::Value {
+    json!({
+        "request": { "method": method, "path": path },
+        "response": { "status": 200, "body": body }
+    })
+}
+
+fn exec_exchange() -> serde_json::Value {
+    json!({
+        "request": { "method": "POST", "path": "/exec" },
+        "response": {
+            "status": 200,
+            "headers": { "content-type": "text/event-stream" },
+            "bodyText": "id: 0-0\nevent: start\ndata: {\"id\":\"c\"}\n\nid: 1-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n"
+        }
+    })
+}
+
+// audit-ax AX-10: a read that shows the box not ready, and every lifecycle call,
+// drop its cached access, so the next box call never dials the old address.
+#[tokio::test]
+async fn not_ready_reads_and_lifecycle_calls_drop_cached_access() {
+    let (api, listener) = MockServer::bind().await;
+    let paused = json!({
+        "id": "sbx_1", "status": "archived", "ready": false, "readiness": "paused"
+    });
+    let mut exchanges = Vec::new();
+    for (method, path) in [
+        ("GET", "/sandbox/sbx_1"),
+        ("POST", "/sandbox/sbx_1/restore"),
+        ("POST", "/sandbox/sbx_1/reset"),
+        ("POST", "/sandbox/sbx_1/tier"),
+    ] {
+        exchanges.push(exchange("GET", "/sandbox/sbx_1", ready_row(&api.base)));
+        exchanges.push(exec_exchange());
+        let answer = if method == "GET" {
+            paused.clone()
+        } else {
+            json!({})
+        };
+        exchanges.push(exchange(method, path, answer));
+        // The next box call reads the box afresh, finds it not ready, and stops.
+        exchanges.push(exchange("GET", "/sandbox/sbx_1", paused.clone()));
+    }
+    api.state.lock().unwrap().exchanges = exchanges;
+    api.serve(listener);
+    let zb = client(&api.base);
+    let mut sandbox = zb.sandbox("sbx_1");
+    for step in ["refresh", "start", "restart", "set_tier"] {
+        sandbox.exec("true").await.unwrap();
+        match step {
+            "refresh" => sandbox.refresh().await.map(|_| ()).unwrap(),
+            "start" => sandbox.start().await.unwrap(),
+            "restart" => sandbox.restart().await.unwrap(),
+            _ => sandbox.set_tier("m").await.unwrap(),
+        }
+        let err = sandbox.exec("true").await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BoxNotRunning, "{step}");
+        assert!(
+            !err.retryable,
+            "{step}: a paused box does not come back by itself"
+        );
+    }
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// audit-ax AX-23: a follower's ladder never retries sooner than the server asked.
+#[tokio::test]
+async fn a_followed_command_waits_out_retry_after() {
+    use futures::StreamExt;
+
+    let (api, listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![
+        exchange("GET", "/sandbox/sbx_1", ready_row(&api.base)),
+        json!({
+            "request": { "method": "GET", "path": "/exec/cmd_1/events" },
+            "response": {
+                "status": 200,
+                "headers": { "content-type": "text/event-stream" },
+                "bodyText": "id: 4-0\nevent: stdout\ndata: {\"data\":\"one\"}\n\n"
+            }
+        }),
+        json!({
+            "request": { "method": "GET", "path": "/exec/cmd_1/events?since=4-0" },
+            "response": {
+                "status": 503,
+                "headers": { "retry-after": "1" },
+                "body": { "error": "busy" }
+            }
+        }),
+        json!({
+            "request": { "method": "GET", "path": "/exec/cmd_1/events?since=4-0" },
+            "response": {
+                "status": 200,
+                "headers": { "content-type": "text/event-stream" },
+                "bodyText": "id: 8-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n"
+            }
+        }),
+    ];
+    api.serve(listener);
+    let zb = Zipbox::builder()
+        .api_key("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+        .base_url(&api.base)
+        .max_retries(0)
+        .retry_base_delay(Duration::from_millis(1))
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let events: Vec<_> = zb
+        .sandbox("sbx_1")
+        .commands()
+        .events("cmd_1", None)
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(events.len(), 2);
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "re-attached {:?} after a Retry-After of 1s",
+        started.elapsed()
+    );
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// audit-ax AX-17: one rule in every SDK. A code this SDK does not know maps by status
+// (here a 409 is a conflict, not a retried `unavailable`).
+#[tokio::test]
+async fn an_unknown_code_maps_by_status() {
+    let (api, listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![json!({
+        "request": { "method": "GET", "path": "/sandbox" },
+        "response": {
+            "status": 409,
+            "body": { "error": { "code": "a_code_from_later", "message": "no" } }
+        }
+    })];
+    api.serve(listener);
+    let err = client(&api.base).sandboxes().list().await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(!err.retryable);
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
 }

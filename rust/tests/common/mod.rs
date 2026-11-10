@@ -23,6 +23,8 @@ pub struct State {
     pub failures: Vec<String>,
     /// Every request body received, so a test can assert what never left the client.
     pub bodies: Vec<Vec<u8>>,
+    /// The previous request's headers, for `{{SAME}}`.
+    pub previous_headers: Option<HashMap<String, String>>,
 }
 
 pub struct MockServer {
@@ -69,6 +71,14 @@ impl MockServer {
         }
         failures
     }
+}
+
+/// `{{DEAD}}`: an origin on a port bound and closed again, so every dial is refused.
+pub fn dead_origin() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
 }
 
 async fn read_request(
@@ -130,6 +140,7 @@ async fn handle(stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Result<
         let response = {
             let mut st = state.lock().unwrap();
             st.bodies.push(req.body.clone());
+            let previous = st.previous_headers.replace(req.headers.clone());
             match st.exchanges.get(st.next).cloned() {
                 None => {
                     st.failures.push(format!(
@@ -138,7 +149,7 @@ async fn handle(stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Result<
                     ));
                     None
                 }
-                Some(exchange) => match mismatch(&exchange["request"], &req) {
+                Some(exchange) => match mismatch(&exchange["request"], &req, previous.as_ref()) {
                     Some(why) => {
                         let message =
                             format!("exchange {}: {} {}: {why}", st.next, req.method, req.path);
@@ -196,7 +207,11 @@ fn render(resp: &Value) -> (u16, Vec<(String, String)>, Vec<u8>) {
     (status, headers, body)
 }
 
-fn mismatch(expected: &Value, req: &ReceivedRequest) -> Option<String> {
+fn mismatch(
+    expected: &Value,
+    req: &ReceivedRequest,
+    previous: Option<&HashMap<String, String>>,
+) -> Option<String> {
     if expected["method"].as_str() != Some(req.method.as_str()) {
         return Some(format!("method: expected {}", expected["method"]));
     }
@@ -210,6 +225,12 @@ fn mismatch(expected: &Value, req: &ReceivedRequest) -> Option<String> {
             let ok = match got {
                 None => false,
                 Some(g) if want == "{{ANY}}" => !g.is_empty(),
+                // The value this header carried on the previous request (a retry that
+                // must reuse its Idempotency-Key).
+                Some(g) if want == "{{SAME}}" => {
+                    !g.is_empty()
+                        && previous.and_then(|p| p.get(&name.to_ascii_lowercase())) == Some(g)
+                }
                 Some(g) => g == want || (name == "content-type" && g.starts_with(want)),
             };
             if !ok {

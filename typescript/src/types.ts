@@ -13,15 +13,55 @@ export type JsonObject = Record<string, JsonValue>
 /** Box size. `enterprise` boxes are created by Zipbox staff only. */
 export type SandboxTier = 'xs' | 's' | 'm' | 'l' | 'xl' | 'xxl' | 'enterprise'
 
-/** Lifecycle state of a box. */
+/**
+ * Lifecycle state of a box. `pausing` reads as paused: the VM is stopped and its disk
+ * is safe on its host; its backup is still uploading; `start` boots it at once.
+ */
 export type SandboxStatus =
   | 'provisioning'
   | 'running'
   | 'stopping'
+  | 'pausing'
   | 'stopped'
   | 'archived'
   | 'deleting'
   | 'destroyed'
+
+/**
+ * What a box is doing now: `starting`, `running`, `stopping`, `paused`, `resizing`,
+ * `forking`, `deleting`, `delete_failed` (a delete was refused; the box still runs),
+ * `start_failed` or `gone`. The box's `transition` says how far a change has got.
+ */
+export type SandboxPhase =
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'paused'
+  | 'resizing'
+  | 'forking'
+  | 'deleting'
+  | 'delete_failed'
+  | 'start_failed'
+  | 'gone'
+
+/**
+ * Whether a box will answer, which is what every wait reads. `ready`: it answers.
+ * `settling`: coming up, mid-change or not connectable yet (every transient, a host
+ * offline or no room included). `awaits_tailnet`: a private box running with its key
+ * that only an auth key can join. `paused`, `start_failed`, `deleting` and `gone`: it
+ * will not become ready by itself.
+ */
+export type SandboxReadiness =
+  | 'ready'
+  | 'settling'
+  | 'awaits_tailnet'
+  | 'paused'
+  | 'start_failed'
+  | 'deleting'
+  | 'gone'
+
+/** A lifecycle verb a box can accept: `start`, `stop`, `restart`, `delete`, `cancel_transition`, `fork`. */
+export type SandboxAction = 'start' | 'stop' | 'restart' | 'delete' | 'cancel_transition' | 'fork'
 
 /**
  * The box's managed Tailscale daemon: `joining` (key accepted, coming up),
@@ -111,6 +151,19 @@ export interface SandboxInfo {
    * it; it changes when a box is claimed, so it is read right before sealing.
    */
   agentPublicKey?: string | null
+  /**
+   * The fork still making this box: its phase, source recovery, waits and error.
+   * Null on every box that is not being forked into.
+   */
+  fork?: SandboxFork | null
+  /** What the box is doing now. Absent from an older control plane. */
+  phase?: SandboxPhase | null
+  /**
+   * The lifecycle verbs the box accepts in its current state. A listed verb can
+   * still be refused for a reason outside the box (credit, capacity, an argument).
+   * Absent from an older control plane.
+   */
+  allowedActions?: SandboxAction[] | null
   createdAt: string
   updatedAt: string
 }
@@ -119,6 +172,12 @@ export interface SandboxInfo {
 export interface SandboxDetail extends SandboxInfo {
   /** Running and serving the owner's generation: the box answers on `baseUrl`. */
   ready: boolean
+  /**
+   * Whether the box will answer, read from the same connection gate as `ready`:
+   * what every wait reads. Only on `GET /sandbox/:id`; absent from an older control
+   * plane, where the SDK falls back to `ready` and `status`.
+   */
+  readiness?: SandboxReadiness | null
   /**
    * Whether `baseUrl` completes a TLS handshake with a trusted certificate yet. A
    * fresh name's certificate can trail `ready` by seconds to minutes; the SDK's own
@@ -161,6 +220,119 @@ export interface DeleteSandboxOptions {
 
 /** Common per-call options. */
 export interface CallOptions {
+  signal?: AbortSignal
+}
+
+/**
+ * What {@link Sandboxes.cancelTransition} did. `cleared`: nothing was executing on a
+ * host, so the queued change was dropped and the box is already back where it was.
+ * `cancelling`: the host is executing it; its abort is on the way. `none`: the box
+ * had no change in flight. A change past its point of no return is refused with a
+ * `conflict` error carrying the reason.
+ */
+export type TransitionCancelOutcome = 'cleared' | 'cancelling' | 'none'
+
+/**
+ * How a fork treats its source. `require_paused` refuses a running source
+ * (`pause_required`); `pause_and_resume` lets a running source pause for its
+ * capture: its sessions disconnect and it resumes right after. A paused source
+ * stays paused either way.
+ */
+export type SandboxForkSourcePolicy = 'require_paused' | 'pause_and_resume'
+
+/**
+ * Where a fork stands: `preparing_identity` (the new name, mailbox and wallets are
+ * minted), `queued`, `capturing` (the source's disk is captured), `copying` (its
+ * files are copied into the new box's fresh filesystem), `starting`, then
+ * `complete` (the new box has its own disk and serves), `cancelling`, `cancelled`
+ * or `failed`.
+ */
+export type SandboxForkPhase =
+  | 'preparing_identity'
+  | 'queued'
+  | 'capturing'
+  | 'copying'
+  | 'starting'
+  | 'complete'
+  | 'cancelling'
+  | 'cancelled'
+  | 'failed'
+
+/**
+ * Where the source stands: `not_needed` (it was paused and stays paused),
+ * `pending` (the fork paused it and owes its resume), `resumed`, or `superseded`
+ * (a newer pause or delete replaced the resume).
+ */
+export type SandboxForkSourceRecovery = 'not_needed' | 'pending' | 'resumed' | 'superseded'
+
+/** Why a fork ended without a new box. Each is final: the same fork fails the same way. */
+export type SandboxForkErrorCode =
+  | 'source_unsupported'
+  | 'source_gone'
+  | 'identity_reused'
+  | 'copy_failed'
+  | 'start_failed'
+
+/** A fork's terminal error. */
+export interface SandboxForkError {
+  code: SandboxForkErrorCode
+  message: string
+}
+
+/**
+ * One fork operation (`GET /sandbox/:id/fork`, and `fork` on the new box's row
+ * while it is being made). Kept as strings where the server may add a value later.
+ */
+export interface SandboxFork {
+  operationId: string
+  sourceSandboxId: string
+  childSandboxId: string
+  sourcePolicy: SandboxForkSourcePolicy
+  phase: SandboxForkPhase
+  sourceRecovery: SandboxForkSourceRecovery
+  /** How the source disk was captured: `reflink` (copy-on-write) or `copy`. */
+  captureMode?: 'reflink' | 'copy' | null
+  /**
+   * Why the current step waits: `software_install`, `legacy_chisel`, `busy`,
+   * `host_offline` or `capacity`. Null while it moves.
+   */
+  waitingOn?: string | null
+  /** The retry ladder's position for the current step. */
+  attempt: number
+  nextAttemptAt?: string | null
+  cancelRequestedAt?: string | null
+  /** Set when the fork `failed`. */
+  error?: SandboxForkError | null
+  createdAt: string
+  updatedAt: string
+  completedAt?: string | null
+}
+
+/** Options for {@link Sandboxes.fork} and {@link Sandbox.fork}. */
+export interface ForkSandboxOptions {
+  /** The new box's permanent name. It stays reserved even if the fork is cancelled. */
+  name: string
+  /** Required: whether a running source may pause for its capture. */
+  sourcePolicy: SandboxForkSourcePolicy
+  /**
+   * Start the new box private: never public, reachable only from devices on your
+   * tailnet once it joins. Default: public, whatever the source's privacy. Pass
+   * `tailscaleAuthKey` to join it as part of the fork.
+   */
+  private?: boolean
+  /**
+   * A Tailscale auth key for the new box. Used on this machine only: once the new
+   * box runs, it is sealed to that box's own key and delivered as
+   * `box.tailscale.connect` does. Never sent in the fork request. Needs `wait`.
+   */
+  tailscaleAuthKey?: string
+  /**
+   * Wait until the new box is ready (a private one: running with its key, then
+   * connected when `tailscaleAuthKey` is given). Default true. With false, the
+   * accepted box is returned at once, still `provisioning`, with `info.fork`.
+   */
+  wait?: boolean
+  /** Stops the local wait only; the fork keeps running. Cancel it with `cancelTransition`. */
   signal?: AbortSignal
 }
 
@@ -316,7 +488,10 @@ export interface ZipboxOptions {
   retryBaseDelayMs?: number
   /** Cap on the retry delay. Default 30 s. */
   retryMaxDelayMs?: number
-  /** First delay between readiness checks in `create`; grows to `pollMaxIntervalMs`. Default 1000 ms. */
+  /**
+   * First delay between readiness checks in `create`; grows 1.25× per check up to
+   * `pollMaxIntervalMs`, with jitter. Default 1000 ms.
+   */
   pollIntervalMs?: number
   /** Cap on the delay between readiness checks. Default 10 s. */
   pollMaxIntervalMs?: number

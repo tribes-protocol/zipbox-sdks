@@ -2,7 +2,7 @@ import { backoffDelay, sleep } from './backoff.js'
 import { errorFromResponse, ZipboxError } from './errors.js'
 import type { FetchLike } from './types.js'
 
-const SDK_VERSION = '0.1.6'
+const SDK_VERSION = '0.1.7'
 const USER_AGENT = `zipbox-sdk-typescript/${SDK_VERSION}`
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -20,6 +20,11 @@ export interface HttpRequest {
    * safe to repeat (create carries an Idempotency-Key).
    */
   retry?: boolean
+  /**
+   * Throw an unsent failure as it came instead of retrying it in place. A box request
+   * sets it: its origin can move, so the box is re-read before the retry.
+   */
+  raiseUnsent?: boolean
   signal?: AbortSignal | undefined
 }
 
@@ -39,7 +44,8 @@ function isAbort(error: unknown, signal: AbortSignal | undefined): boolean {
 // Error codes that can only come from establishing the connection. Node's fetch
 // (undici) and Bun both put them on the error or its `cause`. ECONNRESET and
 // "socket closed" are deliberately absent from both sets — those can follow a
-// request that was already sent.
+// request that was already sent. The one ECONNRESET that cannot is matched by
+// its message below.
 //
 // Connecting itself failed: DNS, a refused or unroutable address, a connect
 // timeout. Nothing at the address answered.
@@ -68,6 +74,11 @@ const TLS_FAILURE_CODES = new Set([
   'CERT_NOT_YET_VALID'
 ])
 const TLS_FAILURE_CODE_PREFIXES = ['ERR_SSL_', 'ERR_TLS_', 'TLSV1_ALERT_', 'SSL_']
+// Node's TLS socket, when the peer closes before the handshake completes, raises
+// ECONNRESET "Client network socket disconnected before secure TLS connection was
+// established". No request byte can leave before the handshake, so it is unsent. A
+// reset after the send reads "read ECONNRESET" and stays sent.
+const HANDSHAKE_EOF_MESSAGE = 'before secure TLS connection was established'
 
 function errorCode(value: unknown): string | null {
   if (typeof value !== 'object' || value === null || !('code' in value)) return null
@@ -97,6 +108,18 @@ export function isTlsFailure(error: unknown): boolean {
   )
 }
 
+// Whether the error or its `cause` chain is the peer ending the TLS handshake.
+function endedBeforeHandshake(error: unknown): boolean {
+  let current: unknown = error
+  for (let depth = 0; depth < 5 && current instanceof Error; depth++) {
+    if (errorCode(current) === 'ECONNRESET' && current.message.includes(HANDSHAKE_EOF_MESSAGE)) {
+      return true
+    }
+    current = current.cause
+  }
+  return false
+}
+
 /**
  * Whether a fetch failure provably happened before any request byte left: the
  * connection or its TLS handshake failed. A fresh box name can refuse TLS for a while
@@ -105,7 +128,9 @@ export function isTlsFailure(error: unknown): boolean {
  */
 export function isUnsentFailure(error: unknown): boolean {
   return (
-    failureCode(error, (code) => CONNECT_FAILURE_CODES.has(code)) !== null || isTlsFailure(error)
+    failureCode(error, (code) => CONNECT_FAILURE_CODES.has(code)) !== null ||
+    isTlsFailure(error) ||
+    endedBeforeHandshake(error)
   )
 }
 
@@ -130,7 +155,8 @@ export class HttpClient {
    * A failure to connect or to complete the TLS handshake is retried on EVERY method
    * and with no attempt ceiling (CLAUDE.md §0): nothing was sent, so nothing can
    * repeat, and a box's certificate can trail its readiness. The ladder is capped
-   * and jittered; the caller's `signal` is the only bound.
+   * and jittered; the caller's `signal` is the only bound. With `raiseUnsent` it is
+   * thrown instead, for the caller to retry on its own ladder ({@link unsentDelay}).
    */
   async send(request: HttpRequest): Promise<Response> {
     const retryAllowed = request.retry === true || request.method === 'GET'
@@ -149,15 +175,8 @@ export class HttpClient {
         if (isAbort(caught, request.signal)) throw caught
         if (caught instanceof ZipboxError) throw caught
         if (isUnsentFailure(caught)) {
-          await sleep(
-            backoffDelay({
-              attempt: unsentAttempt++,
-              baseMs: this.options.retryBaseDelayMs,
-              capMs: this.options.retryMaxDelayMs,
-              random: this.options.random()
-            }),
-            request.signal
-          )
+          if (request.raiseUnsent === true) throw caught
+          await sleep(this.unsentDelay(unsentAttempt++), request.signal)
           attempt--
           continue
         }
@@ -180,6 +199,16 @@ export class HttpClient {
         })
       await sleep(delay, request.signal)
     }
+  }
+
+  /** The delay before the n-th retry (0 = the first) of a request nothing was sent for. */
+  unsentDelay(attempt: number): number {
+    return backoffDelay({
+      attempt,
+      baseMs: this.options.retryBaseDelayMs,
+      capMs: this.options.retryMaxDelayMs,
+      random: this.options.random()
+    })
   }
 
   /**

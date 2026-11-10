@@ -75,6 +75,15 @@ func (s *PtyService) open(ctx context.Context, sessionID string, opts PtyOptions
 		done:      make(chan struct{}),
 	}
 	conn, err := p.dial(ctx, resume)
+	// The first dial waits out a box that has not answered it yet on the same ladder
+	// as a reconnect: ctx is the only bound.
+	c := s.box.client
+	for failures := 0; err != nil && retriesFirstDial(err); failures++ {
+		if err = sleep(ctx, jitter(c.ladder(failures, c.ptyBase, c.ptyMax, 2), c)); err != nil {
+			break
+		}
+		conn, err = p.dial(ctx, resume)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
@@ -82,6 +91,37 @@ func (s *PtyService) open(ctx context.Context, sessionID string, opts PtyOptions
 	p.setConn(conn)
 	go p.run(conn)
 	return p, nil
+}
+
+// retriesFirstDial reports a first dial the box has not answered with a verdict:
+// it gave no HTTP answer at all (noAnswer; a box's certificate can trail its
+// readiness), or it refused a key the control plane just accepted.
+func retriesFirstDial(err error) bool {
+	var silent noAnswer
+	if errors.As(err, &silent) {
+		return true
+	}
+	zerr, ok := asError(err)
+	return ok && zerr.Code == CodeUnauthorized && zerr.Retryable
+}
+
+// noAnswer is a dial the box gave no HTTP answer: the connect, the TLS handshake or
+// the upgrade failed in transport. The upgrade names its session and client, so
+// repeating it is safe, whether or not it left.
+type noAnswer struct{ err *Error }
+
+func (e noAnswer) Error() string { return e.err.Error() }
+func (e noAnswer) Unwrap() error { return e.err }
+
+// keyNotReceived is a box's 401 after the control plane re-read accepted the key:
+// a deleted key fails that re-read instead. The box has not received the key's
+// token yet, which it does within seconds.
+func keyNotReceived(id string) *Error {
+	zerr := newError(CodeUnauthorized, "box "+id+" has not received this API key's token yet: "+
+		"the control plane accepts the key, the box does not")
+	zerr.Status = http.StatusUnauthorized
+	zerr.Retryable = true
+	return zerr
 }
 
 // Pty is an attached terminal. Read returns the session's output (io.EOF once
@@ -109,6 +149,14 @@ type Pty struct {
 	finalErr  error
 	closed    bool
 	done      chan struct{}
+
+	// keyPending is set once the box refused a re-read token (keyNotReceived): each
+	// dial then re-reads before its one attempt. Only the dialing goroutine uses it.
+	keyPending bool
+	// unanswered is set once a dial got no answer (noAnswer): the next dial re-reads
+	// the box with the readiness wait first, since its origin can move. Only the
+	// dialing goroutine uses it.
+	unanswered bool
 }
 
 func (p *Pty) socketURL(baseURL string, resume bool) (string, error) {
@@ -133,13 +181,24 @@ func (p *Pty) socketURL(baseURL string, resume bool) (string, error) {
 	return u.String(), nil
 }
 
-// dial opens one socket. A 401 re-fetches the box token once.
+// dial opens one socket. A 401 re-fetches the box token once; a second 401 is
+// keyNotReceived, since a deleted key fails that re-fetch at the control plane.
+// After a dial that got no answer it re-reads the box with the readiness wait, whose
+// verdict on a box that will not become ready by itself ends the dial.
 func (p *Pty) dial(ctx context.Context, resume bool) (*websocket.Conn, error) {
 	for attempt := 0; ; attempt++ {
-		creds, err := p.box.client.boxCreds(ctx, p.box.ID, attempt > 0)
+		refetch := attempt > 0 || p.keyPending || p.unanswered
+		var creds *boxCreds
+		var err error
+		if p.unanswered {
+			creds, err = p.box.client.reresolve(ctx, p.box.ID)
+		} else {
+			creds, err = p.box.client.boxCreds(ctx, p.box.ID, refetch)
+		}
 		if err != nil {
 			return nil, err
 		}
+		p.unanswered = false
 		target, err := p.socketURL(creds.baseURL, resume)
 		if err != nil {
 			return nil, err
@@ -150,11 +209,16 @@ func (p *Pty) dial(ctx context.Context, resume bool) (*websocket.Conn, error) {
 			HTTPHeader:   http.Header{"User-Agent": {"zipbox-sdk-go/" + Version}},
 		})
 		if err == nil {
+			p.keyPending = false
 			conn.SetReadLimit(64 << 20)
 			return conn, nil
 		}
-		if resp != nil && resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			continue
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			if !refetch {
+				continue
+			}
+			p.keyPending = true
+			return nil, keyNotReceived(p.box.ID)
 		}
 		if resp != nil && resp.StatusCode >= 400 {
 			return nil, statusError(resp, "terminal connection refused", 0, false)
@@ -162,7 +226,12 @@ func (p *Pty) dial(ctx context.Context, resume bool) (*websocket.Conn, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, newError(CodeUnavailable, "terminal connection failed: "+err.Error())
+		zerr := newError(CodeUnavailable, "terminal connection failed: "+err.Error())
+		if resp == nil {
+			p.unanswered = true
+			return nil, noAnswer{zerr}
+		}
+		return nil, zerr
 	}
 }
 
@@ -239,7 +308,7 @@ func (p *Pty) run(conn *websocket.Conn) {
 		}
 		p.markDead(conn)
 		for {
-			if err := sleep(p.ctx, jitter(p.box.client.ladder(failures, p.box.client.ptyBase, p.box.client.ptyMax), p.box.client)); err != nil {
+			if err := sleep(p.ctx, jitter(p.box.client.ladder(failures, p.box.client.ptyBase, p.box.client.ptyMax, 2), p.box.client)); err != nil {
 				return
 			}
 			failures++
@@ -252,12 +321,23 @@ func (p *Pty) run(conn *websocket.Conn) {
 			if p.ctx.Err() != nil {
 				return
 			}
-			if zerr, ok := asError(err); ok && (zerr.Code == CodeUnauthorized || zerr.Code == CodeNotFound || zerr.Code == CodeForbidden) {
+			// An answered verdict ends it, the readiness wait's among them (a box paused,
+			// failed or gone); keyNotReceived is retryable and stays on the ladder.
+			if zerr, ok := asError(err); ok && !zerr.Retryable && endsPty(zerr.Code) {
 				p.finish(err)
 				return
 			}
 		}
 	}
+}
+
+// endsPty reports a code that, not retryable, is an answered verdict on the terminal.
+func endsPty(code ErrorCode) bool {
+	switch code {
+	case CodeUnauthorized, CodeNotFound, CodeForbidden, CodeBoxNotRunning, CodeStartFailed, CodeConflict:
+		return true
+	}
+	return false
 }
 
 var errSessionEnded = errors.New("session ended")

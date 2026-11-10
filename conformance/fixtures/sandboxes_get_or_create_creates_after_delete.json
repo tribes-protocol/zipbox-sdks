@@ -1,0 +1,166 @@
+{
+  "name": "sandboxes_get_or_create_creates_after_delete",
+  "description": "A name mid-delete reads stopping: start waits it out, the box then reads not_found, and getOrCreate creates the name instead of raising not_found.",
+  "call": {
+    "op": "sandboxes.getOrCreate",
+    "args": {
+      "name": "demo"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "sbx_1",
+            "name": "demo",
+            "domain": "zbox.sh",
+            "ipv6": "2a01::1",
+            "status": "stopping",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": true,
+            "createdAt": "2026-11-09T00:00:00.000Z",
+            "updatedAt": "2026-11-09T00:00:00.000Z",
+            "phase": "deleting",
+            "allowedActions": []
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/restore",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "conflict",
+            "message": "Sandbox is not archived",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "deleting",
+          "allowedActions": [],
+          "readiness": "deleting"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "Sandbox not found",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}"
+        },
+        "body": {
+          "name": "demo"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "sandboxId": "sbx_2",
+          "name": "demo",
+          "status": "provisioning",
+          "created": true
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_2",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "createdAt": "2026-11-09T00:00:00.000Z",
+          "updatedAt": "2026-11-09T00:00:00.000Z",
+          "ready": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "readiness": "ready"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_2",
+      "ready": true
+    }
+  }
+}

@@ -1,0 +1,201 @@
+{
+  "name": "sandboxes_fork_verdict_unreadable_is_unavailable",
+  "description": "A child that went away while it was waited on (GET /sandbox/:childId answers not_found) and whose fork cannot be read: GET /sandbox/:childId/fork answers 503 through every retry (maxRetries 3, so 4 requests). fork raises that unavailable, not the box's not_found: a read that failed is no verdict.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "operationId": "fork_1",
+          "sandbox": {
+            "id": "sbx_2",
+            "name": "demo-2",
+            "domain": "zbox.sh",
+            "ipv6": null,
+            "status": "provisioning",
+            "tier": "s",
+            "pendingTier": null,
+            "isArchived": false,
+            "privateMode": false,
+            "tailscale": null,
+            "agentPublicKey": null,
+            "fork": {
+              "operationId": "fork_1",
+              "sourceSandboxId": "sbx_1",
+              "childSandboxId": "sbx_2",
+              "sourcePolicy": "require_paused",
+              "phase": "queued",
+              "sourceRecovery": "not_needed",
+              "captureMode": null,
+              "waitingOn": null,
+              "attempt": 0,
+              "nextAttemptAt": null,
+              "cancelRequestedAt": null,
+              "error": null,
+              "createdAt": "2026-11-05T00:00:00.000Z",
+              "updatedAt": "2026-11-05T00:00:00.000Z",
+              "completedAt": null
+            },
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "fork": {
+            "operationId": "fork_1",
+            "sourceSandboxId": "sbx_1",
+            "childSandboxId": "sbx_2",
+            "sourcePolicy": "require_paused",
+            "phase": "queued",
+            "sourceRecovery": "not_needed",
+            "captureMode": null,
+            "waitingOn": null,
+            "attempt": 0,
+            "nextAttemptAt": null,
+            "cancelRequestedAt": null,
+            "error": null,
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z",
+            "completedAt": null
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "Sandbox not found",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#not_found"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "unavailable",
+            "message": "The control plane is busy.",
+            "requestId": "req_fork",
+            "retryable": true,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#unavailable"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "unavailable",
+            "message": "The control plane is busy.",
+            "requestId": "req_fork",
+            "retryable": true,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#unavailable"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "unavailable",
+            "message": "The control plane is busy.",
+            "requestId": "req_fork",
+            "retryable": true,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#unavailable"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_2/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "unavailable",
+            "message": "The control plane is busy.",
+            "requestId": "req_fork",
+            "retryable": true,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#unavailable"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "unavailable",
+      "status": 503,
+      "requestId": "req_fork"
+    }
+  }
+}

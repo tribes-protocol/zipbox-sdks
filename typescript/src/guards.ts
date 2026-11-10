@@ -1,5 +1,13 @@
 import { ZipboxError } from './errors.js'
-import type { CommandRecord, FileEntry, JsonObject, SandboxDetail, SandboxInfo } from './types.js'
+import type {
+  CommandRecord,
+  FileEntry,
+  JsonObject,
+  SandboxDetail,
+  SandboxFork,
+  SandboxInfo,
+  TransitionCancelOutcome
+} from './types.js'
 
 // Light runtime checks at the response boundary. They verify the fields the SDK
 // relies on, so a proxy error page or a renamed field fails loudly here instead of
@@ -19,6 +27,44 @@ export function isSandboxInfo(value: unknown): value is SandboxInfo {
 
 export function isSandboxDetail(value: unknown): value is SandboxDetail {
   return isSandboxInfo(value) && typeof Reflect.get(value, 'ready') === 'boolean'
+}
+
+export function isSandboxFork(value: unknown): value is SandboxFork {
+  return (
+    isRecord(value) &&
+    typeof value.operationId === 'string' &&
+    typeof value.childSandboxId === 'string' &&
+    typeof value.phase === 'string'
+  )
+}
+
+/** `202` from `POST /sandbox/:id/fork`. */
+export interface ForkAccepted {
+  operationId: string
+  // Null once a cancelled or failed fork removed the box (a replay of the same
+  // Idempotency-Key answers its tombstone).
+  sandbox: SandboxInfo | null
+  fork: SandboxFork
+}
+
+export function isForkAccepted(value: unknown): value is ForkAccepted {
+  return (
+    isRecord(value) &&
+    typeof value.operationId === 'string' &&
+    (value.sandbox === null || isSandboxInfo(value.sandbox)) &&
+    isSandboxFork(value.fork)
+  )
+}
+
+export interface TransitionCancelResult {
+  outcome: TransitionCancelOutcome
+}
+
+export function isTransitionCancelResult(value: unknown): value is TransitionCancelResult {
+  return (
+    isRecord(value) &&
+    (value.outcome === 'cleared' || value.outcome === 'cancelling' || value.outcome === 'none')
+  )
 }
 
 export function isCommandRecord(value: unknown): value is CommandRecord {

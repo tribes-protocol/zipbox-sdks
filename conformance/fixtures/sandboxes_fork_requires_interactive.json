@@ -1,0 +1,49 @@
+{
+  "name": "sandboxes_fork_requires_interactive",
+  "description": "A source with machine-scoped provider keys or selected-machine custom API membership, forked with an API key, answers 403 requires_interactive: raised with its own code (never forbidden) and not retried.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "error": {
+            "code": "requires_interactive",
+            "message": "demo holds machine-scoped credentials. Fork it from the dashboard, signed in as its owner.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#requires_interactive"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "requires_interactive",
+      "status": 403,
+      "docsUrl": "https://zipbox.ai/docs/errors#requires_interactive"
+    }
+  }
+}

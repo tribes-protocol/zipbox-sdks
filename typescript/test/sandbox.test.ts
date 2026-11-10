@@ -108,3 +108,100 @@ it('keeps preview pending beyond30 seconds and honors Retry-After without return
     vi.useRealTimers()
   }
 })
+
+// audit-ax AX-23: a follower's ladder never retries sooner than the server asked.
+it('a followed command waits out Retry-After before it re-attaches', async () => {
+  vi.useFakeTimers()
+  try {
+    const opened: number[] = []
+    const client = new Zipbox({
+      apiKey: 'key',
+      baseUrl: 'https://api.test',
+      maxRetries: 0,
+      retryBaseDelayMs: 1,
+      fetch: (url) => {
+        if (url.endsWith('/sandbox/box'))
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'box',
+                status: 'running',
+                ready: true,
+                baseUrl: 'https://box--demo.zbox.sh',
+                boxToken: 'bt'
+              })
+            )
+          )
+        opened.push(Date.now())
+        if (opened.length === 1)
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: 'busy' }), {
+              status: 503,
+              headers: { 'retry-after': '30' }
+            })
+          )
+        return Promise.resolve(
+          new Response('id: 0-1\nevent: exit\ndata: {"state":"exited","exitCode":0}\n\n', {
+            headers: { 'content-type': 'text/event-stream' }
+          })
+        )
+      }
+    })
+    const events: string[] = []
+    const done = (async () => {
+      for await (const event of client.sandbox('box').commands.events('cmd_1')) {
+        events.push(event.type)
+      }
+    })()
+    await vi.advanceTimersByTimeAsync(29_000)
+    expect(opened).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1_100)
+    await done
+    expect(opened).toHaveLength(2)
+    expect(events).toEqual(['exit'])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// audit-ax AX-10: a shared first read is bound to its starter's signal, so a caller
+// with a signal reads alone and another caller's abort never ends this one's call.
+it("a box call never inherits another caller's abort", async () => {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const client = new Zipbox({
+    apiKey: 'key',
+    baseUrl: 'https://api.test',
+    fetch: async (url, init) => {
+      if (url.endsWith('/sandbox/box')) {
+        await gate
+        if (init?.signal?.aborted === true) throw new DOMException('aborted', 'AbortError')
+        return new Response(
+          JSON.stringify({
+            id: 'box',
+            status: 'running',
+            ready: true,
+            baseUrl: 'https://box--demo.zbox.sh',
+            boxToken: 'bt'
+          })
+        )
+      }
+      return new Response(
+        'id: 0-0\nevent: start\ndata: {"id":"c"}\n\nid: 0-1\nevent: exit\ndata: {"state":"exited","exitCode":0}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    }
+  })
+  const controller = new AbortController()
+  const first = client
+    .sandbox('box')
+    .exec('true', { signal: controller.signal })
+    .catch((caught: unknown) => caught)
+  const second = client.sandbox('box').exec('true')
+  controller.abort()
+  release()
+  expect(await first).toBeInstanceOf(Error)
+  expect((await second).exitCode).toBe(0)
+})

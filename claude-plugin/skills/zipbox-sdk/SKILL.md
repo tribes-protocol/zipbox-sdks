@@ -98,13 +98,15 @@ zb.sandboxes.stop(box.id)
 Async code: `from zipbox import AsyncZipbox`, then the same calls with `await`
 (`async with AsyncZipbox() as zb:`).
 
-Other Python calls you will need: `zb.sandboxes.list()`, `get(id)`, `create(name=,
-tier=)`, `wait_ready(id)`, `start(id)`, `restart(id)`, `set_tier(id, tier)`,
-`delete(id, archive=None)`; `box.run_code("python", code, cwd=)`;
-`box.commands.get/events/stdin/close_stdin/signal`;
+Other Python calls you will need: `zb.sandboxes.list()`, `get(id)`, `create(name=, tier=)`,
+`wait_ready(id)`, `start(id)`, `restart(id)`, `set_tier(id, tier)`, `cancel_transition(id)` (cancels
+a stop/start/restart/resize/fork still in flight: `"cleared"`, `"cancelling"` or `"none"`;
+`conflict` past the point of no return), `fork(id, name=, source_policy=, private=None)` (a running
+source needs `"pause_and_resume"`; the new box starts public unless `private=True`), `get_fork(child_id)`, `delete(id, archive=None)`; `box.run_code("python",
+code, cwd=)`; `box.commands.get/events/stdin/close_stdin/signal`;
 `box.files.read/stat/mkdir/move/copy/delete/upload/download`; `box.pty.create()`;
-`box.logs(since="10 min ago", unit=)`; `box.ssh_info()`; `zb.account.balance()`.
-Every SDK has these with the same parameters, in its own naming.
+`box.logs(since="10 min ago", unit=)`; `box.ssh_info()`; `zb.account.balance()`. Every SDK has these
+with the same parameters, in its own naming.
 
 ### TypeScript delta
 
@@ -226,13 +228,11 @@ GitHub in zipbox.ai Settings: `box.exec("git clone https://github.com/org/repo")
 ## Rules that save you a retry
 
 - **Exit codes are results.** Check `exit_code`; a failing command does not raise.
-- **Box not ready → `box_not_running`.** A box from `get`/`list` may be stopped:
-  call `start(id)` and retry.
+- **Box not ready → `box_not_running`.** Start it (`start(id)`) and retry; `retryable` says if it comes back by itself, and a private box off its tailnet raises `tailnet_not_connected`.
+- **Waits never hang.** `create`, `get_or_create`, `wait_ready` and `fork` wait while `readiness` is `settling`, then raise `box_not_running` (paused), `start_failed` (start it again, or create a new box's name again) or `conflict` (deleting or gone). Rows carry `phase` and `allowed_actions`.
 - **Stop what you start.** No idle timeout exists to clean up after you.
-- **Relative paths** resolve under `/root/workspace`; raw HTTP box routes need
-  absolute paths.
-- **Do not retry `exec` blindly** — it runs the command again. The SDKs only retry
-  safe requests.
+- **Relative paths** resolve under `/root/workspace`; raw HTTP box routes need absolute paths.
+- **Do not retry `exec` blindly** — it runs the command again. The SDKs only retry safe requests, plus any box call that never reached the box (refused connection, DNS, failed TLS handshake): they re-read the box first, because a new box's `baseUrl` moves once, to `box--<name>`, a few minutes after create. Keep one client and let it follow; with raw HTTP, re-read `GET /sandbox/:id` on a connect error.
 - **Files over 250 MiB** fail with `invalid_request`; move them with `exec`
   (`curl`, `git`, `rsync`) instead.
 - **Keys cannot** mint keys, approve OAuth apps, buy credit or connect GitHub — send
@@ -283,6 +283,7 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | Create, stop, start, resize, delete boxes              | `references/lifecycle.md`                                                                            |
 | Stream, background, stdin, signals, files, PTY         | `references/box-api.md`                                                                              |
 | Publish a port                                         | `references/previews.md`                                                                             |
+| Fork a box: same files, new name and identity          | `references/fork.md`                                                                                 |
 | Join a tailnet, private (tailnet-only) boxes           | `references/tailscale.md`                                                                            |
 | Read system logs                                       | `references/logs.md`                                                                                 |
 | Call the API with curl or from another language        | `references/http-api.md`                                                                             |
@@ -295,6 +296,5 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | Decode an error or a limit                             | `references/errors.md`                                                                               |
 | See everything Zipbox can and cannot do                | `references/api.md`                                                                                  |
 
-Everything is also online: https://zipbox.ai/llms.txt (index), any page as markdown
-at `https://zipbox.ai/docs/<page>.md`, and the API contract at
-https://zipbox.ai/openapi.json.
+Everything is also online: https://zipbox.ai/llms.txt (index), any page as markdown at
+`https://zipbox.ai/docs/<page>.md`, and the API contract at https://zipbox.ai/openapi.json.

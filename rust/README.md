@@ -28,7 +28,8 @@ async fn main() -> zipbox::Result<()> {
 
 | Area      | Calls                                                                                                                                                                                          |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lifecycle | `zb.sandboxes().create / get_or_create / get_or_create_with / list / get / wait_ready / start / stop / restart / delete / delete_with / set_tier`                                              |
+| Lifecycle | `zb.sandboxes().create / get_or_create / get_or_create_with / list / get / wait_ready / start / stop / restart / cancel_transition / delete / delete_with / set_tier`                          |
+| Fork      | `zb.sandboxes().fork(source_id, ForkOptions::new(name, policy))` → the new box; `get_fork(child_id)`; `sandbox.fork(options)`, `sandbox.fork_status()`                                         |
 | Commands  | `sandbox.exec`, `exec_with`, `exec_stream` (`Stream` of events), `exec_background` → `Command` (`get`, `events(since)`, `wait`, `stdin`, `close_stdin`, `signal`), `run_code`, `run_code_with` |
 | Files     | `sandbox.files().read / read_text / write / list / stat / mkdir / move_to / copy / delete / upload / download`                                                                                 |
 | Terminal  | `sandbox.pty().create(PtyOptions)` / `attach(session_id, PtyOptions)` → `Pty` (`Stream` of `PtyEvent`, `write`, `resize`, `takeover`, `detach`, `close`)                                       |
@@ -47,6 +48,11 @@ async fn main() -> zipbox::Result<()> {
 - No request or command has a deadline unless you set one (`ExecOptions::timeout_ms`).
 - A `Pty` reconnects by itself, forever, with backoff, and re-attaches its session.
 - Box tokens are fetched from the control plane and cached; you never handle them.
+- A created box's `base_url` changes once, to `box--<name>`, a few minutes after create,
+  and the SDK follows it: a box call (or `Pty` dial) that never reached the box (refused
+  connect, DNS, TLS handshake) re-reads the box with the wait below and retries there,
+  with backoff and no attempt ceiling. A paused, failed or deleted box ends the call with
+  the wait's error.
 
 ## Tailscale and private boxes
 
@@ -73,6 +79,46 @@ box is reachable only from devices on your tailnet: off it, box calls fail with
 reconnecting). Lifecycle calls, `set_private` and `tailscale()` go through the control
 plane and always work. A private box that has not joined your tailnet cannot be ready,
 so `create` and `get_or_create` return it once it is running with its key.
+
+Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's `readiness`: it keeps reading
+while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
+the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
+the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
+or gone `conflict`. Rows carry `phase` and `allowed_actions`; a detail also carries `readiness`.
+A box call whose request never reached the box runs this same wait before it retries.
+One retry rule: an error is retried when its `retryable` is true.
+
+## Fork a box
+
+```rust
+let zb = zipbox::Zipbox::from_env()?;
+let child = zb
+    .sandboxes()
+    .fork(
+        "sbx_source",
+        zipbox::ForkOptions::new("demo-2", zipbox::ForkSourcePolicy::PauseAndResume),
+    )
+    .await?; // waits until the new box is ready
+println!("{}", child.exec("git status").await?.stdout);
+```
+
+A fork is a new box with the source's files, installed software and settings, the same
+size, and a new identity. Running processes and RAM are not copied. It starts public,
+whatever the source's privacy, unless `private: Some(true)`
+(`ForkOptions { private: Some(true), ..ForkOptions::new(name, policy) }`).
+`RequirePaused` refuses a running source (`ErrorCode::PauseRequired`); `PauseAndResume`
+pauses it for the capture (its sessions disconnect) and resumes it right after. The
+request carries one `Idempotency-Key`, reused on every retry, so a retry never makes two
+boxes. A fork that ends without a box fails with the fork's own code (`copy_failed`,
+`source_gone`, …); a cancelled one with `conflict`. `wait: false` returns the accepted
+box at once; follow it with `get_fork(child.id())`. Dropping the future only stops the
+wait: cancel the fork with `cancel_transition(child.id())`. A source holding
+machine-scoped credentials cannot be forked with an API key
+(`ErrorCode::RequiresInteractive`): fork it from the dashboard.
+
+`tailscale_auth_key: Some(key)` joins the new box to your tailnet once it is running: the
+key is sealed on this machine to the new box's own key, exactly like
+`tailscale().connect`, and never sent with the fork. `Debug` on `ForkOptions` redacts it.
 
 Configuration: `Zipbox::builder()` (`api_key`, `base_url`, `max_retries`,
 `retry_base_delay`, `retry_max_delay`, `poll_interval`, `poll_max_interval`,

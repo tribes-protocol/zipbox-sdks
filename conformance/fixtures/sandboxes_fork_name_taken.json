@@ -1,0 +1,48 @@
+{
+  "name": "sandboxes_fork_name_taken",
+  "description": "A name already in use answers 409 name_taken: raised with its own code and not retried.",
+  "call": {
+    "op": "sandboxes.fork",
+    "args": {
+      "id": "sbx_1",
+      "name": "demo-2",
+      "sourcePolicy": "require_paused"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/fork",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "demo-2",
+          "sourcePolicy": "require_paused"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "name_taken",
+            "message": "demo-2 is taken. Pick another name.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#name_taken"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "name_taken",
+      "status": 409
+    }
+  }
+}

@@ -11,6 +11,15 @@ Signal = Literal["TERM", "KILL", "INT", "HUP", "QUIT"]
 CommandState = Literal["running", "exited", "unknown"]
 ExecEventType = Literal["start", "stdout", "stderr", "gap", "exit"]
 FileKind = Literal["directory", "file", "symlink", "other"]
+# What ``cancel_transition`` did: ``cleared`` (nothing was executing; the box is
+# already back), ``cancelling`` (the host's abort is on its way), ``none`` (nothing
+# was in flight). A change past its point of no return raises ``conflict``.
+TransitionCancelOutcome = Literal["cleared", "cancelling", "none"]
+# How a fork may treat its source. ``require_paused`` refuses a running source
+# (``pause_required``); ``pause_and_resume`` lets a running source pause for its
+# capture (its sessions disconnect) and resume right after. A paused source stays
+# paused either way.
+ForkSourcePolicy = Literal["require_paused", "pause_and_resume"]
 
 
 def _opt_str(value: Any) -> str | None:
@@ -109,6 +118,79 @@ class TailscaleStatus:
 
 
 @dataclass(frozen=True)
+class SandboxForkError:
+    """Why a fork ended without a new box: ``source_unsupported``, ``source_gone``,
+    ``identity_reused``, ``copy_failed`` or ``start_failed``. Codes this SDK does not
+    know are kept as given."""
+
+    code: str
+    message: str
+
+    @classmethod
+    def parse(cls, value: Any) -> SandboxForkError | None:
+        """Parse a nullable fork ``error``."""
+        if not isinstance(value, dict) or not isinstance(value.get("code"), str):
+            return None
+        return cls(code=value["code"], message=str(value.get("message") or value["code"]))
+
+
+@dataclass(frozen=True)
+class SandboxFork:
+    """One fork operation, as ``GET /sandbox/:child_id/fork`` and the child's row carry it.
+
+    ``phase`` is ``preparing_identity``, ``queued``, ``capturing``, ``copying``,
+    ``starting``, ``complete``, ``cancelling``, ``cancelled`` or ``failed``.
+    ``source_recovery`` is ``not_needed`` (the source was paused and stays paused),
+    ``pending`` (it owes its resume), ``resumed`` or ``superseded``. ``capture_mode``
+    is ``reflink`` or ``copy`` once captured. ``waiting_on`` says why a step waits
+    (``capacity``, ``host_offline``, ``busy``, …), with ``attempt`` and
+    ``next_attempt_at`` the retry ladder's position. ``error`` is set on ``failed``
+    only. Values this SDK does not know are kept as given.
+    """
+
+    operation_id: str
+    source_sandbox_id: str
+    child_sandbox_id: str
+    source_policy: str
+    phase: str
+    source_recovery: str
+    capture_mode: str | None
+    waiting_on: str | None
+    attempt: int
+    next_attempt_at: str | None
+    cancel_requested_at: str | None
+    error: SandboxForkError | None
+    created_at: str | None
+    updated_at: str | None
+    completed_at: str | None
+    raw: dict[str, Any] = field(repr=False, compare=False)
+
+    @classmethod
+    def parse(cls, value: Any) -> SandboxFork | None:
+        """Parse a fork projection; None for anything without an operation id."""
+        if not isinstance(value, dict) or not isinstance(value.get("operationId"), str):
+            return None
+        return cls(
+            operation_id=value["operationId"],
+            source_sandbox_id=str(value.get("sourceSandboxId") or ""),
+            child_sandbox_id=str(value.get("childSandboxId") or ""),
+            source_policy=str(value.get("sourcePolicy") or ""),
+            phase=str(value.get("phase") or ""),
+            source_recovery=str(value.get("sourceRecovery") or ""),
+            capture_mode=_opt_str(value.get("captureMode")),
+            waiting_on=_opt_str(value.get("waitingOn")),
+            attempt=_opt_int(value.get("attempt")) or 0,
+            next_attempt_at=_opt_str(value.get("nextAttemptAt")),
+            cancel_requested_at=_opt_str(value.get("cancelRequestedAt")),
+            error=SandboxForkError.parse(value.get("error")),
+            created_at=_opt_str(value.get("createdAt")),
+            updated_at=_opt_str(value.get("updatedAt")),
+            completed_at=_opt_str(value.get("completedAt")),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
 class SandboxInfo:
     """One box, as ``GET /sandbox`` lists it."""
 
@@ -116,6 +198,9 @@ class SandboxInfo:
     name: str | None
     domain: str | None
     ipv6: str | None
+    # provisioning, running, stopping, pausing, stopped, archived, deleting or destroyed.
+    # pausing reads as paused: the VM is stopped and its disk is safe on its host; its
+    # backup is still uploading; start() boots it at once.
     status: str
     tier: str | None
     pending_tier: str | None
@@ -135,6 +220,16 @@ class SandboxInfo:
     # ``tailscale_requires_update`` until the ZipOS update is accepted); None until
     # the box has reported since it booted.
     tailscale_supported: bool | None
+    # The fork still making this box (phase, source recovery, waits, error); None on
+    # every box that is not being forked into.
+    fork: SandboxFork | None
+    # What the box is doing now: starting, running, stopping, paused, resizing, forking,
+    # deleting, delete_failed, start_failed or gone. None from an older control plane.
+    phase: str | None
+    # The lifecycle verbs the box accepts now (start, stop, restart, delete,
+    # cancel_transition, fork). A listed verb can still be refused for a reason outside
+    # the box: credit, capacity, an argument. None from an older control plane.
+    allowed_actions: tuple[str, ...] | None
     raw: dict[str, Any] = field(repr=False, compare=False)
 
     @classmethod
@@ -162,6 +257,11 @@ class SandboxInfo:
             tailscale_supported=data.get("tailscaleSupported")
             if isinstance(data.get("tailscaleSupported"), bool)
             else None,
+            fork=SandboxFork.parse(data.get("fork")),
+            phase=_opt_str(data.get("phase")),
+            allowed_actions=tuple(str(action) for action in data["allowedActions"])
+            if isinstance(data.get("allowedActions"), list)
+            else None,
             raw=data,
         )
 
@@ -176,6 +276,10 @@ class SandboxDetail(SandboxInfo):
     # fresh name's certificate can trail ``ready``; the SDK's box calls retry the
     # handshake meanwhile.
     https_ready: bool = False
+    # Whether the box will answer, from the same connection gate as ``ready``: what
+    # every wait reads. ready, settling, awaits_tailnet, paused, start_failed, deleting
+    # or gone. None from an older control plane (the SDK then reads ready and status).
+    readiness: str | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SandboxDetail:
@@ -186,6 +290,7 @@ class SandboxDetail(SandboxInfo):
             ready=data.get("ready") is True,
             base_url=_opt_str(data.get("baseUrl")),
             https_ready=data.get("httpsReady") is True,
+            readiness=_opt_str(data.get("readiness")),
         )
 
 

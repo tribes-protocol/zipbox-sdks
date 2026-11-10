@@ -31,7 +31,7 @@ new Zipbox({
   baseUrl, // default: ZIPBOX_API_URL, else https://api.tribes.xyz
   maxRetries, // retries of one read or create (default 3); followed streams and PTYs never give up
   retryBaseDelayMs, // first retry delay (default 500); doubles up to retryMaxDelayMs (30000)
-  pollIntervalMs, // first readiness check in create (default 1000); grows to pollMaxIntervalMs (10000)
+  pollIntervalMs, // first readiness check in create (default 1000); grows 1.25× per check to pollMaxIntervalMs (10000), with jitter
   ptyBaseDelayMs, // first PTY reconnect delay (default 500); doubles up to ptyMaxDelayMs (30000)
   fetch, // custom fetch
   WebSocket // WebSocket constructor for PTYs
@@ -53,6 +53,7 @@ const one = await zb.sandboxes.get(id)
 await zb.sandboxes.stop(id) // disk archived, nothing billed while stopped
 await zb.sandboxes.start(id)
 await zb.sandboxes.restart(id) // files survive
+await zb.sandboxes.cancelTransition(id) // 'cleared' | 'cancelling' | 'none'; conflict past the point of no return
 await zb.sandboxes.setTier(id, 'm')
 await zb.sandboxes.delete(id) // keeps a recoverable copy for 30 days by default
 await zb.sandboxes.delete(id, { archive: false }) // no recoverable copy
@@ -61,6 +62,35 @@ const handle = zb.sandbox(id) // no network call
 
 `create`, `get` and `getOrCreate` return a `Sandbox`: the row (`box.info`, `box.status`,
 `box.name`, `box.baseUrl`, …) plus everything below.
+
+## Fork a box
+
+```ts
+// a new box with the source's files, software and settings, its own name and identity
+const child = await zb.sandboxes.fork(id, {
+  name: 'ci-runner-2',
+  sourcePolicy: 'pause_and_resume', // a running source pauses for the capture, then resumes
+  private: true, // optional: a fork starts public unless you ask for a private one
+  tailscaleAuthKey // optional: sealed here to the new box once it runs, never in the fork request
+})
+const accepted = await box.fork({
+  name: 'ci-runner-3',
+  sourcePolicy: 'require_paused',
+  wait: false
+})
+accepted.info?.fork // { operationId, phase: 'queued', … }: the new box is still provisioning
+await zb.sandboxes.getFork(accepted.id) // or accepted.forkStatus(): phase, sourceRecovery, error
+await zb.sandboxes.cancelTransition(accepted.id) // cancel the fork; the name stays yours
+```
+
+`fork` returns the new box's `Sandbox` once it is ready (`wait: false`: at once, still
+`provisioning`). `require_paused` refuses a running source with `pause_required`. A
+source holding machine-scoped keys raises `requires_interactive` for an API key: fork it
+from the dashboard. The new box starts public, whatever the source's privacy, unless
+`private: true`. A new box its fork removed (a cancel or a failure) raises its fork's
+error code (`copy_failed`, `start_failed`, …), or `conflict` when the fork was cancelled. A `signal`
+stops only the local wait; the fork keeps running. RAM and running processes are not
+copied. See [zipbox.ai/docs/fork](https://zipbox.ai/docs/fork).
 
 An account holds 250 machine names, and a deleted box keeps its name: reuse a fixed pool of
 names with `getOrCreate` instead of a fresh name per job. A new name past the limit raises
@@ -170,6 +200,22 @@ Every failure is a `ZipboxError` with `code` (`invalid_request`, `unauthorized`,
 `box_not_running`, `unavailable`, `machine_limit_reached`, `box_key_changed`, `tailnet_not_connected`,
 `tailscale_unavailable_egress_lockdown`, `tailscale_requires_update`, `box_private_unreachable`), `status`,
 `requestId`, `retryable`, `retryAfterMs` and `docsUrl`.
+
+Every wait (`create`, `getOrCreate`, `waitReady`, `fork`) reads the box's `readiness`: it keeps reading
+while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
+the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
+the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
+or gone `conflict`. Rows carry `phase` and `allowedActions`; a detail also carries `readiness`.
+One retry rule: an error is retried when its `retryable` is true.
+
+A created box's `baseUrl` changes once, to `box--<name>`, a few minutes after create, and
+the SDK follows it. A box call that fails before anything was sent (connect, DNS, TLS
+handshake) waits one step of a backoff ladder (`retryBaseDelayMs` doubling to
+`retryMaxDelayMs`, jitter), re-reads the box with the same wait `create` uses and retries
+on the address that returned, with no attempt ceiling; the ladder starts over only when
+the box answers. A box that reads paused, failed or deleted ends the call with that wait's
+error. A PTY whose dial fails does the same before it redials. A request that was sent is
+never repeated this way.
 
 ```ts
 try {

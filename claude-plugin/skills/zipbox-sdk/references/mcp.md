@@ -49,40 +49,48 @@ zipbox mcp start           # what the config runs: the same tools over stdio
 
 Every tool has a title, a one-line description, read-only or destructive hints, and a typed input schema.
 
-| Tool                       | Parameters                        | Hints                 | Does                                                                    |
-| -------------------------- | --------------------------------- | --------------------- | ----------------------------------------------------------------------- |
-| `list_sandboxes`           | -                                 | read-only             | Your boxes                                                              |
-| `get_sandbox`              | `id`                              | read-only             | One box: status, size, resource sample                                  |
-| `create_sandbox`           | `name?`, `tier?`, `mailbox?`      |                       | Create a box and wait until it is ready                                 |
-| `start_sandbox`            | `id`                              |                       | Start a stopped box; one still stopping, once its stop lands            |
-| `stop_sandbox`             | `id`                              |                       | Stop a box (disk archived, nothing billed)                              |
-| `restart_sandbox`          | `id`                              |                       | Hard-restart a running box                                              |
-| `delete_sandbox`           | `id`, `keepCopy?`                 | destructive           | Delete a box; `keepCopy` (default true) keeps a 30-day recoverable copy |
-| `execute_command`          | `id`, `cmd`, `cwd?`, `timeoutMs?` | destructive           | Run a command; returns exit code and output (capped)                    |
-| `run_code`                 | `id`, `language`, `code`          | destructive           | Run Python, Node or Bash code                                           |
-| `start_background_command` | `id`, `cmd`, `cwd?`               | destructive           | Start a long-running command; returns its id                            |
-| `get_command_output`       | `id`, `commandId`, `since?`       | read-only             | Output and state of a command, from a cursor                            |
-| `read_file`                | `id`, `path`                      | read-only             | A file's contents                                                       |
-| `write_file`               | `id`, `path`, `content`           | destructive           | Write a file                                                            |
-| `list_files`               | `id`, `path?`                     | read-only             | A directory listing (default `/root/workspace`)                         |
-| `get_file_info`            | `id`, `path`                      | read-only             | Kind, size and modification time                                        |
-| `create_folder`            | `id`, `path`                      |                       | `mkdir`                                                                 |
-| `move_file`                | `id`, `path`, `destination`       | destructive           | Move or rename                                                          |
-| `delete_file`              | `id`, `path`                      | destructive           | Delete a file or folder                                                 |
-| `git_clone`                | `id`, `url`, `path?`, `branch?`   |                       | Clone a repository; uses your connected GitHub account                  |
-| `preview_link`             | `id`, `port`, `label?`            |                       | A public HTTPS URL for a port ([Previews](https://zipbox.ai/docs/previews.md))              |
-| `get_logs`                 | `id`, `since?`                    | read-only             | The box's system journal                                                |
-| `desktop_screenshot`       | `id`                              | read-only             | A PNG of the box's desktop, returned as an image                        |
-| `tailscale_status`         | `id`                              | read-only             | The box's tailnet status (`get_sandbox` has `privateMode`)              |
-| `tailscale_connect_link`   | `id`                              | read-only             | A link to the box's Settings → Tailscale, where you paste an auth key   |
-| `tailscale_disconnect`     | `id`                              | destructive           | Log the box out of your tailnet                                         |
-| `set_private_mode`         | `id`, `enabled`                   |                       | Make the box private (tailnet only) or public                           |
-| `search_docs`              | `query`                           | read-only (see below) | Search these docs                                                       |
-| `read_doc`                 | `slug`                            | read-only (see below) | One docs page as markdown                                               |
+| Tool                        | Parameters                        | Hints                 | Does                                                                                         |
+| --------------------------- | --------------------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| `list_sandboxes`            | -                                 | read-only             | Your boxes                                                                                   |
+| `get_sandbox`               | `id`                              | read-only             | One box: status, size, resource sample                                                       |
+| `create_sandbox`            | `name?`, `tier?`, `mailbox?`      |                       | Create a box and wait until it is ready; the result names the `readiness` it ended on        |
+| `fork_sandbox`              | `id`, `name`, `pause?`            |                       | Fork a box into a new box; returns at once with the new box and its operation                |
+| `start_sandbox`             | `id`                              |                       | Start a stopped box; one still stopping, once its stop lands                                 |
+| `stop_sandbox`              | `id`                              |                       | Stop a box (disk archived, nothing billed)                                                   |
+| `restart_sandbox`           | `id`                              |                       | Hard-restart a running box                                                                   |
+| `cancel_sandbox_transition` | `id`                              |                       | Cancel the stop, start, restart, resize or fork in flight: `cleared`, `cancelling` or `none` |
+| `delete_sandbox`            | `id`, `keepCopy?`                 | destructive           | Delete a box; `keepCopy` (default true) keeps a 30-day recoverable copy                      |
+| `execute_command`           | `id`, `cmd`, `cwd?`, `timeoutMs?` | destructive           | Run a command; returns exit code and output (capped)                                         |
+| `run_code`                  | `id`, `language`, `code`          | destructive           | Run Python, Node or Bash code                                                                |
+| `start_background_command`  | `id`, `cmd`, `cwd?`               | destructive           | Start a long-running command; returns its id                                                 |
+| `get_command_output`        | `id`, `commandId`, `since?`       | read-only             | Output and state of a command, from a cursor                                                 |
+| `read_file`                 | `id`, `path`                      | read-only             | A file's contents                                                                            |
+| `write_file`                | `id`, `path`, `content`           | destructive           | Write a file                                                                                 |
+| `list_files`                | `id`, `path?`                     | read-only             | A directory listing (default `/root/workspace`)                                              |
+| `get_file_info`             | `id`, `path`                      | read-only             | Kind, size and modification time                                                             |
+| `create_folder`             | `id`, `path`                      |                       | `mkdir`                                                                                      |
+| `move_file`                 | `id`, `path`, `destination`       | destructive           | Move or rename                                                                               |
+| `delete_file`               | `id`, `path`                      | destructive           | Delete a file or folder                                                                      |
+| `git_clone`                 | `id`, `url`, `path?`, `branch?`   |                       | Clone a repository; uses your connected GitHub account                                       |
+| `preview_link`              | `id`, `port`, `label?`            |                       | A public HTTPS URL for a port ([Previews](https://zipbox.ai/docs/previews.md))                                   |
+| `get_logs`                  | `id`, `since?`                    | read-only             | The box's system journal                                                                     |
+| `desktop_screenshot`        | `id`                              | read-only             | A PNG of the box's desktop, returned as an image                                             |
+| `tailscale_status`          | `id`                              | read-only             | The box's tailnet status (`get_sandbox` has `privateMode`)                                   |
+| `tailscale_connect_link`    | `id`                              | read-only             | A link to the box's Settings → Tailscale, where you paste an auth key                        |
+| `tailscale_disconnect`      | `id`                              | destructive           | Log the box out of your tailnet                                                              |
+| `set_private_mode`          | `id`, `enabled`                   |                       | Make the box private (tailnet only) or public                                                |
+| `search_docs`               | `query`                           | read-only (see below) | Search these docs                                                                            |
+| `read_doc`                  | `slug`                            | read-only (see below) | One docs page as markdown                                                                    |
 
 **Output cap.** A tool result shows at most 32 KiB of output. `execute_command` returns the command id with its result; `get_command_output` reads the rest from the box, which keeps everything (64 MiB per stream).
 
+**Command state.** `get_command_output` returns once the command exits, its page is full, or 2 seconds pass with no new output. In that last case it reads the command's state from the box (one read, with the SDK's usual retries) and says so: still running, exited with its code, ended with no exit status (its process is gone, as after a restart), or that the box could not be reached.
+
+**Errors.** A failed tool call is a result with `isError: true` whose text is `{error: {code, message, retryable, retryAfterMs, requestId, docsUrl}}`: retry only when `retryable` is true, after `retryAfterMs` when it is set, and quote `requestId` to support. See [Errors](https://zipbox.ai/docs/errors.md).
+
 **Reuse names.** An account holds 250 machine names and a deleted box keeps its name. `create_sandbox` with a new name past that answers `machine_limit_reached`; a model should use a box it already has (`list_sandboxes`) or the name of one it deleted, which `create_sandbox` brings back. See [Machine limit](https://zipbox.ai/docs/machine-limit.md).
+
+**Forks run on their own.** `fork_sandbox` copies a box's files, software and settings into a new box with a new name and identity ([Fork a box](https://zipbox.ai/docs/fork.md)). A running source needs `pause: true`: it pauses for the capture and resumes right after; without it the tool answers `pause_required`. The tool returns once the fork is accepted; follow it with `get_sandbox` on the new box (its `fork` field shows the phase) and cancel it with `cancel_sandbox_transition`. The new box starts public unless `private: true`; a private one the owner connects to their tailnet from the dashboard. A source with machine-scoped credentials answers `requires_interactive`: the owner forks it from the dashboard.
 
 **Nothing stops on a clock.** A command `execute_command` starts has no deadline unless you pass `timeoutMs`; use `start_background_command` for dev servers and watchers.
 
@@ -90,7 +98,7 @@ Every tool has a title, a one-line description, read-only or destructive hints, 
 
 **MCP cannot reach a [private box](https://zipbox.ai/docs/tailscale.md).** A private box answers only to devices on your tailnet. The hosted MCP server runs in Zipbox's cloud and can never join your tailnet, and `zipbox mcp start` only bridges to it, so it fails the same way. On a private box, every tool that talks to the box itself (`execute_command`, `run_code`, the background and output tools, the file tools, `git_clone`, `preview_link`, `get_logs`, `desktop_screenshot`) returns `box_private_unreachable`: "build is private: it can only be reached from devices on your tailnet. Zipbox MCP can't reach it." Lifecycle tools and the Tailscale tools go through the control plane and keep working, so a model can still start, stop, check and make a private box public again.
 
-**No tool takes an auth key.** A key passed to a tool would sit in plain text in the model's transcript and on the MCP server. `tailscale_connect_link` returns the box's **Settings → Tailscale** link instead; paste the key there, where it is sealed in your browser. From code, use an SDK's `tailscale.connect`, which seals on your machine.
+**No tool takes an auth key.** A key passed to a tool would sit in plain text in the model's transcript and on the MCP server. `tailscale_connect_link` returns the box's **Settings → Tailscale** link instead; paste the key there, where it is sealed in your browser. `fork_sandbox` takes no key either. From code, use an SDK's `tailscale.connect`, which seals on your machine.
 
 ## Resources and prompts
 

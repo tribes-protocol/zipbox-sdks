@@ -1,5 +1,6 @@
 import { sleep } from './backoff.js'
 import {
+  cancelTransition,
   type ClientContext,
   deleteBox,
   getDetail,
@@ -12,6 +13,7 @@ import {
 } from './context.js'
 import { ZipboxError } from './errors.js'
 import { type Cmd, execBody, toExecEvent } from './exec.js'
+import { forkBox, getFork } from './fork.js'
 import { isCommandRecord, isFileListing, isRecord, readJson } from './guards.js'
 import { resolveBoxPath, shellQuote, splitBoxPath } from './paths.js'
 import { PtyApi } from './pty.js'
@@ -28,14 +30,17 @@ import type {
   ExecResult,
   ExecSignal,
   FileEntry,
+  ForkSandboxOptions,
   LogsOptions,
   PreviewLink,
   PreviewOptions,
   RunCodeLanguage,
   SandboxDetail,
+  SandboxFork,
   SandboxStatus,
   SandboxTier,
-  SshInfo
+  SshInfo,
+  TransitionCancelOutcome
 } from './types.js'
 
 const decoder = new TextDecoder()
@@ -156,6 +161,7 @@ export class Commands {
     let cursor = options.since
     let failures = 0
     for (;;) {
+      let retryAfterMs = 0
       try {
         for await (const event of this.stream(commandId, {
           ...(cursor === undefined ? {} : { since: cursor }),
@@ -168,8 +174,9 @@ export class Commands {
         }
       } catch (error) {
         if (!(error instanceof ZipboxError) || !error.retryable) throw error
+        retryAfterMs = error.retryAfterMs ?? 0
       }
-      await sleep(retryDelay(this.ctx, failures), options.signal)
+      await sleep(Math.max(retryAfterMs, retryDelay(this.ctx, failures)), options.signal)
       failures++
     }
   }
@@ -634,6 +641,28 @@ export class Sandbox {
   /** Hard-restart the box; files survive. */
   restart(options: CallOptions = {}): Promise<void> {
     return lifecycle(this.ctx, this.id, 'reset', options.signal)
+  }
+
+  /**
+   * Cancel the box's state change in flight and return it to where it was:
+   * `cleared`, `cancelling` or `none`. Past the point of no return: `conflict`.
+   */
+  cancelTransition(options: CallOptions = {}): Promise<TransitionCancelOutcome> {
+    return cancelTransition(this.ctx, this.id, options.signal)
+  }
+
+  /**
+   * Fork this box into a new box with its files and a fresh identity, and return
+   * the new box. See {@link Sandboxes.fork}.
+   */
+  async fork(options: ForkSandboxOptions): Promise<Sandbox> {
+    const child = await forkBox(this.ctx, this.id, options)
+    return new Sandbox(this.ctx, child.id, child)
+  }
+
+  /** The fork that is making this box, when it was made by one. */
+  forkStatus(options: CallOptions = {}): Promise<SandboxFork> {
+    return getFork(this.ctx, this.id, options.signal)
   }
 
   /** Move the box to another tier. */

@@ -4,11 +4,22 @@ exchanges in order and records every mismatch."""
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 ANY = "{{ANY}}"
+# Header matching only: the value this header carried on the previous request.
+SAME = "{{SAME}}"
+
+
+def dead_origin() -> str:
+    """``{{DEAD}}``: an origin on a port bound and then closed, so every dial is refused."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
 
 
 def substitute(value: Any, replacements: dict[str, str]) -> Any:
@@ -52,6 +63,8 @@ class MockServer:
         self.errors: list[str] = []
         # Every request body served, so a test can assert what never left the client.
         self.bodies: list[bytes] = []
+        # The previous request's headers, for ``{{SAME}}``.
+        self.previous_headers: dict[str, str] = {}
         self._lock = threading.Lock()
         server = self
 
@@ -102,6 +115,7 @@ class MockServer:
     def load(self, exchanges: list[dict[str, Any]]) -> None:
         self.exchanges = exchanges
         self.index = 0
+        self.previous_headers = {}
 
     def serve(
         self, method: str, path: str, headers: dict[str, str], body: bytes
@@ -113,6 +127,8 @@ class MockServer:
             exchange = self.exchanges[self.index]
             self.index += 1
             self.bodies.append(body)
+            previous = self.previous_headers
+            self.previous_headers = headers
         expected = exchange["request"]
         problems: list[str] = []
         if expected["method"] != method:
@@ -124,6 +140,10 @@ class MockServer:
             if value == ANY:
                 if not actual:
                     problems.append(f"header {name} missing")
+            elif value == SAME:
+                before = previous.get(name.lower())
+                if not actual or actual != before:
+                    problems.append(f"header {name}: {actual!r} != previous {before!r}")
             elif actual != value:
                 problems.append(f"header {name}: {actual!r} != {value!r}")
         if "body" in expected:

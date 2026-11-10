@@ -54,9 +54,6 @@ func (b *Box) Refresh(ctx context.Context) (*SandboxDetail, error) {
 		return nil, err
 	}
 	b.Detail = detail
-	if detail.Ready {
-		b.client.storeCreds(b.ID, detail)
-	}
 	return detail, nil
 }
 
@@ -80,6 +77,12 @@ func (b *Box) Stop(ctx context.Context) error { return b.client.Sandboxes.Stop(c
 // Restart hard-restarts the box. Files survive; running processes do not.
 func (b *Box) Restart(ctx context.Context) error { return b.client.Sandboxes.Restart(ctx, b.ID) }
 
+// CancelTransition cancels the box's state change in flight (see
+// SandboxesService.CancelTransition).
+func (b *Box) CancelTransition(ctx context.Context) (TransitionCancelOutcome, error) {
+	return b.client.Sandboxes.CancelTransition(ctx, b.ID)
+}
+
 // Delete deletes the box (see SandboxesService.Delete).
 func (b *Box) Delete(ctx context.Context, opts DeleteOptions) error {
 	return b.client.Sandboxes.Delete(ctx, b.ID, opts)
@@ -98,13 +101,21 @@ type boxCreds struct {
 	reachable bool
 }
 
-func (c *Client) storeCreds(id string, detail *SandboxDetail) {
-	if !detail.Ready || detail.BaseURL == nil || detail.BoxToken == nil {
-		return
+// storeCreds caches the box target a ready detail names and returns it, or nil
+// when the detail names none. A private box keeps its reachability while its
+// origin stays the same.
+func (c *Client) storeCreds(id string, detail *SandboxDetail) *boxCreds {
+	if !detail.Ready || detail.BaseURL == nil || detail.BoxToken == nil || *detail.BoxToken == "" {
+		return nil
 	}
+	creds := &boxCreds{baseURL: strings.TrimRight(*detail.BaseURL, "/"), token: *detail.BoxToken, detail: detail}
 	c.mu.Lock()
-	c.creds[id] = &boxCreds{baseURL: strings.TrimRight(*detail.BaseURL, "/"), token: *detail.BoxToken, detail: detail}
+	if previous := c.creds[id]; previous != nil && previous.baseURL == creds.baseURL && detail.PrivateMode {
+		creds.reachable = previous.reachable
+	}
+	c.creds[id] = creds
 	c.mu.Unlock()
+	return creds
 }
 
 func (c *Client) forget(id string) {
@@ -128,18 +139,34 @@ func (c *Client) boxCreds(ctx context.Context, id string, refresh bool) (*boxCre
 	if err != nil {
 		return nil, err
 	}
+	return c.credsFor(ctx, id, detail)
+}
+
+// credsFor caches and returns the box target a detail read names. A box that is
+// not ready is box_not_running.
+func (c *Client) credsFor(ctx context.Context, id string, detail *SandboxDetail) (*boxCreds, error) {
 	if !detail.Ready || detail.BaseURL == nil {
 		c.forget(id)
-		return nil, newError(CodeBoxNotRunning, "box "+id+" is "+string(detail.Status)+", not ready; start it or wait")
+		return nil, boxNotReadyError(id, detail)
 	}
-	if detail.BoxToken == nil || *detail.BoxToken == "" {
+	creds := c.storeCreds(id, detail)
+	if creds == nil {
 		return nil, newError(CodeUnauthorized, "the control plane returned no box token; box APIs need an API key")
 	}
-	c.storeCreds(id, detail)
-	c.mu.Lock()
-	creds := c.creds[id]
-	c.mu.Unlock()
 	return c.ensureReachable(ctx, id, creds)
+}
+
+// reresolve drops a box's cached target and re-reads the box with the readiness
+// wait Create uses, after a request to it was never sent: a box's origin can move (a
+// claimed box leaves its boot name once). The wait's verdict on a box that will not
+// become ready by itself is returned as it is.
+func (c *Client) reresolve(ctx context.Context, id string) (*boxCreds, error) {
+	c.forget(id)
+	detail, err := c.Sandboxes.waitSettled(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return c.credsFor(ctx, id, detail)
 }
 
 // defaultPrivateProbeTimeout bounds the reachability probe of a private box. It is a
@@ -201,26 +228,53 @@ func (c *Client) ensureReachable(ctx context.Context, id string, creds *boxCreds
 
 // do sends a request to the box. A 401 re-fetches the box token once and
 // retries; a second 401 is returned as unauthorized.
+//
+// A request that was never sent (connect, DNS, TLS handshake) sleeps one rung of
+// the backoff ladder, then re-reads the box with reresolve and retries on the
+// target it returns, with no attempt ceiling: ctx is the only bound. The ladder
+// grows across re-reads and resets only when the box answers.
 func (b *Box) do(ctx context.Context, req *request, boxPath string) (*boxResponse, error) {
-	for attempt := 0; ; attempt++ {
-		creds, err := b.client.boxCreds(ctx, b.ID, attempt > 0)
-		if err != nil {
-			return nil, err
-		}
+	creds, err := b.client.boxCreds(ctx, b.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	refetched := false
+	unsent := 0
+	for {
 		r := *req
+		r.box = true
 		r.url = creds.baseURL + boxPath
 		r.headers = map[string]string{"Authorization": "Bearer " + creds.token}
 		for k, v := range req.headers {
 			r.headers[k] = v
 		}
-		resp, err := b.client.do(ctx, &r)
-		if err == nil {
+		resp, sendErr := b.client.do(ctx, &r)
+		if sendErr == nil {
 			return &boxResponse{Response: resp, creds: creds}, nil
 		}
-		if attempt == 0 && IsCode(err, CodeUnauthorized) {
+		if zerr, ok := asError(sendErr); ok && zerr.unsent {
+			if sleepErr := sleep(ctx, b.client.backoff(unsent)); sleepErr != nil {
+				return nil, sleepErr
+			}
+			unsent++
+			fresh, resolveErr := b.client.reresolve(ctx, b.ID)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			creds = fresh
 			continue
 		}
-		if IsCode(err, CodeUnauthorized) {
+		if !refetched && IsCode(sendErr, CodeUnauthorized) {
+			refetched = true
+			unsent = 0
+			fresh, refetchErr := b.client.boxCreds(ctx, b.ID, true)
+			if refetchErr != nil {
+				return nil, refetchErr
+			}
+			creds = fresh
+			continue
+		}
+		if IsCode(sendErr, CodeUnauthorized) {
 			// Not a deleted key: that fails the re-read above, at the control plane.
 			// The control plane just vouched for this key, so the box has not
 			// received its token yet.
@@ -231,7 +285,7 @@ func (b *Box) do(ctx context.Context, req *request, boxPath string) (*boxRespons
 			zerr.Retryable = true
 			return nil, zerr
 		}
-		return nil, err
+		return nil, sendErr
 	}
 }
 

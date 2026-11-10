@@ -1,6 +1,6 @@
 {
   "name": "tailscale_connect_box_not_running",
-  "description": "A box with no agentPublicKey (not started) raises box_not_running without sending anything.",
+  "description": "A box with no agentPublicKey (not started) raises box_not_running without sending anything. A stopped box will not grow one by itself, so it is not retryable.",
   "call": {
     "op": "tailscale.connect",
     "args": {
@@ -42,7 +42,8 @@
   ],
   "expect": {
     "error": {
-      "code": "box_not_running"
+      "code": "box_not_running",
+      "retryable": false
     }
   }
 }

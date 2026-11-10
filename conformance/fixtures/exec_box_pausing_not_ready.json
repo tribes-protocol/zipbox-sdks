@@ -1,0 +1,52 @@
+{
+  "name": "exec_box_pausing_not_ready",
+  "description": "A box call on a pausing box (Paused while its backup still uploads) raises box_not_running, not retryable, without calling the box: its readiness is paused, as for an archived box, so a caller starts it instead of retrying until the upload finishes.",
+  "call": {
+    "op": "sandbox.exec",
+    "args": {
+      "id": "sbx_1",
+      "cmd": "true"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "demo",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "pausing",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-10T00:00:00.000Z",
+          "updatedAt": "2026-11-10T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["start", "delete"],
+          "readiness": "paused"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "box_not_running",
+      "retryable": false
+    }
+  }
+}

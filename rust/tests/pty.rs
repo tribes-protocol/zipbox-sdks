@@ -261,6 +261,274 @@ async fn refetches_once_on_401_and_stops_on_an_answered_verdict() {
     assert!(api.finish().is_empty(), "{:?}", api.finish());
 }
 
+fn ready(ws_origin: &str) -> Value {
+    json!({
+        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+        "response": { "status": 200, "body": {
+            "id": "sbx_1", "status": "running", "ready": true,
+            "baseUrl": ws_origin, "boxToken": "bt_pty"
+        }}
+    })
+}
+
+fn client(api: &MockServer) -> Zipbox {
+    Zipbox::builder()
+        .api_key(API_KEY)
+        .base_url(&api.base)
+        .pty_base_delay(Duration::from_millis(1))
+        .pty_max_delay(Duration::from_millis(20))
+        .build()
+        .unwrap()
+}
+
+async fn events_until_end(pty: &mut zipbox::Pty) -> Vec<PtyEvent> {
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = pty.next().await {
+            let end = matches!(
+                event,
+                PtyEvent::Exit(_) | PtyEvent::Closed(_) | PtyEvent::Taken
+            );
+            events.push(event);
+            if end {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the pty ends");
+    events
+}
+
+// AX-07: a box is ready before it answers on its terminal address (its certificate
+// can trail its readiness), and a created box's address moves once, to box--<name>.
+// Nothing was sent, so the first dial waits on the PTY ladder like a reconnect and
+// re-reads the box before each new dial. Here the old address is bound but not
+// listening: the connect is refused, and no other test can take the port meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_dial_waits_out_a_box_that_does_not_answer_yet() {
+    let dead = tokio::net::TcpSocket::new_v4().unwrap();
+    dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let dead_origin = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_origin = format!(
+        "http://127.0.0.1:{}",
+        ws_listener.local_addr().unwrap().port()
+    );
+    let (api, api_listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges =
+        vec![ready(&dead_origin), ready(&dead_origin), ready(&ws_origin)];
+    api.serve(api_listener);
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&ws_listener, &Seen::default()).await;
+        ws.send(Message::text(r#"{"t":"x","code":0}"#))
+            .await
+            .unwrap();
+        let _ = ws.next().await;
+    });
+
+    let zb = client(&api);
+    let mut pty = tokio::time::timeout(
+        Duration::from_secs(10),
+        zb.sandbox("sbx_1")
+            .pty()
+            .create(zipbox::PtyOptions::default()),
+    )
+    .await
+    .expect("the wait ends once the box answers")
+    .expect("the first dial waits instead of failing");
+    let events = events_until_end(&mut pty).await;
+    assert_eq!(events.last(), Some(&PtyEvent::Exit(Some(0))), "{events:?}");
+    server.await.unwrap();
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+    drop(dead);
+}
+
+// A reconnect whose dial is refused re-reads the box before the next dial, instead
+// of redialling the address it cached: a created box's address moves once, to
+// box--<name>. Here a read in between caches the old address, now refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconnect_rereads_a_box_whose_dial_is_refused() {
+    let dead = tokio::net::TcpSocket::new_v4().unwrap();
+    dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let dead_origin = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_origin = format!(
+        "http://127.0.0.1:{}",
+        ws_listener.local_addr().unwrap().port()
+    );
+    let (api, api_listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges =
+        vec![ready(&ws_origin), ready(&dead_origin), ready(&ws_origin)];
+    api.serve(api_listener);
+    let (cached_tx, cached_rx) = tokio::sync::oneshot::channel::<()>();
+    let seen = Seen::default();
+    let server_seen = seen.clone();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&ws_listener, &server_seen).await;
+        ws.send(Message::text(r#"{"t":"o","d":"a"}"#))
+            .await
+            .unwrap();
+        cached_rx.await.unwrap();
+        drop(ws);
+        let mut ws = accept(&ws_listener, &server_seen).await;
+        ws.send(Message::text(r#"{"t":"x","code":0}"#))
+            .await
+            .unwrap();
+        let _ = ws.next().await;
+    });
+
+    let zb = client(&api);
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .create(zipbox::PtyOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(pty.next().await, Some(PtyEvent::Output("a".into())));
+    // The client now caches the refused address.
+    zb.sandboxes().get("sbx_1").await.unwrap();
+    cached_tx.send(()).unwrap();
+    let events = events_until_end(&mut pty).await;
+    assert_eq!(events.last(), Some(&PtyEvent::Exit(Some(0))), "{events:?}");
+    // The drop, then the refused dial: the ladder grew across the re-read.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PtyEvent::Reconnecting { attempt: 2, .. })),
+        "{events:?}"
+    );
+    server.await.unwrap();
+    let uris = seen.uris.lock().unwrap().clone();
+    assert_eq!(uris.len(), 2);
+    assert_eq!(query(&uris[1], "resume").as_deref(), Some("1"));
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+    drop(dead);
+}
+
+// AX-14: a box that answers 401 after the control plane re-read accepted the key has
+// not received a key created moments ago. No verdict: the first dial waits for it,
+// re-reading the token each time.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_dial_waits_for_the_box_to_receive_a_live_key() {
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_origin = format!(
+        "http://127.0.0.1:{}",
+        ws_listener.local_addr().unwrap().port()
+    );
+    let (api, api_listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges =
+        vec![ready(&ws_origin), ready(&ws_origin), ready(&ws_origin)];
+    api.serve(api_listener);
+    let server = tokio::spawn(async move {
+        reject(&ws_listener).await;
+        reject(&ws_listener).await;
+        let mut ws = accept(&ws_listener, &Seen::default()).await;
+        ws.send(Message::text(r#"{"t":"x","code":0}"#))
+            .await
+            .unwrap();
+        let _ = ws.next().await;
+    });
+
+    let zb = client(&api);
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .create(zipbox::PtyOptions::default())
+        .await
+        .expect("a key the box has not received yet is no verdict");
+    let events = events_until_end(&mut pty).await;
+    assert_eq!(events.last(), Some(&PtyEvent::Exit(Some(0))), "{events:?}");
+    server.await.unwrap();
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// AX-14: the same on a reconnect. The session goes on once the box has the key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconnect_waits_for_the_box_to_receive_a_live_key() {
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_origin = format!(
+        "http://127.0.0.1:{}",
+        ws_listener.local_addr().unwrap().port()
+    );
+    let (api, api_listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges =
+        vec![ready(&ws_origin), ready(&ws_origin), ready(&ws_origin)];
+    api.serve(api_listener);
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&ws_listener, &Seen::default()).await;
+        ws.send(Message::text(r#"{"t":"o","d":"a"}"#))
+            .await
+            .unwrap();
+        drop(ws);
+        // The cached token, then the re-read one: both refused.
+        reject(&ws_listener).await;
+        reject(&ws_listener).await;
+        let mut ws = accept(&ws_listener, &Seen::default()).await;
+        ws.send(Message::text(r#"{"t":"x","code":0}"#))
+            .await
+            .unwrap();
+        let _ = ws.next().await;
+    });
+
+    let zb = client(&api);
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .create(zipbox::PtyOptions::default())
+        .await
+        .unwrap();
+    let events = events_until_end(&mut pty).await;
+    assert_eq!(events.first(), Some(&PtyEvent::Output("a".into())));
+    assert_eq!(events.last(), Some(&PtyEvent::Exit(Some(0))), "{events:?}");
+    server.await.unwrap();
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// AX-14: a deleted key fails the re-read at the control plane. That is the answered
+// verdict, and it ends the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_the_control_plane_refuses_ends_the_session() {
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_origin = format!(
+        "http://127.0.0.1:{}",
+        ws_listener.local_addr().unwrap().port()
+    );
+    let deleted = json!({
+        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+        "response": { "status": 401, "body": { "error": {
+            "code": "unauthorized", "message": "Invalid or deleted API key", "requestId": "r",
+            "retryable": false, "docsUrl": "https://zipbox.ai/docs/errors#unauthorized"
+        }}}
+    });
+    let (api, api_listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![ready(&ws_origin), deleted];
+    api.serve(api_listener);
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&ws_listener, &Seen::default()).await;
+        ws.send(Message::text(r#"{"t":"o","d":"a"}"#))
+            .await
+            .unwrap();
+        drop(ws);
+        reject(&ws_listener).await;
+    });
+
+    let zb = client(&api);
+    let mut pty = zb
+        .sandbox("sbx_1")
+        .pty()
+        .create(zipbox::PtyOptions::default())
+        .await
+        .unwrap();
+    let events = events_until_end(&mut pty).await;
+    server.await.unwrap();
+    assert!(
+        matches!(events.last(), Some(PtyEvent::Closed(reason)) if reason == "Invalid or deleted API key"),
+        "{events:?}"
+    );
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
 #[allow(clippy::result_large_err)]
 async fn reject(listener: &TcpListener) {
     let (stream, _) = listener.accept().await.unwrap();

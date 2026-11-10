@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { createServer } from 'node:net'
+
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ZipboxError } from '../src/errors.js'
 import { HttpClient, isTlsFailure, isUnsentFailure } from '../src/http.js'
+import { Zipbox } from '../src/index.js'
 import { BoxTransport, ControlPlane } from '../src/transport.js'
 import type { FetchLike } from '../src/types.js'
 
@@ -32,6 +35,19 @@ describe('isUnsentFailure', () => {
     expect(
       isUnsentFailure(Object.assign(new Error('Unable to connect'), { code: 'ConnectionRefused' }))
     ).toBe(true)
+  })
+
+  it('counts a TLS handshake the peer ended as unsent, and only that reset', () => {
+    const reset = (message: string): TypeError =>
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error(message), { code: 'ECONNRESET' })
+      })
+    const handshake = reset(
+      'Client network socket disconnected before secure TLS connection was established'
+    )
+    expect(isUnsentFailure(handshake)).toBe(true)
+    // What Node raises for a reset after the request was written.
+    expect(isUnsentFailure(reset('read ECONNRESET'))).toBe(false)
   })
 
   it('never claims a failure that can follow a sent request', () => {
@@ -104,6 +120,37 @@ describe('HttpClient.send', () => {
     expect(calls).toBe(1)
   })
 
+  // §2.1 of the lifecycle-speed plan: a retired boot route accepts TCP and closes
+  // before the TLS handshake. A real socket, so the error is the one Node's fetch raises.
+  it('treats a TLS handshake the server closed as unsent, so a box POST is re-resolved', async () => {
+    const server = createServer((socket) => {
+      socket.destroy()
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no address')
+    try {
+      const error: unknown = await client((url, init) => fetch(url, init))
+        .send({
+          method: 'POST',
+          url: `https://127.0.0.1:${address.port}/exec`,
+          body: { json: { cmd: 'true' } },
+          raiseUnsent: true
+        })
+        .catch((caught: unknown) => caught)
+      expect(error).not.toBeInstanceOf(ZipboxError)
+      expect(isUnsentFailure(error)).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve()
+        })
+      })
+    }
+  })
+
   it('stops retrying the moment the caller aborts', async () => {
     const controller = new AbortController()
     let calls = 0
@@ -143,7 +190,8 @@ describe('BoxTransport 401', () => {
           : new Response('{"error":"unauthorized"}', { status: 401 })
       )
     const http = client(fetch)
-    const boxes = new BoxTransport(new ControlPlane(http, 'https://api.test', 'zb_key'), http)
+    const api = new ControlPlane(http, 'https://api.test', 'zb_key')
+    const boxes = new BoxTransport(api, http, () => Promise.reject(new Error('never waits')))
 
     const error: unknown = await boxes
       .request('sbx_1', { method: 'POST', path: '/exec' })
@@ -152,5 +200,112 @@ describe('BoxTransport 401', () => {
     expect(error).toBeInstanceOf(ZipboxError)
     expect(error).toMatchObject({ code: 'unauthorized', status: 401, retryable: true })
     expect(error instanceof ZipboxError ? error.message : '').toContain('has not received')
+  })
+})
+
+interface BoxSend {
+  at: number
+  url: string
+  authorization: string | null
+}
+
+describe('BoxTransport unsent failure', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  // A claimed box's baseUrl moves once, to its chosen name; exec redialled the old
+  // origin forever. Each unsent failure re-reads the box and retries on the new target.
+  it('re-reads the box after each unsent failure, on a ladder a successful read never resets', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let reads = 0
+    const sends: BoxSend[] = []
+    const fetch: FetchLike = (url, init) => {
+      if (url === 'https://api.test/sandbox/sbx_1') {
+        reads++
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'sbx_1',
+              status: 'running',
+              ready: true,
+              readiness: 'ready',
+              baseUrl: `https://box-${reads}.test`,
+              boxToken: `bt_${reads}`
+            })
+          )
+        )
+      }
+      const authorization = new Headers(init?.headers).get('authorization')
+      sends.push({ at: Date.now(), url, authorization })
+      if (sends.length <= 4) return Promise.reject(fetchFailed('ECONNREFUSED'))
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    }
+    const zb = new Zipbox({
+      apiKey: 'zb_test',
+      baseUrl: 'https://api.test',
+      fetch,
+      retryBaseDelayMs: 100,
+      pollIntervalMs: 1
+    })
+
+    const done = zb.sandbox('sbx_1').commands.signal('cmd_1', 'TERM')
+    await vi.advanceTimersByTimeAsync(1_000)
+    await done
+
+    // One read to start, then one readiness read per unsent failure.
+    expect(reads).toBe(5)
+    expect(sends.map((send) => send.url)).toEqual([
+      'https://box-1.test/exec/cmd_1/signal',
+      'https://box-2.test/exec/cmd_1/signal',
+      'https://box-3.test/exec/cmd_1/signal',
+      'https://box-4.test/exec/cmd_1/signal',
+      'https://box-5.test/exec/cmd_1/signal'
+    ])
+    expect(sends.at(-1)?.authorization).toBe('Bearer bt_5')
+    // base 100 ms, doubling, jitter at its floor (50%): 50, 100, 200, 400. A ladder
+    // reset by each successful read would wait 50 every time.
+    const gaps = sends.slice(1).map((send, index) => send.at - (sends[index]?.at ?? 0))
+    expect(gaps).toEqual([50, 100, 200, 400])
+  })
+
+  it('ends the call with the wait verdict when the re-read box is paused', async () => {
+    let reads = 0
+    const fetch: FetchLike = (url) => {
+      if (url !== 'https://api.test/sandbox/sbx_1') {
+        return Promise.reject(fetchFailed('ECONNREFUSED'))
+      }
+      reads++
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(
+            reads === 1
+              ? {
+                  id: 'sbx_1',
+                  status: 'running',
+                  ready: true,
+                  readiness: 'ready',
+                  baseUrl: 'https://box-1.test',
+                  boxToken: 'bt_1'
+                }
+              : { id: 'sbx_1', status: 'archived', ready: false, readiness: 'paused' }
+          )
+        )
+      )
+    }
+    const zb = new Zipbox({
+      apiKey: 'zb_test',
+      baseUrl: 'https://api.test',
+      fetch,
+      retryBaseDelayMs: 1
+    })
+
+    await expect(zb.sandbox('sbx_1').commands.signal('cmd_1', 'TERM')).rejects.toMatchObject({
+      code: 'box_not_running',
+      retryable: false
+    })
+    expect(reads).toBe(2)
   })
 })
