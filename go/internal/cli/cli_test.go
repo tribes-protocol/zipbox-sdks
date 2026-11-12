@@ -1,29 +1,47 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-const testKey = "zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+const (
+	testKey = "zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+	// otherKey is a key of another account, did:privy:u2.
+	otherKey = "zb_OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO"
+	// testAccount is the account a redeemed code signs in to.
+	testAccount = `{"userId":"did:privy:u1","email":"u1@example.com"}`
+)
 
 // fakeZipbox serves the control plane and one box from one server.
 func fakeZipbox(t *testing.T) *httptest.Server {
+	t.Helper()
+	return fakeZipboxAccount(t, testAccount)
+}
+
+// fakeZipboxAccount is fakeZipbox whose code redemption answers account as
+// the redeem answer's "account" (raw JSON; "" leaves it out).
+func fakeZipboxAccount(t *testing.T, account string) *httptest.Server {
 	t.Helper()
 	var server *httptest.Server
 	mux := http.NewServeMux()
@@ -51,9 +69,38 @@ func fakeZipbox(t *testing.T) *httptest.Server {
 		w.WriteHeader(403)
 		io.WriteString(w, `{"error":{"code":"machine_limit_reached","message":"You've reached this account's limit of 250 machines.","requestId":"r","retryable":false,"docsUrl":"https://zipbox.ai/docs/errors#machine_limit_reached"}}`)
 	}))
-	mux.HandleFunc("/account/whoami", auth(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"userId":"did:privy:u1","apiKey":{"id":"k1","name":"laptop","kind":"cli","last4":"TTTT","createdAt":"2026-10-19T00:00:00Z"}}`)
-	}))
+	// whoami knows testKey (did:privy:u1) and otherKey (did:privy:u2).
+	mux.HandleFunc("/account/whoami", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+otherKey {
+			io.WriteString(w, `{"userId":"did:privy:u2","apiKey":{"id":"k2","name":"desk","kind":"cli","last4":"OOOO","createdAt":"2026-10-19T00:00:00Z"}}`)
+			return
+		}
+		auth(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"userId":"did:privy:u1","apiKey":{"id":"k1","name":"laptop","kind":"cli","last4":"TTTT","createdAt":"2026-10-19T00:00:00Z"}}`)
+		})(w, r)
+	})
+	// Code redemption. A real code is opaque; this fake issues the PKCE
+	// challenge itself as the code, so a redeem succeeds only when the verifier
+	// hashes to it. The code is not a credential, so no Authorization rides along.
+	mux.HandleFunc("/account/cli/token", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Code     string `json:"code"`
+			Verifier string `json:"verifier"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&body)
+		sum := sha256.Sum256([]byte(body.Verifier))
+		if err != nil || r.Method != "POST" || r.Header.Get("Content-Type") != "application/json" ||
+			r.Header.Get("Authorization") != "" || body.Code != base64.RawURLEncoding.EncodeToString(sum[:]) {
+			w.WriteHeader(400)
+			io.WriteString(w, `{"error":{"code":"invalid_code","message":"bad code","requestId":"r","retryable":false}}`)
+			return
+		}
+		reply := fmt.Sprintf(`{"key":{"id":"k1","name":"laptop","kind":"cli","last4":"TTTT","createdAt":"2026-10-19T00:00:00Z"},"secret":%q`, testKey)
+		if account != "" {
+			reply += `,"account":` + account
+		}
+		io.WriteString(w, reply+"}")
+	})
 	mux.HandleFunc("/exec", auth(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
@@ -241,91 +288,570 @@ func TestLoginWithKeySavesAndVerifies(t *testing.T) {
 	}
 }
 
-func TestLoginCallback(t *testing.T) {
-	srv := &loginServer{state: "s3cret", origin: "https://zipbox.ai", keys: make(chan string, 1)}
-	server := httptest.NewServer(srv)
-	defer server.Close()
+// The listener takes only a GET /callback navigation. A POST with the right
+// state, form or JSON, is refused without a redeem from any origin, and a
+// preflight gets no CORS allowance: a key never arrives through the listener.
+func TestLoginCallbackRefusesAPost(t *testing.T) {
+	verifier, challenge := pkcePair()
+	srv, base, calls := codeServer(t, verifier)
 
-	pre, _ := http.NewRequest("OPTIONS", server.URL+"/callback", nil)
+	pre, _ := http.NewRequest("OPTIONS", base+"/callback", nil)
 	pre.Header.Set("Origin", "https://zipbox.ai")
+	pre.Header.Set("Access-Control-Request-Method", "GET")
 	pre.Header.Set("Access-Control-Request-Private-Network", "true")
 	resp, err := http.DefaultClient.Do(pre)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 204 || resp.Header.Get("Access-Control-Allow-Origin") != "https://zipbox.ai" ||
-		resp.Header.Get("Access-Control-Allow-Private-Network") != "true" {
+	if resp.StatusCode != 405 || resp.Header.Get("Access-Control-Allow-Origin") != "" ||
+		resp.Header.Get("Access-Control-Allow-Private-Network") != "" {
 		t.Fatalf("preflight %d %v", resp.StatusCode, resp.Header)
 	}
 
-	post := func(origin, state, key string) int {
-		body := fmt.Sprintf(`{"state":%q,"key":%q}`, state, key)
-		req, _ := http.NewRequest("POST", server.URL+"/callback", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		if origin != "" {
-			req.Header.Set("Origin", origin)
+	bodies := map[string]string{
+		"application/x-www-form-urlencoded": url.Values{"state": {"s3cret"}, "code": {challenge}}.Encode(),
+		"application/json":                  fmt.Sprintf(`{"state":"s3cret","code":%q}`, challenge),
+	}
+	for contentType, body := range bodies {
+		for _, origin := range []string{"", "https://zipbox.ai", "null"} {
+			// The query is valid too: only the method is wrong.
+			req, _ := http.NewRequest("POST", base+"/callback?state=s3cret&code="+challenge, strings.NewReader(body))
+			req.Header.Set("Content-Type", contentType)
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != 405 || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+				t.Fatalf("%s origin %q: a POST answered %d %v", contentType, origin, resp.StatusCode, resp.Header)
+			}
 		}
+	}
+	for _, method := range []string{"PUT", "HEAD"} {
+		req, _ := http.NewRequest(method, base+"/callback?state=s3cret&code="+challenge, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		return resp.StatusCode
+		if resp.StatusCode != 405 {
+			t.Fatalf("%s answered %d", method, resp.StatusCode)
+		}
 	}
-	if code := post("https://zipbox.ai", "wrong", testKey); code != 403 {
-		t.Fatalf("state mismatch answered %d", code)
+	resp, err = http.Get(base + "/other?state=s3cret&code=" + challenge)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if code := post("https://evil.example", "s3cret", testKey); code != 403 {
-		t.Fatalf("foreign origin answered %d", code)
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("another path answered %d", resp.StatusCode)
 	}
-	if code := post("https://zipbox.ai", "s3cret", "zb_short"); code != 400 {
-		t.Fatalf("malformed key answered %d", code)
-	}
-	select {
-	case <-srv.keys:
-		t.Fatal("a rejected request delivered a key")
-	default:
-	}
-	if code := post("https://zipbox.ai", "s3cret", testKey); code != 200 {
-		t.Fatalf("valid callback answered %d", code)
-	}
-	if got := <-srv.keys; got != testKey {
-		t.Fatalf("key %q", got)
-	}
-	if code := post("https://zipbox.ai", "s3cret", testKey); code != 409 {
-		t.Fatalf("a second callback answered %d, want 409", code)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("refused requests redeemed %d times", n)
 	}
 	select {
-	case <-srv.keys:
-		t.Fatal("a second callback delivered a key")
+	case got := <-srv.results:
+		t.Fatalf("a refused request delivered %+v", got)
 	default:
 	}
 }
 
-func TestBrowserLoginEndToEnd(t *testing.T) {
-	server := fakeZipbox(t)
-	h := newHarness(t, server.URL, "")
-	h.env["ZIPBOX_WEB_URL"] = "https://zipbox.ai"
-	// The "browser" is the cli/auth page: it posts the key to the callback.
-	h.app.browser = func(target string) error {
+const (
+	authDone   = "https://zipbox.ai/cli/auth/done"
+	authFailed = "https://zipbox.ai/cli/auth/done?error=1"
+)
+
+// codeServer is a loginServer whose redeem goes to the fake control plane with
+// verifier, counting the calls.
+func codeServer(t *testing.T, verifier string) (*loginServer, string, *atomic.Int32) {
+	t.Helper()
+	h := newHarness(t, fakeZipbox(t).URL, "")
+	calls := &atomic.Int32{}
+	srv := &loginServer{
+		state: "s3cret", origin: "https://zipbox.ai", web: "https://zipbox.ai", results: make(chan loginResult, 1),
+		redeem: func(ctx context.Context, code string) (signIn, error) {
+			calls.Add(1)
+			return h.app.redeemCode(ctx, code, verifier)
+		},
+	}
+	server := httptest.NewServer(srv)
+	t.Cleanup(server.Close)
+	return srv, server.URL, calls
+}
+
+// getCallback sends the page's loopback redirect, a top-level GET navigation,
+// and returns the status and Location without following the redirect. A
+// Location carrying the code or state fails the test.
+func getCallback(t *testing.T, base, origin string, query url.Values) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", base+"/callback?"+query.Encode(), nil)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	for _, values := range query {
+		for _, v := range values {
+			if v != "" && strings.Contains(loc, v) {
+				t.Fatalf("Location %q carries %q", loc, v)
+			}
+		}
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") != "" || resp.Header.Get("Access-Control-Allow-Private-Network") != "" {
+		t.Fatalf("callback answered with CORS headers %v", resp.Header)
+	}
+	if resp.StatusCode == 303 && resp.Header.Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("303 without Referrer-Policy: no-referrer: %v", resp.Header)
+	}
+	return resp.StatusCode, loc
+}
+
+func TestPKCEPair(t *testing.T) {
+	verifier, challenge := pkcePair()
+	sum := sha256.Sum256([]byte(verifier))
+	if len(verifier) != 43 || challenge != base64.RawURLEncoding.EncodeToString(sum[:]) {
+		t.Fatalf("verifier %q challenge %q", verifier, challenge)
+	}
+}
+
+func TestLoginCallbackCode(t *testing.T) {
+	verifier, challenge := pkcePair()
+	for _, origin := range []string{"", "null", "https://zipbox.ai"} {
+		srv, base, calls := codeServer(t, verifier)
+		query := url.Values{"state": {"s3cret"}, "code": {challenge}}
+		if code, loc := getCallback(t, base, origin, query); code != 303 || loc != authDone {
+			t.Fatalf("origin %q: answered %d %q", origin, code, loc)
+		}
+		if got := <-srv.results; got.in.secret != testKey || got.in.UserID != "did:privy:u1" || got.err != nil {
+			t.Fatalf("origin %q: result %+v", origin, got)
+		}
+		if code, loc := getCallback(t, base, origin, query); code != 303 || loc != authFailed || calls.Load() != 1 {
+			t.Fatalf("origin %q: a second callback answered %d %q after %d redeems", origin, code, loc, calls.Load())
+		}
+		select {
+		case <-srv.results:
+			t.Fatal("a second callback delivered a result")
+		default:
+		}
+	}
+}
+
+func TestLoginCallbackCodeRefusals(t *testing.T) {
+	verifier, challenge := pkcePair()
+	srv, base, calls := codeServer(t, verifier)
+	for name, c := range map[string]struct {
+		origin string
+		query  url.Values
+	}{
+		"wrong state":         {"", url.Values{"state": {"wrong"}, "code": {challenge}}},
+		"no state":            {"", url.Values{"code": {challenge}}},
+		"duplicate state":     {"", url.Values{"state": {"s3cret", "s3cret"}, "code": {challenge}}},
+		"duplicate code":      {"", url.Values{"state": {"s3cret"}, "code": {challenge, challenge}}},
+		"foreign origin":      {"https://evil.example", url.Values{"state": {"s3cret"}, "code": {challenge}}},
+		"key instead of code": {"", url.Values{"state": {"s3cret"}, "key": {testKey}}},
+		"key beside code":     {"null", url.Values{"state": {"s3cret"}, "code": {challenge}, "key": {testKey}}},
+		"empty key":           {"", url.Values{"state": {"s3cret"}, "code": {challenge}, "key": {""}}},
+		"bad code shape":      {"", url.Values{"state": {"s3cret"}, "code": {"short"}}},
+	} {
+		if code, loc := getCallback(t, base, c.origin, c.query); code != 303 || loc != authFailed {
+			t.Fatalf("%s: answered %d %q", name, code, loc)
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("refused requests redeemed %d times", n)
+	}
+	select {
+	case <-srv.results:
+		t.Fatal("a refused request delivered a result")
+	default:
+	}
+	// None of those spent the single use.
+	if code, loc := getCallback(t, base, "", url.Values{"state": {"s3cret"}, "code": {challenge}}); code != 303 || loc != authDone {
+		t.Fatalf("valid callback answered %d %q", code, loc)
+	}
+	if got := <-srv.results; got.in.secret != testKey {
+		t.Fatalf("result %+v", got)
+	}
+}
+
+func TestLoginCallbackCodeRedeemRefused(t *testing.T) {
+	verifier, _ := pkcePair()
+	_, unknown := pkcePair() // well-formed, but not a code the control plane issued
+	srv, base, calls := codeServer(t, verifier)
+	if code, loc := getCallback(t, base, "", url.Values{"state": {"s3cret"}, "code": {unknown}}); code != 303 || loc != authFailed {
+		t.Fatalf("refused redeem answered %d %q", code, loc)
+	}
+	got := <-srv.results
+	if calls.Load() != 1 || got.in.secret != "" || got.err == nil || !strings.Contains(got.err.Error(), "refused") {
+		t.Fatalf("result %+v after %d redeems", got, calls.Load())
+	}
+}
+
+// The "browser" is the cli/auth page: it hands back a code by a loopback
+// redirect, a top-level GET navigation with no Origin. code picks the code
+// from the URL's challenge; the challenge itself is what the fake control
+// plane redeems for the verifier.
+func codeBrowser(t *testing.T, code func(challenge string) string) func(string) error {
+	return func(target string) error {
 		go func() {
-			var port, state string
-			fmt.Sscanf(strings.ReplaceAll(strings.SplitN(target, "?", 2)[1], "&", " "), "port=%s state=%s", &port, &state)
-			body := fmt.Sprintf(`{"state":%q,"key":%q}`, state, testKey)
-			req, _ := http.NewRequest("POST", "http://127.0.0.1:"+port+"/callback", strings.NewReader(body))
-			req.Header.Set("Origin", "https://zipbox.ai")
-			if resp, err := http.DefaultClient.Do(req); err == nil {
+			query, _ := url.ParseQuery(strings.SplitN(target, "?", 2)[1])
+			if query.Has("delivery") || len(query.Get("challenge")) != 43 {
+				t.Errorf("login URL %q", target)
+			}
+			callback := url.Values{"state": {query.Get("state")}, "code": {code(query.Get("challenge"))}}
+			req, _ := http.NewRequest("GET", "http://127.0.0.1:"+query.Get("port")+"/callback?"+callback.Encode(), nil)
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			if resp, err := client.Do(req); err == nil {
 				resp.Body.Close()
 			}
 		}()
 		return nil
 	}
+}
+
+func TestBrowserLoginEndToEnd(t *testing.T) {
+	server := fakeZipbox(t)
+	h := newHarness(t, server.URL+"/", "")
+	h.env["ZIPBOX_WEB_URL"] = "https://zipbox.ai"
+	browser := codeBrowser(t, func(challenge string) string { return challenge })
+	// Before the page answers, someone who read the port and state tries to
+	// deliver their own key, by POST and by GET: both are refused without
+	// spending the single use, and the real code still lands.
+	h.app.browser = func(target string) error {
+		query, _ := url.ParseQuery(strings.SplitN(target, "?", 2)[1])
+		callback := "http://127.0.0.1:" + query.Get("port") + "/callback"
+		body := fmt.Sprintf(`{"state":%q,"key":%q}`, query.Get("state"), "zb_"+strings.Repeat("A", 43))
+		resp, err := http.Post(callback, "application/json", strings.NewReader(body))
+		if err != nil || resp.StatusCode != 405 {
+			t.Errorf("a POSTed key answered %v %v", resp, err)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		forged := url.Values{"state": {query.Get("state")}, "key": {"zb_" + strings.Repeat("A", 43)}}
+		resp, err = client.Get(callback + "?" + forged.Encode())
+		if err != nil || resp.StatusCode != 303 || resp.Header.Get("Location") != authFailed {
+			t.Errorf("a key in the query answered %v %v", resp, err)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return browser(target)
+	}
 	if code := h.run("login"); code != 0 {
 		t.Fatalf("exit %d: %s", code, h.err)
 	}
-	if !strings.Contains(h.err.String(), "https://zipbox.ai/cli/auth?port=") || !strings.Contains(h.out.String(), "did:privy:u1") {
+	if !strings.Contains(h.err.String(), "https://zipbox.ai/cli/auth?port=") || h.out.String() != "Signed in as u1@example.com with key laptop (…TTTT).\n" {
 		t.Fatalf("stderr %q stdout %q", h.err, h.out)
+	}
+	if cfg, err := h.app.loadConfig(); err != nil || cfg != (config{APIKey: testKey, UserID: "did:privy:u1", Email: "u1@example.com"}) {
+		t.Fatalf("saved %+v %v", cfg, err)
+	}
+}
+
+func TestBrowserLoginFailsWhenTheCodeIsRefused(t *testing.T) {
+	server := fakeZipbox(t)
+	h := newHarness(t, server.URL, "")
+	h.env["ZIPBOX_WEB_URL"] = "https://zipbox.ai"
+	h.app.browser = codeBrowser(t, func(string) string { _, other := pkcePair(); return other })
+	if code := h.run("login"); code != 1 || !strings.Contains(h.err.String(), "zipbox login again") {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	if _, err := h.app.loadConfig(); err == nil {
+		t.Fatal("a refused login saved a key")
+	}
+}
+
+// accountHarness is a browser login against a control plane whose redeem
+// answers account, with saved (when not nil) already in the config file.
+func accountHarness(t *testing.T, account string, saved *config) *harness {
+	t.Helper()
+	h := newHarness(t, fakeZipboxAccount(t, account).URL, "")
+	h.env["ZIPBOX_WEB_URL"] = "https://zipbox.ai"
+	h.app.browser = codeBrowser(t, func(challenge string) string { return challenge })
+	if saved != nil {
+		if err := h.app.saveConfig(*saved); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h
+}
+
+// assertNoKeyPrinted fails when either key reached stdout or stderr.
+func assertNoKeyPrinted(t *testing.T, h *harness) {
+	t.Helper()
+	for _, key := range []string{testKey, otherKey} {
+		if strings.Contains(h.out.String(), key) || strings.Contains(h.err.String(), key) {
+			t.Fatalf("a key was printed: stdout %q stderr %q", h.out, h.err)
+		}
+	}
+}
+
+func TestLoginNamesTheAccountByUserIDWhenItHasNoEmail(t *testing.T) {
+	h := accountHarness(t, `{"userId":"did:privy:u1","email":null}`, nil)
+	if code := h.run("login"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	if h.out.String() != "Signed in as did:privy:u1 with key laptop (…TTTT).\n" {
+		t.Fatalf("stdout %q", h.out)
+	}
+	if cfg, err := h.app.loadConfig(); err != nil || cfg != (config{APIKey: testKey, UserID: "did:privy:u1"}) {
+		t.Fatalf("saved %+v %v", cfg, err)
+	}
+	assertNoKeyPrinted(t, h)
+}
+
+// The API always names the account a code signed in to: a reply that does not
+// is refused and saves nothing.
+func TestLoginRefusesARedeemWithoutAnAccount(t *testing.T) {
+	for _, account := range []string{"", "null", "{}", `{"userId":"","email":"u1@example.com"}`, `{"email":"u1@example.com"}`} {
+		h := accountHarness(t, account, nil)
+		if code := h.run("login"); code != 1 || !strings.Contains(h.err.String(), "named no account") {
+			t.Fatalf("account %s: exit %d: %s", account, code, h.err)
+		}
+		if _, err := h.app.loadConfig(); err == nil {
+			t.Fatalf("account %s: saved a key", account)
+		}
+	}
+}
+
+// A login never replaces the saved key of another account without --force:
+// a code injected from someone else's approval would otherwise switch this
+// CLI to their account silently. The saved account comes from the config, or
+// for a config saved before it was recorded, from whoami with the saved key.
+func TestLoginRefusesToSwitchAccountsWithoutForce(t *testing.T) {
+	for name, c := range map[string]struct {
+		saved config
+		want  string
+	}{
+		"saved userId": {
+			config{APIKey: otherKey, UserID: "did:privy:u2", Email: "u2@example.com"},
+			"this CLI is signed in to u2@example.com, but the approval came from u1@example.com; if you meant to switch accounts, run zipbox login --force",
+		},
+		"old config, whoami": {
+			config{APIKey: otherKey},
+			"this CLI is signed in to did:privy:u2, but the approval came from u1@example.com; if you meant to switch accounts, run zipbox login --force",
+		},
+	} {
+		h := accountHarness(t, testAccount, &c.saved)
+		if code := h.run("login"); code != 1 || !strings.Contains(h.err.String(), "error: "+c.want+"\n") {
+			t.Fatalf("%s: exit %d: %q", name, code, h.err)
+		}
+		if cfg, err := h.app.loadConfig(); err != nil || cfg != c.saved {
+			t.Fatalf("%s: a refused login changed the config: %+v %v", name, cfg, err)
+		}
+		assertNoKeyPrinted(t, h)
+		h.err.Reset()
+		if code := h.run("login", "--force"); code != 0 || h.out.String() != "Signed in as u1@example.com with key laptop (…TTTT).\n" {
+			t.Fatalf("%s: --force exit %d: %q %q", name, code, h.out, h.err)
+		}
+		if cfg, err := h.app.loadConfig(); err != nil || cfg != (config{APIKey: testKey, UserID: "did:privy:u1", Email: "u1@example.com"}) {
+			t.Fatalf("%s: --force saved %+v %v", name, cfg, err)
+		}
+		assertNoKeyPrinted(t, h)
+	}
+}
+
+// A re-login to the same account replaces the key silently, and so does a
+// login over a saved key that no longer answers whoami (no saved account).
+func TestLoginReplacesTheSameAccountOrADeadKey(t *testing.T) {
+	for name, saved := range map[string]config{
+		"saved userId":       {APIKey: otherKey, UserID: "did:privy:u1", Email: "old@example.com"},
+		"old config, whoami": {APIKey: testKey},
+		"whoami fails":       {APIKey: "zb_" + strings.Repeat("X", 43)},
+	} {
+		h := accountHarness(t, testAccount, &saved)
+		if code := h.run("login"); code != 0 || !strings.Contains(h.out.String(), "Signed in as u1@example.com") {
+			t.Fatalf("%s: exit %d: %q %q", name, code, h.out, h.err)
+		}
+		if cfg, err := h.app.loadConfig(); err != nil || cfg != (config{APIKey: testKey, UserID: "did:privy:u1", Email: "u1@example.com"}) {
+			t.Fatalf("%s: saved %+v %v", name, cfg, err)
+		}
+	}
+}
+
+// --with-key names the key's account by whoami and makes the same check.
+func TestLoginWithKeyChecksTheAccount(t *testing.T) {
+	server := fakeZipbox(t)
+	for name, saved := range map[string]config{
+		"saved userId":       {APIKey: otherKey, UserID: "did:privy:u2", Email: "u2@example.com"},
+		"old config, whoami": {APIKey: otherKey},
+	} {
+		h := newHarness(t, server.URL, testKey+"\n")
+		if err := h.app.saveConfig(saved); err != nil {
+			t.Fatal(err)
+		}
+		savedName := "did:privy:u2"
+		if saved.Email != "" {
+			savedName = saved.Email
+		}
+		want := "this CLI is signed in to " + savedName +
+			", but that key belongs to did:privy:u1; if you meant to switch accounts, run zipbox login --with-key --force"
+		if code := h.run("login", "--with-key"); code != 1 || !strings.Contains(h.err.String(), "error: "+want+"\n") {
+			t.Fatalf("%s: exit %d: %q", name, code, h.err)
+		}
+		if cfg, err := h.app.loadConfig(); err != nil || cfg != saved {
+			t.Fatalf("%s: a refused login changed the config: %+v %v", name, cfg, err)
+		}
+		h.app.in = strings.NewReader(testKey + "\n")
+		if code := h.run("login", "--with-key", "--force"); code != 0 || h.out.String() != "Signed in as did:privy:u1 with key laptop (…TTTT).\n" {
+			t.Fatalf("%s: --force exit %d: %q %q", name, code, h.out, h.err)
+		}
+		if cfg, err := h.app.loadConfig(); err != nil || cfg != (config{APIKey: testKey, UserID: "did:privy:u1"}) {
+			t.Fatalf("%s: --force saved %+v %v", name, cfg, err)
+		}
+		assertNoKeyPrinted(t, h)
+	}
+	h := newHarness(t, server.URL, testKey+"\n")
+	if err := h.app.saveConfig(config{APIKey: testKey, UserID: "did:privy:u1"}); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("login", "--with-key"); code != 0 {
+		t.Fatalf("same account: exit %d: %s", code, h.err)
+	}
+}
+
+// The listener answers every malformed request target over HTTP, without a
+// redeem and without spending its single use, and keeps serving.
+func TestLoginCallbackMalformedTargets(t *testing.T) {
+	verifier, challenge := pkcePair()
+	srv, base, calls := codeServer(t, verifier)
+	for _, target := range []string{
+		"/%", "/a|b", "/callback?%", "/callback?a=^", "/callback?state=%zz&code=x",
+		"/callback?state=s3cret&code=%zz", "/callback?state=s3cret;code=" + challenge,
+		"/callback?state=s3cret&code=" + challenge + "%", "/%00", "*", "http://x/callback", "//callback",
+	} {
+		conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", target)
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		conn.Close()
+		if err != nil {
+			t.Fatalf("%q: no HTTP answer: %v", target, err)
+		}
+		resp.Body.Close()
+		if !(resp.StatusCode == 303 && resp.Header.Get("Location") == authFailed) && (resp.StatusCode < 400 || resp.StatusCode > 499) {
+			t.Fatalf("%q: answered %d %q", target, resp.StatusCode, resp.Header.Get("Location"))
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("malformed requests redeemed %d times", n)
+	}
+	if code, loc := getCallback(t, base, "", url.Values{"state": {"s3cret"}, "code": {challenge}}); code != 303 || loc != authDone {
+		t.Fatalf("valid callback answered %d %q", code, loc)
+	}
+	if got := <-srv.results; got.in.secret != testKey || got.err != nil {
+		t.Fatalf("result %+v", got)
+	}
+}
+
+// pasteHarness runs --no-browser against the fake control plane, counting the
+// redeems it receives.
+func pasteHarness(t *testing.T, stdin io.Reader) (*harness, *atomic.Int32) {
+	t.Helper()
+	inner := fakeZipbox(t)
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/account/cli/token" {
+			calls.Add(1)
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	h := newHarness(t, server.URL, "")
+	h.app.in = stdin
+	h.env["ZIPBOX_WEB_URL"] = "https://zipbox.ai"
+	h.app.browser = func(string) error { t.Error("--no-browser opened a browser"); return nil }
+	return h, calls
+}
+
+// --no-browser opens no listener: it prints a link carrying only the PKCE
+// challenge, reads the code the page shows from stdin, and redeems it with the
+// verifier.
+func TestPasteLoginEndToEnd(t *testing.T) {
+	stdin, feed := io.Pipe()
+	h, calls := pasteHarness(t, stdin)
+	stderr := &syncBuffer{}
+	h.app.err = stderr
+	done := make(chan int, 1)
+	go func() { done <- h.run("login", "--no-browser") }()
+	var target string
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if strings.Contains(stderr.String(), "Paste the sign-in code: ") {
+			lines := strings.Split(stderr.String(), "\n")
+			if lines[0] != "Open this link on any device, approve, then paste the code it shows here." {
+				t.Fatalf("stderr %q", stderr)
+			}
+			target = strings.TrimSpace(lines[1])
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no paste prompt: %q", stderr)
+		}
+	}
+	link, err := url.Parse(target)
+	if err != nil || link.Scheme+"://"+link.Host+link.Path != "https://zipbox.ai/cli/auth" {
+		t.Fatalf("--no-browser URL %q", target)
+	}
+	query := link.Query()
+	if len(query.Get("challenge")) != 43 || query.Get("paste") != "1" || len(query) != 2 {
+		t.Fatalf("--no-browser URL %q", target)
+	}
+	// The fake issues the challenge as the code, so the redeem succeeds only
+	// when the CLI sends the verifier that hashes to it.
+	if _, err := io.WriteString(feed, "  "+query.Get("challenge")+"  \n"); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-done; code != 0 || !strings.Contains(h.out.String(), "Signed in as u1@example.com") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("%d redeems", calls.Load())
+	}
+	if cfg, err := h.app.loadConfig(); err != nil || cfg.APIKey != testKey || cfg.UserID != "did:privy:u1" {
+		t.Fatalf("saved %+v %v", cfg, err)
+	}
+}
+
+func TestPasteLoginRefusesAMalformedCode(t *testing.T) {
+	for _, pasted := range []string{"short\n", testKey + "\n", ""} {
+		h, calls := pasteHarness(t, strings.NewReader(pasted))
+		if code := h.run("login", "--no-browser"); code != 1 || !strings.Contains(h.err.String(), "sign-in code") {
+			t.Fatalf("pasted %q: exit %d: %s", pasted, code, h.err)
+		}
+		if calls.Load() != 0 {
+			t.Fatalf("pasted %q: redeemed %d times", pasted, calls.Load())
+		}
+		if _, err := h.app.loadConfig(); err == nil {
+			t.Fatalf("pasted %q: saved a key", pasted)
+		}
+	}
+}
+
+func TestPasteLoginFailsWhenTheCodeIsRefused(t *testing.T) {
+	_, other := pkcePair() // well-formed, but not this login's code
+	h, calls := pasteHarness(t, strings.NewReader(other+"\n"))
+	if code := h.run("login", "--no-browser"); code != 1 || !strings.Contains(h.err.String(), "refused (HTTP 400)") {
+		t.Fatalf("exit %d: %s", code, h.err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("%d redeems", calls.Load())
+	}
+	if _, err := h.app.loadConfig(); err == nil {
+		t.Fatal("a refused login saved a key")
 	}
 }
 

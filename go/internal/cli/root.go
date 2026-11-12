@@ -63,11 +63,16 @@ func (a *app) client() (*zipbox.Client, error) {
 	if key == "" {
 		return nil, errNotLoggedIn
 	}
+	return a.clientFor(key), nil
+}
+
+// clientFor is a client authenticating with key.
+func (a *app) clientFor(key string) *zipbox.Client {
 	opts := []zipbox.Option{zipbox.WithHTTPClient(a.http)}
 	if base := a.getenv("ZIPBOX_API_URL"); base != "" {
 		opts = append(opts, zipbox.WithBaseURL(base))
 	}
-	return zipbox.New(key, opts...), nil
+	return zipbox.New(key, opts...)
 }
 
 var errNotLoggedIn = errors.New("not logged in: run `zipbox login`, or set ZIPBOX_API_KEY")
