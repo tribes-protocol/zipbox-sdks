@@ -11,6 +11,7 @@ export interface ApiRequest {
   headers?: Record<string, string>
   body?: HttpBody
   retry?: boolean
+  unwrap?: (response: Response) => Promise<Response>
   signal?: AbortSignal | undefined
 }
 
@@ -34,6 +35,7 @@ export class ControlPlane {
       headers: { authorization: `Bearer ${this.#apiKey}`, ...request.headers },
       ...(request.body === undefined ? {} : { body: request.body }),
       ...(request.retry === undefined ? {} : { retry: request.retry }),
+      ...(request.unwrap === undefined ? {} : { unwrap: request.unwrap }),
       signal: request.signal
     })
   }
@@ -74,6 +76,19 @@ function privateUnreachable(id: string, detail: SandboxDetail): ZipboxError {
   })
 }
 
+/**
+ * A connection opened to a box's last known origin while a resume is in flight, so
+ * the first call after it skips the TCP and TLS round trips. The box's host
+ * terminates TLS and keeps serving while the box is paused.
+ */
+export interface BoxPreconnect {
+  baseUrl: string
+  controller: AbortController
+}
+
+// The box's health route: unauthenticated, cheap, and what its host itself probes.
+const PRECONNECT_PATH = '/healthz'
+
 function resolvedFromDetail(detail: SandboxDetail): ResolvedBox | null {
   if (!detail.ready || typeof detail.baseUrl !== 'string' || typeof detail.boxToken !== 'string') {
     return null
@@ -103,6 +118,9 @@ export class BoxTransport {
   readonly #inFlight = new Map<string, Promise<ResolvedBox>>()
   // Private boxes this client has already reached once.
   readonly #reachable = new Set<string>()
+  // The last origin each box answered on, kept across invalidate: a paused box's
+  // detail has none, and its resume pre-connects to the one it had.
+  readonly #lastOrigins = new Map<string, ResolvedBox>()
 
   constructor(
     private readonly api: ControlPlane,
@@ -117,7 +135,41 @@ export class BoxTransport {
       this.#boxes.delete(detail.id)
     } else {
       this.#boxes.set(detail.id, resolved)
+      this.#lastOrigins.set(detail.id, resolved)
     }
+  }
+
+  /**
+   * Open a connection to the box's last known origin, in parallel with its resume.
+   * Null when this client never saw the box ready, or the box is private (off its
+   * tailnet the connect would hang). Never awaited and never retried.
+   *
+   * Safe to dial early, unlike a create's placed origin: it is the origin a ready answer
+   * already named for this box, an existing name whose DNS record is live and proven,
+   * never a fresh name.
+   */
+  preconnect(id: string): BoxPreconnect | null {
+    const last = this.#lastOrigins.get(id)
+    if (last === undefined || last.detail.privateMode === true) return null
+    return this.preconnectOrigin(last.baseUrl)
+  }
+
+  /** Open a connection to `baseUrl`. Never awaited and never retried. */
+  preconnectOrigin(baseUrl: string): BoxPreconnect {
+    const origin = baseUrl.replace(/\/+$/, '')
+    const controller = new AbortController()
+    this.http.preconnect(`${origin}${PRECONNECT_PATH}`, controller.signal)
+    return { baseUrl: origin, controller }
+  }
+
+  /**
+   * Keep a pre-connect only while the resume answers on the same origin: a box that
+   * moved (a name cutover, private mode) is reached the normal way, and the stale
+   * connection is dropped. An answer that names no origin yet leaves it alone.
+   */
+  settlePreconnect(preconnect: BoxPreconnect | null, detail: SandboxDetail | null): void {
+    if (preconnect === null || detail === null || typeof detail.baseUrl !== 'string') return
+    if (detail.baseUrl.replace(/\/+$/, '') !== preconnect.baseUrl) preconnect.controller.abort()
   }
 
   invalidate(id: string): void {
@@ -231,6 +283,7 @@ export class BoxTransport {
     const resolved = resolvedFromDetail(detail)
     if (resolved === null) throw boxNotReadyError(id, detail)
     this.#boxes.set(id, resolved)
+    this.#lastOrigins.set(id, resolved)
     return resolved
   }
 }

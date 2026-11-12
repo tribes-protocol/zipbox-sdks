@@ -1,5 +1,5 @@
 // Create (or reuse) a box, run a command, write and read a file, publish a port,
-// and stop the box. Run: ZIPBOX_API_KEY=zb_… npx tsx quickstart.ts
+// and pause the box. Run: ZIPBOX_API_KEY=zb_… npx tsx quickstart.ts
 import { Zipbox } from '@zipbox/sdk'
 
 const zb = new Zipbox()
@@ -19,4 +19,4 @@ await box.execBackground('python3 -m http.server 8000', { cwd: '/root/workspace'
 const { url } = await box.preview.create(8000)
 console.log(`serving /root/workspace at ${url}`)
 
-await box.stop()
+await box.pause()

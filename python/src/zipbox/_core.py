@@ -11,18 +11,20 @@ import random
 import shlex
 import ssl
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 from zipbox._backoff import Backoff
 from zipbox._effects import (
     CloseStream,
+    DropPreconnect,
     Emit,
     HttpRequest,
     HttpResponse,
     Op,
+    Preconnect,
     ReadAll,
     ReadChunk,
     Sleep,
@@ -48,12 +50,16 @@ from zipbox._models import (
 )
 from zipbox._sse import SseMessage, SseParser
 
-VERSION = "0.1.7"
+VERSION = "0.2.0"
 DEFAULT_API_URL = "https://api.tribes.xyz"
 WORKSPACE = "/root/workspace"
 _USER_AGENT = f"zipbox-python/{VERSION}"
+# The box's health route: unauthenticated and cheap. A resume pre-connects with it.
+PRECONNECT_PATH = "/healthz"
+# The media type create asks for: its answer streamed once the box is placed.
+CLAIM_STREAM_MEDIA_TYPE = "application/x-ndjson"
 # get_or_create's list filter: GET /sandbox rows carry no readiness, so the list reads status.
-_DEAD_STATUSES = frozenset({"destroyed", "stopped", "deleting"})
+_DEAD_STATUSES = frozenset({"destroyed", "deleting"})
 _READINESS = frozenset(
     {"ready", "settling", "awaits_tailnet", "paused", "start_failed", "deleting", "gone"}
 )
@@ -76,6 +82,9 @@ _SCREENSHOT = (
 )
 
 CommandLine = str | Sequence[str]
+# What a wait waits for: the box answering (ready), or its Pause taking effect
+# (paused). It is the ``until`` of ``GET /sandbox/:id/wait``.
+WaitTarget = Literal["ready", "paused"]
 
 
 def fork_ended_error(fork: SandboxFork) -> ZipboxError | None:
@@ -136,7 +145,7 @@ def resolve_config(
 
 def _fallback_readiness(detail: SandboxDetail) -> str:
     """The rule before ``readiness``, for a control plane that does not send it: ready,
-    private and waiting for a tailnet, ended (destroyed, stopped, deleting), or still
+    private and waiting for a tailnet, ended (destroyed, deleting), or still
     settling. Remove once every control plane sends ``readiness``."""
     if detail.ready:
         return "ready"
@@ -148,8 +157,10 @@ def _fallback_readiness(detail: SandboxDetail) -> str:
         and bool(detail.agent_public_key)
     ):
         return "awaits_tailnet"
-    if detail.status in ("destroyed", "stopped"):
+    if detail.status == "destroyed":
         return "gone"
+    if detail.status == "paused":
+        return "paused"
     if detail.status == "deleting":
         return "deleting"
     return "settling"
@@ -163,11 +174,11 @@ def readiness_of(detail: SandboxDetail) -> str:
 
 
 def _paused_remedy(detail: SandboxDetail) -> str:
-    """Start it, unless the server says it cannot start now."""
+    """Resume it, unless the server says it cannot resume now."""
     actions = detail.allowed_actions
-    if actions is None or "start" in actions:
-        return "start it first"
-    return "it cannot be started now; see its allowed_actions"
+    if actions is None or "resume" in actions:
+        return "resume it with sandboxes.resume"
+    return "it cannot be resumed now; see its allowed_actions"
 
 
 def ended_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError | None:
@@ -177,17 +188,14 @@ def ended_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError | None:
     if readiness == "paused":
         return ZipboxError(
             "box_not_running",
-            f"Box {sandbox_id} is paused and nothing will start it; {_paused_remedy(detail)}.",
+            f"Box {sandbox_id} is paused and nothing will resume it; {_paused_remedy(detail)}.",
             retryable=False,
         )
     if readiness == "start_failed":
-        remedy = (
-            "its name was released; create it again"
-            if detail.status == "stopped"
-            else "start it again"
-        )
         return ZipboxError(
-            "start_failed", f"Box {sandbox_id} failed to start; {remedy}.", retryable=False
+            "start_failed",
+            f"Box {sandbox_id} failed to start; {_paused_remedy(detail)}.",
+            retryable=False,
         )
     if readiness in ("deleting", "gone"):
         return ZipboxError(
@@ -196,6 +204,51 @@ def ended_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError | None:
             retryable=False,
         )
     return None
+
+
+def pause_ended_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError | None:
+    """The error a wait for a Pause raises for a box that will not reach ``paused`` by
+    itself, or None while it may (paused, settling). A box that reads ready again had
+    its Pause cancelled or refused; a deleted, gone or failed box will not pause. Each
+    is an answered verdict, never retryable."""
+    readiness = readiness_of(detail)
+    if readiness in ("paused", "settling"):
+        return None
+    if readiness in ("ready", "awaits_tailnet"):
+        return ZipboxError(
+            "conflict",
+            f"Box {sandbox_id} is running: its pause was cancelled or did not take effect.",
+            retryable=False,
+        )
+    return ZipboxError(
+        "conflict", f"Box {sandbox_id} is {readiness} and will not pause.", retryable=False
+    )
+
+
+def _settle(sandbox_id: str, detail: SandboxDetail, until: WaitTarget) -> SandboxDetail | None:
+    """One read inside a wait: the detail once the wait is over, None while the box may
+    still get there. A box that will not get there by itself raises its answered
+    verdict. A wait for ``ready`` also ends on ``awaits_tailnet`` (a private box
+    running with its key: the caller seals an auth key to it)."""
+    if until == "ready":
+        ended = ended_error(sandbox_id, detail)
+        if ended is not None:
+            raise ended
+        return None if readiness_of(detail) == "settling" else detail
+    ended = pause_ended_error(sandbox_id, detail)
+    if ended is not None:
+        raise ended
+    return detail if readiness_of(detail) == "paused" else None
+
+
+def _is_detail(data: Any) -> bool:
+    """Whether a lifecycle or create answer carries the box's detail."""
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("id"), str)
+        and isinstance(data.get("status"), str)
+        and isinstance(data.get("ready"), bool)
+    )
 
 
 def box_not_ready_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError:
@@ -213,7 +266,7 @@ def box_not_ready_error(sandbox_id: str, detail: SandboxDetail) -> ZipboxError:
         )
     return ZipboxError(
         "box_not_running",
-        f"Box {sandbox_id} is {detail.status} and not ready; start it first.",
+        f"Box {sandbox_id} is {detail.status} and not ready; resume it with sandboxes.resume.",
         # Without readiness (an older control plane), the rule before it: booting or
         # restarting comes back by itself, and nothing else does.
         retryable=detail.status in ("provisioning", "running")
@@ -262,6 +315,59 @@ def _json(response: HttpResponse) -> Any:
 
 def _encode(body: Any) -> bytes:
     return json.dumps(body, separators=(",", ":")).encode()
+
+
+def read_claim_stream(response: HttpResponse) -> Op[HttpResponse]:
+    """Read a create's answer (conformance README, streamed create).
+
+    A server that streamed it sends ``{"type":"placed","baseUrl"}`` the moment the box is
+    placed, then ``{"type":"answer","status","headers","body"}``: the answer it would have
+    given unstreamed, returned as that response so it is read exactly like one. The placed
+    line is informational and never dialled: its origin is handed out before its DNS
+    record is known to be live. Any other response is read whole and returned as it is. A
+    stream that ends before its answer raises a retryable ``unavailable``, as a dropped
+    connection does; create retries it with its Idempotency-Key and gets the same box.
+    """
+    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if response.handle is None:
+        return response
+    if content_type != CLAIM_STREAM_MEDIA_TYPE:
+        body = yield ReadAll(response)
+        return HttpResponse(response.status, response.headers, body)
+    buffer = b""
+    while True:
+        chunk: bytes = yield ReadChunk(response)
+        buffer += chunk
+        while b"\n" in buffer:
+            raw, buffer = buffer.split(b"\n", 1)
+            if not raw.strip():
+                continue
+            try:
+                line = json.loads(raw)
+            except ValueError as error:
+                raise ZipboxError(
+                    "unavailable", f"unreadable create stream: {error}", retryable=True
+                ) from error
+            if not isinstance(line, dict):
+                continue
+            if line.get("type") == "answer" and isinstance(line.get("status"), int):
+                # Read to its end (the server closes right after): the connection goes
+                # back to the pool.
+                yield ReadAll(response)
+                headers = line.get("headers")
+                answer_headers = {"content-type": "application/json"}
+                if isinstance(headers, dict):
+                    answer_headers.update(
+                        {str(k).lower(): v for k, v in headers.items() if isinstance(v, str)}
+                    )
+                body = line.get("body")
+                return HttpResponse(
+                    line["status"], answer_headers, b"" if body is None else _encode(body)
+                )
+        if not chunk:
+            raise ZipboxError(
+                "unavailable", "the create stream ended before its answer", retryable=True
+            )
 
 
 def exec_body(
@@ -398,6 +504,9 @@ class Core:
         self._targets: dict[str, BoxTarget] = {}
         # Private boxes this client has reached at least once.
         self._reachable: set[str] = set()
+        # The last origin each box answered on, kept across ``forget``: a paused box's
+        # detail has none, and its resume pre-connects to the one it had.
+        self._last_origins: dict[str, BoxTarget] = {}
 
     # ------------------------------------------------------------------ plumbing
 
@@ -421,6 +530,7 @@ class Core:
         retry: bool,
         passthrough: frozenset[int] = frozenset(),
         box_ladder: Backoff | None = None,
+        unwrap: Callable[[HttpResponse], Op[HttpResponse]] | None = None,
     ) -> Op[HttpResponse]:
         """Send with the SDK retry rule; raise ``ZipboxError`` on a non-2xx status.
 
@@ -431,6 +541,10 @@ class Core:
         With ``box_ladder`` (a box call's unsent ladder) that failure is raised instead,
         for the caller to re-read the box, and the ladder resets whenever a request is
         answered.
+
+        ``unwrap`` turns the response into the one the request answers before its status
+        is read (a streamed create's last line); a failure there is retried like a
+        dropped connection.
         """
         attempt = 0
         backoff = self._backoff()
@@ -438,6 +552,8 @@ class Core:
         while True:
             try:
                 response: HttpResponse = yield request
+                if unwrap is not None:
+                    response = yield from unwrap(response)
             except ZipboxError as network_error:
                 if network_error.unsent:
                     if box_ladder is not None:
@@ -470,8 +586,10 @@ class Core:
         body: Any = None,
         headers: Mapping[str, str] | None = None,
         retry: bool | None = None,
+        unwrap: Callable[[HttpResponse], Op[HttpResponse]] | None = None,
     ) -> Op[Any]:
-        """Call the control plane with the API key; return the parsed JSON body."""
+        """Call the control plane with the API key; return the parsed JSON body. With
+        ``unwrap`` the response is streamed and handed to it before its status is read."""
         hdrs = {
             "authorization": f"Bearer {self.config.api_key}",
             "user-agent": _USER_AGENT,
@@ -482,8 +600,12 @@ class Core:
             payload = _encode(body)
             hdrs["content-type"] = "application/json"
         hdrs.update(headers or {})
-        request = HttpRequest(method, self.config.base_url + path, hdrs, payload)
-        response = yield from self.send(request, retry=method == "GET" if retry is None else retry)
+        request = HttpRequest(
+            method, self.config.base_url + path, hdrs, payload, stream=unwrap is not None
+        )
+        response = yield from self.send(
+            request, retry=method == "GET" if retry is None else retry, unwrap=unwrap
+        )
         return _json(response)
 
     def target(self, sandbox_id: str) -> Op[BoxTarget]:
@@ -627,6 +749,12 @@ class Core:
     def get(self, sandbox_id: str) -> Op[SandboxDetail]:
         """GET /sandbox/:id, refreshing the cached box token as a side effect."""
         data = yield from self.control("GET", f"/sandbox/{quote(sandbox_id, safe='')}")
+        return self.remember(data, sandbox_id)
+
+    def remember(self, data: dict[str, Any], sandbox_id: str | None = None) -> SandboxDetail:
+        """Cache a detail's address and token, and return the detail without the token."""
+        if sandbox_id is None:
+            sandbox_id = str(data["id"])
         # The token lives in the cache only, never on a returned (loggable) model.
         token = data.pop("boxToken", None)
         detail = SandboxDetail.from_json(data)
@@ -641,6 +769,7 @@ class Core:
             if previous is None or previous.base_url != target.base_url or not target.private:
                 self._reachable.discard(sandbox_id)
             self._targets[sandbox_id] = target
+            self._last_origins[sandbox_id] = target
         else:
             self.forget(sandbox_id)
         return detail
@@ -658,17 +787,64 @@ class Core:
                     raise
                 yield Sleep(max((error.retry_after_ms or 0) / 1000, backoff.next()))
 
-    def wait_ready(self, sandbox_id: str) -> Op[SandboxDetail]:
-        """Re-read the box with backoff until it is ready. No deadline.
+    def _read_wait(self, sandbox_id: str, until: WaitTarget) -> Op[SandboxDetail]:
+        """GET /sandbox/:id/wait?until=…: the box's detail once the server stops holding."""
+        data = yield from self.control(
+            "GET", f"/sandbox/{quote(sandbox_id, safe='')}/wait?until={until}"
+        )
+        if not _is_detail(data):
+            raise ZipboxError(
+                "unavailable", "unexpected response for GET /sandbox/:id/wait", retryable=False
+            )
+        return self.remember(data, sandbox_id)
 
-        The server's ``readiness`` decides: ``settling`` keeps reading; a paused box
-        raises ``box_not_running``, a failed start ``start_failed``, a deleting or gone
-        box ``conflict``, none of them retryable. A private box that has not joined a
-        tailnet (``awaits_tailnet``) is returned as soon as it is running with its
-        ``agent_public_key``: the point at which a Tailscale auth key can be sealed to
-        it. A read that fails with a retryable error goes on the same ladder, never
-        sooner than its ``retry_after_ms``.
+    def wait_until(self, sandbox_id: str, until: WaitTarget) -> Op[SandboxDetail]:
+        """Wait until the box reaches ``until``, on ``GET /sandbox/:id/wait``. No deadline.
+
+        The server holds the request until the box gets there (pushed when the host
+        answers, no polling), until it cannot get there by itself, or until its hold
+        limit passes. A held answer that is still settling is asked again at once: the
+        server did the waiting. A read that fails with a retryable error goes on the
+        poll ladder, never sooner than its ``retry_after_ms``. An API that predates
+        ``/wait`` answers it 404 on a box that exists: then this is the poll on
+        ``GET /sandbox/:id`` it replaced, whose 404 is the box's own.
         """
+        backoff = self._poll_backoff()
+        while True:
+            retry_after_s = 0.0
+            try:
+                detail = yield from self._read_wait(sandbox_id, until)
+            except ZipboxError as error:
+                if error.code == "not_found":
+                    return (yield from self._poll_until(sandbox_id, until))
+                if not error.retryable:
+                    raise
+                retry_after_s = (error.retry_after_ms or 0) / 1000
+            else:
+                done = _settle(sandbox_id, detail, until)
+                if done is not None:
+                    return done
+                backoff.reset()
+                continue
+            yield Sleep(max(retry_after_s, backoff.next()))
+
+    def wait_ready(self, sandbox_id: str) -> Op[SandboxDetail]:
+        """Wait until the box is ready (``wait_until`` for ``ready``). No deadline.
+
+        The server's ``readiness`` decides: a paused box raises ``box_not_running``, a
+        failed start ``start_failed``, a deleting or gone box ``conflict``, none of
+        them retryable. A private box that has not joined a tailnet
+        (``awaits_tailnet``) is returned as soon as it is running with its
+        ``agent_public_key``: the point at which a Tailscale auth key can be sealed to
+        it.
+        """
+        return (yield from self.wait_until(sandbox_id, "ready"))
+
+    def _poll_until(self, sandbox_id: str, until: WaitTarget) -> Op[SandboxDetail]:
+        """The wait for an API without ``/wait``: re-read ``GET /sandbox/:id`` with
+        backoff, never on a deadline, until the box reaches ``until`` or will not get
+        there by itself. A read that fails with a retryable error (a control-plane
+        deploy) goes on the same ladder, never sooner than its ``retry_after_ms``."""
         backoff = self._poll_backoff()
         while True:
             retry_after_s = 0.0
@@ -679,11 +855,9 @@ class Core:
                     raise
                 retry_after_s = (error.retry_after_ms or 0) / 1000
             else:
-                ended = ended_error(sandbox_id, detail)
-                if ended is not None:
-                    raise ended
-                if readiness_of(detail) != "settling":
-                    return detail
+                done = _settle(sandbox_id, detail, until)
+                if done is not None:
+                    return done
             yield Sleep(max(retry_after_s, backoff.next()))
 
     def create(
@@ -695,7 +869,9 @@ class Core:
         mailbox: bool | None = None,
         private: bool | None = None,
     ) -> Op[SandboxDetail]:
-        """Claim a box (idempotent) and wait until it is ready."""
+        """Claim a box (idempotent) and return it once it answers: at once when the
+        server bound a booted machine inside the request (``ready`` in its answer),
+        else after waiting for it."""
         body: dict[str, Any] = {}
         if name is not None:
             body["name"] = name
@@ -707,14 +883,26 @@ class Core:
             body["mailbox"] = mailbox
         if private is not None:
             body["private"] = private
+        # The answer streamed (conformance README, streamed create); its placed line is
+        # never dialled. An unstreamed answer reads as before.
         created = yield from self.control(
             "POST",
             "/sandbox/identity/claim",
             body=body,
-            headers={"idempotency-key": str(uuid.uuid4())},
+            headers={
+                "idempotency-key": str(uuid.uuid4()),
+                "accept": f"{CLAIM_STREAM_MEDIA_TYPE}, application/json",
+            },
             retry=True,
+            unwrap=read_claim_stream,
         )
-        return (yield from self.wait_ready(str(created["sandboxId"])))
+        sandbox_id = str(created["sandboxId"])
+        answered = {**created, "id": sandbox_id}
+        if _is_detail(answered):
+            detail = SandboxDetail.from_json(answered)
+            if readiness_of(detail) == "ready" and detail.base_url:
+                return self.remember(answered)
+        return (yield from self.wait_ready(sandbox_id))
 
     def get_or_create(
         self,
@@ -725,28 +913,31 @@ class Core:
         mailbox: bool | None = None,
         private: bool | None = None,
     ) -> Op[SandboxDetail]:
-        """The live box with this name, started if stopped; created with the options if
+        """The live box with this name, resumed if paused; created with the options if
         there is none. The options apply only on create: a box that already has this
         name is returned as it is, even when it differs (another tier, not private)."""
         boxes = yield from self.list_sandboxes()
         for box in boxes:
             if box.name == name and box.status not in _DEAD_STATUSES:
-                # "stopping": a stop is still landing; start() waits it out, then starts.
-                # "pausing": paused while its backup uploads; the start boots it at once.
-                if box.status in ("archived", "stopping", "pausing"):
+                # "stopping": a Pause is still landing; request_resume waits it out,
+                # then resumes.
+                if box.status in ("paused", "stopping"):
+                    accepted: SandboxDetail | None = None
                     try:
-                        yield from self.start(box.id)
+                        accepted = yield from self.request_resume(box.id)
                     except ZipboxError as error:
                         # The name was being deleted: it is gone now, so make it.
                         if error.code == "not_found":
                             break
-                        # Another caller started it first: the server's idempotent
-                        # answer to a second restore. A box coming up is waited on.
+                        # Another caller resumed it first: the server's idempotent
+                        # answer to a second resume. A box coming up is waited on.
                         if error.code != "conflict":
                             raise
                         detail = yield from self.get_in_wait(box.id)
                         if detail.status not in ("provisioning", "running"):
                             raise
+                    if accepted is not None and readiness_of(accepted) == "ready":
+                        return accepted
                 return (yield from self.wait_ready(box.id))
         return (
             yield from self.create(
@@ -856,13 +1047,36 @@ class Core:
             )
         return fork
 
-    def lifecycle(self, sandbox_id: str, action: str, body: Any = None) -> Op[None]:
-        """POST /sandbox/:id/<action>."""
+    def lifecycle(self, sandbox_id: str, action: str, body: Any = None) -> Op[SandboxDetail | None]:
+        """POST /sandbox/:id/<action>. The answer is the box's detail: its final state
+        (200) when the host answered within the server's budget, or its state in
+        transition (202). None for an answer that carries no detail."""
         self.forget(sandbox_id)
-        yield from self.control(
+        data = yield from self.control(
             "POST", f"/sandbox/{quote(sandbox_id, safe='')}/{action}", body=body
         )
-        return None
+        return self.remember(data, sandbox_id) if _is_detail(data) else None
+
+    def _finish(
+        self, sandbox_id: str, until: WaitTarget, accepted: SandboxDetail | None
+    ) -> Op[SandboxDetail]:
+        """The accepted detail when it already shows ``until``, else the wait for it."""
+        if accepted is not None and readiness_of(accepted) == until:
+            return accepted
+        return (yield from self.wait_until(sandbox_id, until))
+
+    def pause(self, sandbox_id: str) -> Op[SandboxDetail]:
+        """Pause the box and return it paused: at once when the server answered with the
+        final state (200), else after waiting for the Pause to take effect (202)."""
+        accepted = yield from self.lifecycle(sandbox_id, "pause")
+        return (yield from self._finish(sandbox_id, "paused", accepted))
+
+    def resume(self, sandbox_id: str) -> Op[SandboxDetail]:
+        """Resume the box and return it ready: at once when the server answered with the
+        final state (200), else after waiting for it (202, or a Pause still landing,
+        see ``request_resume``). Credit-gated: ``insufficient_credits``."""
+        accepted = yield from self.request_resume(sandbox_id)
+        return (yield from self._finish(sandbox_id, "ready", accepted))
 
     def cancel_transition(self, sandbox_id: str) -> Op[TransitionCancelOutcome]:
         """POST /sandbox/:id/transition/cancel; the server's outcome, not retried."""
@@ -913,7 +1127,7 @@ class Core:
             if not box_key or detail.status not in _SEALABLE_STATUSES:
                 raise ZipboxError(
                     "box_not_running",
-                    f"Box {sandbox_id} is {detail.status}; start it before connecting Tailscale.",
+                    f"Box {sandbox_id} is {detail.status}; resume it before connecting Tailscale.",
                     # A box that is settling grows its key by itself; one that is paused
                     # or gone does not.
                     retryable=readiness_of(detail) == "settling",
@@ -935,27 +1149,66 @@ class Core:
         yield from self.control("DELETE", f"/sandbox/{quote(sandbox_id, safe='')}/tailscale")
         return None
 
-    def start(self, sandbox_id: str) -> Op[None]:
-        """Start (restore) a stopped box.
+    def request_resume(self, sandbox_id: str) -> Op[SandboxDetail | None]:
+        """Send Resume, and return the detail it answered with (None when the box came
+        back by itself).
 
-        A stop is accepted at once but its disk takes seconds to minutes to land;
-        meanwhile the box reads ``stopping`` and the restore answers ``conflict``.
-        Wait that out with backoff and start the box once it reads ``archived``. A
-        box that comes out of the wait already starting or running (a resize restores
-        itself, a failed archive leaves it running) is started. Any other
-        ``conflict`` is raised as it came.
+        A Pause the host has not answered yet leaves the box ``stopping``, and Resume
+        answers ``conflict`` meanwhile. Wait that out with backoff and resume the box
+        once it reads ``paused``. A box that comes out of the wait already starting or
+        running (a resize restores itself, a failed pause leaves it running) is not
+        resumed again. Any other ``conflict`` is raised as it came.
+
+        In parallel with the resume, never waited for, the box's last known origin is
+        pre-connected (``_preconnect``), so the first call after it skips TCP and TLS.
         """
+        preconnect = yield from self._preconnect(sandbox_id)
+        try:
+            accepted = yield from self._send_resume(sandbox_id)
+        except Exception:
+            if preconnect is not None:
+                yield DropPreconnect(preconnect[1])
+            raise
+        if (
+            preconnect is not None
+            and accepted is not None
+            and accepted.base_url
+            and accepted.base_url.rstrip("/") != preconnect[0]
+        ):
+            # The box moved (a name cutover, private mode): reach it the normal way.
+            yield DropPreconnect(preconnect[1])
+        return accepted
+
+    def _preconnect(self, sandbox_id: str) -> Op[tuple[str, Any] | None]:
+        """Open a connection to the box's last known origin: one unauthenticated GET of
+        its health route (what its host itself probes), on the shared pool. None when
+        this client never saw the box ready, or it is private (off its tailnet the
+        connect would hang). Never awaited, never retried; a failure changes nothing.
+
+        Safe to dial early, unlike a create's placed origin: it is the origin a ready
+        answer already named for this box, an existing name whose DNS record is live and
+        proven, never a fresh name."""
+        last = self._last_origins.get(sandbox_id)
+        if last is None or last.private:
+            return None
+        handle = yield Preconnect(
+            HttpRequest("GET", last.base_url + PRECONNECT_PATH, {"user-agent": _USER_AGENT})
+        )
+        return (last.base_url, handle)
+
+    def _send_resume(self, sandbox_id: str) -> Op[SandboxDetail | None]:
+        """Send Resume, waiting out a Pause still landing (see ``request_resume``)."""
         waited = False
         while True:
             try:
-                return (yield from self.lifecycle(sandbox_id, "restore"))
+                return (yield from self.lifecycle(sandbox_id, "resume"))
             except ZipboxError as error:
                 if error.code != "conflict":
                     raise
                 detail = yield from self.get_in_wait(sandbox_id)
                 if detail.status != "stopping":
-                    # A second conflict after a stop was waited out: the box restored
-                    # itself, or it is archived and will not restore (that is final).
+                    # A second conflict after a pause was waited out: the box came back
+                    # by itself, or it is paused and will not resume (that is final).
                     if waited and detail.status in ("provisioning", "running"):
                         return None
                     raise error
@@ -966,7 +1219,7 @@ class Core:
                 waited = True
                 if detail.status in ("provisioning", "running"):
                     return None
-                if detail.status != "archived":
+                if detail.status != "paused":
                     raise error
 
     def delete(self, sandbox_id: str, archive: bool | None = None) -> Op[None]:

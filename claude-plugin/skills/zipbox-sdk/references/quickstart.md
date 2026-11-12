@@ -145,38 +145,38 @@ curl -N -X POST "$BASE/exec" -H "Authorization: Bearer $TOKEN" \
 
 The exit code is a result, not an error: a command that exits `1` returns `exitCode: 1` and raises nothing.
 
-## Stop it when you are done
+## Pause it when you are done
 
-Nothing stops a box on a clock. A stopped box archives its disk and bills nothing; starting it again brings the same disk back.
+Nothing pauses a box on a clock. A paused box bills nothing; resuming it brings it back with its files and installed software.
 
 #### TypeScript
 
 ```ts
-await zb.sandboxes.stop(box.id)
+await zb.sandboxes.pause(box.id)
 ```
 
 #### Python
 
 ```python
-zb.sandboxes.stop(box.id)
+zb.sandboxes.pause(box.id)
 ```
 
 #### Go
 
 ```go
-err := c.Sandboxes.Stop(ctx, box.ID)
+_, err := c.Sandboxes.Pause(ctx, box.ID)
 ```
 
 #### Rust
 
 ```rust
-zb.sandboxes().stop(sbx.id()).await?;
+zb.sandboxes().pause(sbx.id()).await?;
 ```
 
 #### CLI
 
 ```sh
-zipbox sandbox stop quickstart
+zipbox sandbox pause quickstart
 ```
 
 #### curl

@@ -44,14 +44,15 @@ of its own.
 ## Boxes
 
 ```ts
-const box = await zb.sandboxes.create({ name: 'ci-runner', tier: 's' }) // waits until ready
+const box = await zb.sandboxes.create({ name: 'ci-runner', tier: 's' }) // returns once ready
 // the options apply only when the box is created; an existing box comes back as it is
 const same = await zb.sandboxes.getOrCreate('ci-runner', { tier: 's' })
 const ready = await zb.sandboxes.waitReady(id)
 const rows = await zb.sandboxes.list()
 const one = await zb.sandboxes.get(id)
-await zb.sandboxes.stop(id) // disk archived, nothing billed while stopped
-await zb.sandboxes.start(id)
+const paused = await zb.sandboxes.pause(id) // returns the box paused; nothing billed while paused
+const resumed = await zb.sandboxes.resume(id) // returns the box ready, files and software as they were
+// stop(id) and start(id) are aliases of pause(id) and resume(id): the same request, the same result
 await zb.sandboxes.restart(id) // files survive
 await zb.sandboxes.cancelTransition(id) // 'cleared' | 'cancelling' | 'none'; conflict past the point of no return
 await zb.sandboxes.setTier(id, 'm')
@@ -60,8 +61,18 @@ await zb.sandboxes.delete(id, { archive: false }) // no recoverable copy
 const handle = zb.sandbox(id) // no network call
 ```
 
-`create`, `get` and `getOrCreate` return a `Sandbox`: the row (`box.info`, `box.status`,
-`box.name`, `box.baseUrl`, …) plus everything below.
+`create`, `get`, `getOrCreate`, `waitReady`, `pause` and `resume` return a `Sandbox`: the
+row (`box.info`, `box.status`, `box.name`, `box.baseUrl`, …) plus everything below. On a
+`Sandbox`, `box.pause()` and `box.resume()` (aliases `box.stop()`, `box.start()`) return
+the updated row. A status is `provisioning`, `running`, `stopping` (a Pause landing),
+`paused`, `deleting` or `destroyed`.
+
+`pause`, `resume` and `create` return as soon as the server answers with the final state,
+which it does when the host acts within its response budget (a warm create, a pause, a
+resume of a box still on its host). Otherwise the call waits on `GET /sandbox/:id/wait`,
+which the server answers when the box gets there, with no deadline of its own; an older
+API without `/wait` is polled with backoff instead. A pause that is cancelled before it
+lands raises `conflict`.
 
 ## Fork a box
 
@@ -201,11 +212,11 @@ Every failure is a `ZipboxError` with `code` (`invalid_request`, `unauthorized`,
 `tailscale_unavailable_egress_lockdown`, `tailscale_requires_update`, `box_private_unreachable`), `status`,
 `requestId`, `retryable`, `retryAfterMs` and `docsUrl`.
 
-Every wait (`create`, `getOrCreate`, `waitReady`, `fork`) reads the box's `readiness`: it keeps reading
-while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
-the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
-the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
-or gone `conflict`. Rows carry `phase` and `allowedActions`; a detail also carries `readiness`.
+Every wait (`create`, `getOrCreate`, `waitReady`, `resume`, `fork`) reads the box's `readiness`
+from `GET /sandbox/:id/wait`: it asks again while the box is `settling`, with no deadline (a
+retryable failed read waits on a backoff ladder), returns on `ready` or, for a private box,
+`awaits_tailnet`, and raises on the rest, never retryable: paused `box_not_running`, a failed
+start `start_failed`, deleting or gone `conflict`. Rows carry `phase` and `allowedActions`; a detail also carries `readiness`.
 One retry rule: an error is retried when its `retryable` is true.
 
 A created box's `baseUrl` changes once, to `box--<name>`, a few minutes after create, and
@@ -219,7 +230,7 @@ never repeated this way.
 
 ```ts
 try {
-  await zb.sandboxes.start(id)
+  await zb.sandboxes.resume(id)
 } catch (error) {
   if (error instanceof ZipboxError && error.code === 'insufficient_credits') {
     console.error(error.message, error.docsUrl)

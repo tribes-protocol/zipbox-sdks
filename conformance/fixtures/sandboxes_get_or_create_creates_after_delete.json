@@ -1,6 +1,6 @@
 {
   "name": "sandboxes_get_or_create_creates_after_delete",
-  "description": "A name mid-delete reads stopping: start waits it out, the box then reads not_found, and getOrCreate creates the name instead of raising not_found.",
+  "description": "A name mid-delete reads stopping: resume waits it out, the box then reads not_found, and getOrCreate creates the name instead of raising not_found.",
   "call": {
     "op": "sandboxes.getOrCreate",
     "args": {
@@ -39,7 +39,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -129,7 +129,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_2",
+        "path": "/sandbox/sbx_2/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -151,7 +151,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }

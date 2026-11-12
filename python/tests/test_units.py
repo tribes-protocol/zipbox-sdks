@@ -63,12 +63,21 @@ def test_backoff_has_no_attempt_ceiling() -> None:
         assert 0 < backoff.next() <= 30.0
 
 
+_ROUTE_NOT_FOUND = HttpResponse(404, {}, b'{"error":"Route not found"}')
+_SETTLING = {"id": "sbx", "status": "running", "ready": False, "readiness": "settling"}
+
+
 def test_wait_ready_polls_a_settling_box_on_a_gentle_ladder() -> None:
-    # A box turns ready ~1 s after it serves; doubling slept up to seconds past it.
+    # A box turns ready ~1 s after it serves; doubling slept up to seconds past it. An
+    # API without /wait answers it 404: the wait polls GET /sandbox/:id instead.
     core = Core(resolve_config("zb_k", "https://api.test", 0, rng=lambda: 1.0))
     op = core.wait_ready("sbx")
-    settling = {"id": "sbx", "status": "running", "ready": False, "readiness": "settling"}
-    assert isinstance(op.send(None), HttpRequest)
+    settling = _SETTLING
+    first = op.send(None)
+    assert isinstance(first, HttpRequest)
+    assert first.url == "https://api.test/sandbox/sbx/wait?until=ready"
+    poll = op.send(_ROUTE_NOT_FOUND)
+    assert isinstance(poll, HttpRequest) and poll.url == "https://api.test/sandbox/sbx"
     delays = []
     for _ in range(13):
         sleep = op.send(HttpResponse(200, {}, json.dumps(settling).encode()))
@@ -78,6 +87,94 @@ def test_wait_ready_polls_a_settling_box_on_a_gentle_ladder() -> None:
     expected = [min(10.0, 1.25**n) for n in range(13)]
     assert delays == pytest.approx(expected)
     assert delays[:3] == pytest.approx([1.0, 1.25, 1.5625]) and delays[-2:] == [10.0, 10.0]
+
+
+def test_wait_asks_again_at_once_after_a_held_answer_that_is_still_settling() -> None:
+    # The server held /wait until its hold limit: it did the waiting, so no sleep.
+    core = Core(resolve_config("zb_k", "https://api.test", 0, rng=lambda: 1.0))
+    op = core.wait_ready("sbx")
+    assert isinstance(op.send(None), HttpRequest)
+    for _ in range(3):
+        again = op.send(HttpResponse(200, {}, json.dumps(_SETTLING).encode()))
+        assert isinstance(again, HttpRequest)
+        assert again.url == "https://api.test/sandbox/sbx/wait?until=ready"
+    with pytest.raises(StopIteration) as done:
+        op.send(_ready("https://b.zbox.sh", "bt_live"))
+    assert done.value.value.ready is True and core._targets["sbx"].token == "bt_live"
+
+
+def test_a_wait_the_api_does_not_know_falls_back_only_when_the_box_exists() -> None:
+    # /wait 404 + GET 404: the box is gone or not the caller's, so not_found is raised.
+    core = Core(resolve_config("zb_k", "https://api.test", 0))
+    op = core.wait_until("sbx", "paused")
+    first = op.send(None)
+    assert isinstance(first, HttpRequest)
+    assert first.url == "https://api.test/sandbox/sbx/wait?until=paused"
+    read = op.send(_ROUTE_NOT_FOUND)
+    assert isinstance(read, HttpRequest) and read.url == "https://api.test/sandbox/sbx"
+    with pytest.raises(ZipboxError) as caught:
+        op.send(HttpResponse(404, {}, b'{"error":{"code":"not_found","message":"gone"}}'))
+    assert caught.value.code == "not_found"
+
+
+def test_a_create_answered_ready_returns_without_a_wait_and_keeps_its_token() -> None:
+    core = Core(resolve_config("zb_k", "https://api.test", 0))
+    op = core.create(name="demo")
+    claim = op.send(None)
+    assert isinstance(claim, HttpRequest) and claim.url.endswith("/sandbox/identity/claim")
+    answer = {
+        "sandboxId": "sbx",
+        "name": "demo",
+        "status": "running",
+        "created": True,
+        "ready": True,
+        "readiness": "ready",
+        "baseUrl": "https://box--demo.zbox.sh",
+        "boxToken": "bt_claim",
+    }
+    with pytest.raises(StopIteration) as done:
+        op.send(HttpResponse(200, {}, json.dumps(answer).encode()))
+    detail = done.value.value
+    assert detail.id == "sbx" and detail.ready and "boxToken" not in detail.raw
+    box = core.box("sbx", "POST", "/exec", body={"cmd": "true"})
+    call = box.send(None)
+    assert isinstance(call, HttpRequest) and call.url == "https://box--demo.zbox.sh/exec"
+    assert call.headers["authorization"] == "Bearer bt_claim"
+
+
+@pytest.mark.parametrize(
+    ("alias", "verb", "readiness"), [("stop", "pause", "paused"), ("start", "resume", "ready")]
+)
+def test_stop_and_start_send_exactly_what_pause_and_resume_send(
+    alias: str, verb: str, readiness: str
+) -> None:
+    from zipbox import Zipbox
+
+    body = {
+        "id": "sbx",
+        "status": "paused" if readiness == "paused" else "running",
+        "ready": readiness == "ready",
+        "readiness": readiness,
+        "baseUrl": "https://b.zbox.sh" if readiness == "ready" else None,
+        "boxToken": "bt" if readiness == "ready" else None,
+    }
+    sent: dict[str, list[tuple[str, str, bytes]]] = {}
+    for name in (alias, verb):
+        requests: list[tuple[str, str, bytes]] = []
+
+        def answer(
+            request: httpx.Request, requests: list[tuple[str, str, bytes]] = requests
+        ) -> httpx.Response:
+            requests.append((request.method, str(request.url), request.content))
+            return httpx.Response(200, json=body)
+
+        client = httpx.Client(transport=httpx.MockTransport(answer))
+        with Zipbox("zb_k", base_url="https://api.test", http_client=client) as zb:
+            box = getattr(zb.sandboxes, name)("sbx")
+            assert box.info.readiness == readiness
+        sent[name] = requests
+    assert sent[alias] == sent[verb]
+    assert sent[verb] == [("POST", f"https://api.test/sandbox/sbx/{verb}", b"")]
 
 
 def test_relative_paths_resolve_against_the_workspace() -> None:
@@ -188,7 +285,7 @@ def test_box_detail_keeps_the_token_in_the_cache_only() -> None:
     assert "boxToken" not in detail.raw and core._targets["sbx"].token == "bt_secret"
 
 
-@pytest.mark.parametrize(("status", "retryable"), [("running", True), ("archived", False)])
+@pytest.mark.parametrize(("status", "retryable"), [("running", True), ("paused", False)])
 def test_box_not_ready_is_retryable_only_while_it_can_come_back(
     status: str, retryable: bool
 ) -> None:
@@ -206,9 +303,9 @@ def test_box_not_ready_is_retryable_only_while_it_can_come_back(
 @pytest.mark.parametrize(
     ("readiness", "status", "code", "retryable"),
     [
-        ("settling", "archived", "box_not_running", True),
-        ("paused", "archived", "box_not_running", False),
-        ("start_failed", "archived", "box_not_running", False),
+        ("settling", "paused", "box_not_running", True),
+        ("paused", "paused", "box_not_running", False),
+        ("start_failed", "paused", "box_not_running", False),
         ("awaits_tailnet", "running", "tailnet_not_connected", False),
     ],
 )
@@ -377,7 +474,7 @@ def test_an_unsent_box_failure_rereads_the_box_and_follows_its_new_base_url() ->
         delays.append(sleep.seconds)
         reread = op.send(None)
         assert isinstance(reread, HttpRequest) and reread.method == "GET"
-        assert reread.url == "https://api.test/sandbox/sbx"
+        assert reread.url == "https://api.test/sandbox/sbx/wait?until=ready"
         retry = op.send(_ready("https://box--boot.zbox.sh", "bt_boot"))
         assert isinstance(retry, HttpRequest) and retry.method == "POST"
     # A successful detail read never resets the ladder; only an answered box request does.

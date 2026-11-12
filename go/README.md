@@ -36,10 +36,16 @@ A runnable version is in [`../examples/go/quickstart`](../examples/go/quickstart
 ## The surface
 
 - `c.Sandboxes`: `Create(ctx, CreateOptions)`, `GetOrCreate(ctx, name, CreateOptions)`,
-  `List`, `Get`, `Start`, `Stop`, `Restart`, `CancelTransition`, `Delete(ctx, id, DeleteOptions)`,
+  `List`, `Get`, `Pause`, `Resume`, `Restart`, `CancelTransition`, `Delete(ctx, id, DeleteOptions)`,
   `SetTier`, `WaitReady`, `Fork(ctx, sourceID, ForkOptions)`, `GetFork(ctx, childID)`.
   `c.Sandbox(id)` returns a handle without a call.
-- Box handle: `Refresh`, `WaitReady`, `Start`, `Stop`, `Restart`, `CancelTransition`, `SetTier`, `Delete`,
+- `Pause` returns the box once it is paused (nothing is billed while paused) and `Resume` once
+  it is ready again, with its files and installed software: at once when the server answers
+  with the final state, else after waiting for it. A box still `stopping` is resumed once its
+  Pause lands. `Stop` and `Start` are aliases of `Pause` and `Resume`: the same request and
+  the same result.
+- Box handle: `Refresh`, `WaitReady`, `Pause`, `Resume` (aliases `Stop`, `Start`), `Restart`,
+  `CancelTransition`, `SetTier`, `Delete`,
   `Fork(ctx, ForkOptions)`, `ForkStatus`,
   `Exec`, `ExecArgv`, `ExecStream`, `ExecStreamArgv`, `ExecBackground`,
   `ExecBackgroundArgv`, `RunCode`, `Logs(LogOptions{Since, Lines, Unit})`, `SSHInfo`,
@@ -76,11 +82,13 @@ A runnable version is in [`../examples/go/quickstart`](../examples/go/quickstart
   new box. `GetFork(ctx, childID)` / `box.ForkStatus` read its phase, source recovery and error.
 - `c.Account`: `WhoAmI`, `Balance`, `Usage`.
 
-Every wait (`Create`, `GetOrCreate`, `WaitReady`, `Fork`) reads the box's `readiness`: it keeps reading
-while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
-the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
-the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
-or gone `conflict`. Rows carry `Phase` and `AllowedActions`; a `SandboxDetail` also carries `Readiness`.
+Every wait (`Create`, `GetOrCreate`, `WaitReady`, `Fork`, `Resume`) reads the box's `readiness`
+from `GET /sandbox/{id}/wait?until=ready`, which the server answers when the box gets there; it
+asks again while the box is `settling`, with no deadline (a retryable failed read waits on a
+backoff ladder; an API without `/wait` is polled instead). It returns on `ready` or, for a private
+box, `awaits_tailnet`, and raises on the rest, never retryable: paused `box_not_running`, a
+failed start `start_failed`, deleting or gone `conflict`. `Pause` waits the same way for
+`paused`; a box that reads running again (the Pause was cancelled) is `conflict`. Rows carry `Phase` and `AllowedActions`; a `SandboxDetail` also carries `Readiness`.
 One retry rule: an error is retried when its `retryable` is true.
 
 A created box's `BaseURL` moves once, from its boot address to `box--<name>`, a few minutes
@@ -114,7 +122,8 @@ zipbox private on demo
 ```
 
 Commands: `login [--with-key]`, `logout`, `whoami`,
-`sandbox {create,list,get,start,stop,restart,cancel,delete,tier}`, `fork`, `exec`, `run`,
+`sandbox {create,list,get,pause,resume,restart,cancel,delete,tier}` (`stop` and `start` are
+aliases of `pause` and `resume`), `fork`, `exec`, `run`,
 `files {ls,cat,put,get,rm,mkdir,mv}`, `shell`, `ssh`, `preview` (`preview rm`),
 `tailscale {connect,status,disconnect}`, `private {on,off}`,
 `logs`, `docs [slug]`, `mcp {start,init <claude|codex|cursor|windsurf>,config}`.

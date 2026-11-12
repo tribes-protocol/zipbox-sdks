@@ -16,7 +16,7 @@ pip install zipbox
 
 ## Quickstart
 
-Create a box, run a command, write and read a file, open a preview, stop the box.
+Create a box, run a command, write and read a file, open a preview, pause the box.
 
 ```python
 from zipbox import Zipbox
@@ -33,7 +33,7 @@ print(box.files.read_text("hello.txt"))
 box.exec_background("python3 -m http.server 8000 --bind 127.0.0.1")
 print(box.preview.create(8000).url)
 
-zb.sandboxes.stop(box.id)
+zb.sandboxes.pause(box.id)
 ```
 
 ## Async
@@ -84,7 +84,10 @@ No request has a timeout. To bound one, pass your own `http_client=httpx.Client(
 | `zb.sandboxes.wait_ready(id)`                                                                    | `Sandbox`, ready (private and not joined: running)                               |
 | `zb.sandboxes.list()`                                                                            | `list[SandboxInfo]`                                                              |
 | `zb.sandboxes.get(id)`                                                                           | `Sandbox`                                                                        |
-| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`                                            | `None`                                                                           |
+| `zb.sandboxes.pause(id)`                                                                         | `Sandbox`, paused                                                                |
+| `zb.sandboxes.resume(id)`                                                                        | `Sandbox`, ready                                                                 |
+| `zb.sandboxes.stop(id)` / `start(id)`                                                            | aliases of `pause` / `resume`: the same request and result                       |
+| `zb.sandboxes.restart(id)`                                                                       | `None`                                                                           |
 | `zb.sandboxes.cancel_transition(id)`                                                             | `"cleared"` / `"cancelling"` / `"none"` (`conflict` past the point of no return) |
 | `zb.sandboxes.fork(id, name=, source_policy=, private=None, tailscale_auth_key=None, wait=True)` | `Sandbox`: the new box, ready (private: running; `wait=False`: as accepted)      |
 | `zb.sandboxes.get_fork(id)`                                                                      | `SandboxFork` of the new box `id`                                                |
@@ -92,7 +95,7 @@ No request has a timeout. To bound one, pass your own `http_client=httpx.Client(
 | `zb.sandboxes.delete(id, archive=None)`                                                          | `None`                                                                           |
 | `zb.sandbox(id)`                                                                                 | `Sandbox` handle, no network call                                                |
 
-Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+Every wait (`create`, `get_or_create`, `wait_ready`, `resume`, `fork`) waits on `GET /sandbox/:id/wait?until=ready`, which the server answers as soon as the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is no longer `settling`, so it returns the moment the box is up; a held answer that is still `settling` is asked again at once, with no deadline, and a read that fails with a retryable error waits on the poll ladder. An API older than `/wait` is polled on `GET /sandbox/:id` instead. `pause` waits the same way with `until=paused`, and only when the server did not answer with the paused box already; a box that reads running again (its pause was cancelled) raises `conflict`. The wait returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
 
 A created box's `base_url` changes once, a few minutes after create: from its boot address to `box--<name>`. The SDK follows it. A box call whose request never left (a refused connect, DNS, a TLS handshake) waits a rung of its backoff, re-reads the box with the same wait and retries there, with no attempt ceiling; a paused, failed or deleted box ends the call with that wait's error. A PTY whose dial fails does the same before it redials.
 
@@ -102,7 +105,7 @@ A created box's `base_url` changes once, a few minutes after create: from its bo
 box = zb.sandboxes.get_or_create("ci-runner", tier="l", mailbox=True)
 ```
 
-A `Sandbox` has `id`, `info` (the last `SandboxDetail` read), `refresh()`, `wait_ready()`, `start()` / `stop()` / `restart()` / `cancel_transition()` / `set_tier(tier)` / `delete(archive=None)`, `fork(name=, source_policy=, …)` / `fork_status()`, and the methods below.
+A `Sandbox` has `id`, `info` (the last `SandboxDetail` read), `refresh()`, `wait_ready()`, `pause()` / `resume()` (each returns the new `SandboxDetail`; `stop()` / `start()` are aliases) / `restart()` / `cancel_transition()` / `set_tier(tier)` / `delete(archive=None)`, `fork(name=, source_policy=, …)` / `fork_status()`, and the methods below.
 
 ### Fork
 
@@ -202,7 +205,7 @@ Every failure raises `zipbox.ZipboxError` with `code`, `status`, `message`, `req
 from zipbox import ZipboxError
 
 try:
-    zb.sandboxes.start(box_id)
+    zb.sandboxes.resume(box_id)
 except ZipboxError as error:
     if error.code == "insufficient_credits":
         print("Top up first:", error.docs_url)

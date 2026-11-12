@@ -236,10 +236,26 @@ func invoke(ctx context.Context, c *Client, op string, args map[string]any) (any
 			return nil, err
 		}
 		return b.Detail, nil
-	case "sandboxes.start":
-		return nil, c.Sandboxes.Start(ctx, id)
-	case "sandboxes.stop":
-		return nil, c.Sandboxes.Stop(ctx, id)
+	case "sandboxes.pause", "sandboxes.stop":
+		pause := c.Sandboxes.Pause
+		if op == "sandboxes.stop" {
+			pause = c.Sandboxes.Stop
+		}
+		b, err := pause(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return b.Detail, nil
+	case "sandboxes.resume", "sandboxes.start":
+		resume := c.Sandboxes.Resume
+		if op == "sandboxes.start" {
+			resume = c.Sandboxes.Start
+		}
+		b, err := resume(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return b.Detail, nil
 	case "sandboxes.restart":
 		return nil, c.Sandboxes.Restart(ctx, id)
 	case "sandboxes.cancelTransition":

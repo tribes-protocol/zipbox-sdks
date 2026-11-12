@@ -8,16 +8,16 @@ What you will look for after Daytona or E2B, where Zipbox has it, and the docume
 
 Coming from another sandbox API? Here is what you will look for and where Zipbox stands. "Have" exists today; "Out" is a documented gap ([Errors and limits](https://zipbox.ai/docs/errors.md#out-of-v1)).
 
-The biggest difference is time: a Zipbox box is a long-lived machine, not a disposable sandbox. Nothing on it stops on a clock, so there is no timeout to extend and no keep-alive to send. Stop it yourself when you are done ([Boxes](https://zipbox.ai/docs/lifecycle.md)).
+The biggest difference is time: a Zipbox box is a long-lived machine, not a disposable sandbox. Nothing on it stops on a clock, so there is no timeout to extend and no keep-alive to send. Pause it yourself when you are done ([Boxes](https://zipbox.ai/docs/lifecycle.md)).
 
 ## Capability by capability
 
 | Capability                       | Zipbox                                                                     |
 | -------------------------------- | -------------------------------------------------------------------------- |
 | Create / list / get / delete     | Have                                                                       |
-| Stop / start (disk preserved)    | Have: stop archives the disk and bills nothing; start restores it          |
+| Pause / resume (disk preserved)  | Have: a paused box bills nothing; resume brings it back as it was          |
 | Memory pause / resume            | Out: restart reboots, files survive                                        |
-| Auto-stop / idle timeout         | Never, by design. A box runs until you stop it                             |
+| Auto-pause / idle timeout        | Never, by design. A box runs until you pause it                            |
 | Resize                           | Have (`setTier`)                                                           |
 | Named snapshots / templates      | Out. A box is its own template; `getOrCreate(name, options)` reuses it     |
 | Run a command, streamed          | Have                                                                       |

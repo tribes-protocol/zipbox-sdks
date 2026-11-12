@@ -83,11 +83,11 @@ The new name follows the usual name rules and is reserved for good the moment th
 | Paused  | Forked; it stays paused               | Forked; it stays paused                                                   |
 | Running | `409 pause_required`, nothing touched | Paused for the capture, then resumed right after; its sessions disconnect |
 
-A running source has to stop writing for its disk to be captured consistently; a fork never copies a disk that is still being written to. While it is paused, its terminals, desktop and SSH sessions disconnect and its running processes stop, exactly as a stop. It resumes as soon as the capture is taken, without waiting for the copy or the new box, and whatever starts on boot starts again. A stop or delete you send to the source in that window wins over the fork's resume.
+A running source has to stop writing for its disk to be captured consistently; a fork never copies a disk that is still being written to. While it is paused, its terminals, desktop and SSH sessions disconnect and its running processes stop, exactly as a pause. It resumes as soon as the capture is taken, without waiting for the copy or the new box, and whatever starts on boot starts again. A pause or delete you send to the source in that window wins over the fork's resume.
 
 The capture is crash-consistent: what was on disk when the source paused, like a power cut right after a `sync`. A local database with its write-ahead log on the same disk recovers on the new box. An application that needs a clean shutdown, or state on a remote volume, should be stopped or quiesced before you fork.
 
-Every fork reports where its source stands in `sourceRecovery`: `not_needed` (it was paused and stays paused), `pending` (the fork paused it and owes the resume), `resumed`, or `superseded` (your own stop or delete replaced the resume).
+Every fork reports where its source stands in `sourceRecovery`: `not_needed` (it was paused and stays paused), `pending` (the fork paused it and owes the resume), `resumed`, or `superseded` (your own pause or delete replaced the resume).
 
 ## Copied, new, and left out
 
@@ -108,16 +108,16 @@ Account-wide provider keys and custom APIs are not copied: the new box gets them
 
 **New for the new box**
 
-| What                                                  | Notes                                                                                                                             |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Box id, permanent name, subdomain and mailbox address | The mailbox starts empty. A name you held on hold keeps its own mailbox and mail                                                  |
-| Wallets                                               | New wallets with no funds; no permissions or signers are inherited. A name you held on hold keeps its own wallets and funds       |
-| The box's own key (`agentPublicKey`) and API tokens   | Credentials are sealed to the new key; tokens for the source do not work on the new box, nor the other way round                  |
-| SSH host key and the managed `~/.ssh/id_ed25519`      | Both are new. If you use the managed key as a deploy key, authorize the new public key. Your other SSH keys and config are copied |
-| HTTPS certificate                                     | Issued for the new name; it can trail the box's readiness by seconds to minutes, like any new name                                |
-| Tailscale identity                                    | The new box starts off any tailnet and joins as a new device with a key you give it                                               |
-| Network addresses, OS machine id, swap                | Fresh                                                                                                                             |
-| Usage, billing, error history                         | Start empty                                                                                                                       |
+| What                                                  | Notes                                                                                                                                                           |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Box id, permanent name, subdomain and mailbox address | The mailbox starts empty. A name you held on hold keeps its own mailbox and mail                                                                                |
+| Wallets                                               | New wallets, created on the new box's first wallet use; no funds, permissions or signers are inherited. A name you held on hold keeps its own wallets and funds |
+| The box's own key (`agentPublicKey`) and API tokens   | Credentials are sealed to the new key; tokens for the source do not work on the new box, nor the other way round                                                |
+| SSH host key and the managed `~/.ssh/id_ed25519`      | Both are new. If you use the managed key as a deploy key, authorize the new public key. Your other SSH keys and config are copied                               |
+| HTTPS certificate                                     | Issued for the new name; it can trail the box's readiness by seconds to minutes, like any new name                                                              |
+| Tailscale identity                                    | The new box starts off any tailnet and joins as a new device with a key you give it                                                                             |
+| Network addresses, OS machine id, swap                | Fresh                                                                                                                                                           |
+| Usage, billing, error history                         | Start empty                                                                                                                                                     |
 
 **Left out**
 
@@ -136,7 +136,7 @@ A fork does not remove credentials you copied into your own files, shell history
 
 1. **Your machine → control plane.** Your browser or SDK sends the new name and the source policy. A Tailscale auth key, if you gave one, stays on your machine.
 2. **Control plane → source host.** The control plane checks ownership, the name, credit and the machine limit, reserves the new name, and sends the capture to the host the source runs on.
-3. **Source disk → capture.** On that host, the source's disk is captured while nothing writes to it. The raw capture is host-only staging: it never leaves the source host, is never uploaded, exported or attached to any box, and is deleted once the new box no longer needs it. A stopped source whose disk is archived is restored from its own archive into that staging.
+3. **Source disk → capture.** On that host, the source's disk is captured while nothing writes to it. The raw capture is host-only staging: it never leaves the source host, is never uploaded, exported or attached to any box, and is deleted once the new box no longer needs it. A paused source whose disk is only in cold storage is restored from its own backup into that staging.
 4. **Capture → copy VM → fresh disk.** An isolated copy VM with **no network** reads the capture and copies the allowed files into a new, empty filesystem. It runs nothing from your disk.
 5. **Fresh disk → new box.** The fresh disk boots as the new box on the same host. A host with no room for it makes the fork wait (`waitingOn: capacity`) rather than move anything; neither disk ever leaves the host.
 6. **Tailscale key → new box.** Once the new box runs and publishes its own public key, your machine seals the auth key to that key. The control plane relays the ciphertext once, and only the new box can open it.
@@ -152,13 +152,13 @@ A fork does not remove credentials you copied into your own files, shell history
 
 A fork moves through `phase` in this order. The source is down only during `capturing`; the copy and the new box's boot happen after it has resumed.
 
-| `phase`              | What happens                                                                           | The source                                         |
-| -------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `preparing_identity` | The new name, mailbox and wallets are minted, or a name you held on hold is taken back | Untouched                                          |
-| `capturing`          | The source's disk is captured with nothing writing to it                               | Paused, when it was running: its only downtime     |
-| `copying`            | Allowed files are copied into the fresh filesystem                                     | Resumed right after the capture (`sourceRecovery`) |
-| `starting`           | The new box boots on the normal start path                                             | Running                                            |
-| `complete`           | The new box has its own disk and serves (`status: running`)                            | Running                                            |
+| `phase`              | What happens                                                                                | The source                                         |
+| -------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `preparing_identity` | The new name and its mailbox address are reserved, or a name you held on hold is taken back | Untouched                                          |
+| `capturing`          | The source's disk is captured with nothing writing to it                                    | Paused, when it was running: its only downtime     |
+| `copying`            | Allowed files are copied into the fresh filesystem                                          | Resumed right after the capture (`sourceRecovery`) |
+| `starting`           | The new box boots on the normal start path                                                  | Running                                            |
+| `complete`           | The new box has its own disk and serves (`status: running`)                                 | Running                                            |
 
 Off the critical path: the new box's HTTPS certificate, its Tailscale enrollment and its wallet signer binding settle after `complete` and never hold it up. A fork that waits says why in `waitingOn` (`capacity`, `busy`, `host_offline`, `software_install`, `legacy_chisel`), with `attempt` and `nextAttemptAt`; a temporary outage makes it wait and retry, never fail. It ends in `complete`, `cancelled`, or `failed` with an `error`.
 
@@ -344,7 +344,7 @@ A fork has no fixed duration, and nothing in it times out. Three intervals add u
 | Source downtime          | Stop, capture, restart (running sources only)        | `captureMode`: `reflink` is metadata work, `copy` copies the whole disk image while the source stays paused |
 | Until the new box serves | Identity, capture, copying live files, a normal boot | How much data is on the disk and how many files                                                             |
 
-The copy into a fresh filesystem scales with the live data and file count even when the capture itself is instant, so a box with a large repository or millions of small files takes longer to fork than a nearly empty one. Fork a stopped source to avoid any downtime at all.
+The copy into a fresh filesystem scales with the live data and file count even when the capture itself is instant, so a box with a large repository or millions of small files takes longer to fork than a nearly empty one. Fork a paused source to avoid any downtime at all.
 
 ## What a fork does not reproduce
 
@@ -402,7 +402,7 @@ Refused before anything is reserved or the source is touched:
 | 404    | [`not_found`](https://zipbox.ai/docs/errors.md#not_found)                         | No such source, or not yours                                                                                                                         |
 | 409    | [`name_taken`](https://zipbox.ai/docs/errors.md#name_taken)                       | A box is using the new name, or another account holds it                                                                                             |
 | 409    | [`source_unsupported`](https://zipbox.ai/docs/errors.md#source_unsupported)       | The source is a kind of box a fork does not support                                                                                                  |
-| 409    | [`source_busy`](https://zipbox.ai/docs/errors.md#source_busy)                     | The source is in another change (a stop, a resize, another fork)                                                                                     |
+| 409    | [`source_busy`](https://zipbox.ai/docs/errors.md#source_busy)                     | The source is in another change (a pause, a resize, another fork)                                                                                    |
 | 409    | [`pause_required`](https://zipbox.ai/docs/errors.md#pause_required)               | The source is running and `sourcePolicy` is `require_paused`                                                                                         |
 | 409    | [`idempotency_mismatch`](https://zipbox.ai/docs/errors.md#idempotency_mismatch)   | The `Idempotency-Key` was used for a different fork                                                                                                  |
 | 503    | [`unavailable`](https://zipbox.ai/docs/errors.md#unavailable)                     | Maintenance, no room on the source's host, the host out of reach, or another request accepting this fork: resend with the **same** `Idempotency-Key` |

@@ -2,7 +2,7 @@ import { backoffDelay, sleep } from './backoff.js'
 import { errorFromResponse, ZipboxError } from './errors.js'
 import type { FetchLike } from './types.js'
 
-const SDK_VERSION = '0.1.7'
+const SDK_VERSION = '0.2.0'
 const USER_AGENT = `zipbox-sdk-typescript/${SDK_VERSION}`
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -25,6 +25,12 @@ export interface HttpRequest {
    * sets it: its origin can move, so the box is re-read before the retry.
    */
   raiseUnsent?: boolean
+  /**
+   * Turn the response into the one the request answers, before its status is read: a
+   * streamed create's last line stands for its answer. A failure here is a sent
+   * failure, retried like a dropped connection.
+   */
+  unwrap?: (response: Response) => Promise<Response>
   signal?: AbortSignal | undefined
 }
 
@@ -164,7 +170,8 @@ export class HttpClient {
     for (let attempt = 0; ; attempt++) {
       let error: ZipboxError
       try {
-        const response = await this.options.fetch(request.url, this.init(request))
+        const fetched = await this.options.fetch(request.url, this.init(request))
+        const response = request.unwrap === undefined ? fetched : await request.unwrap(fetched)
         if (response.ok) return response
         error = errorFromResponse({
           status: response.status,
@@ -238,6 +245,21 @@ export class HttpClient {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /**
+   * Open a connection to `url`'s origin on the shared fetch pool, ahead of the first
+   * call that needs it: one unauthenticated GET whose body is read so the connection
+   * returns to the pool. Never awaited by the caller, never retried; any failure is
+   * dropped (the next call connects as it always does). Aborting `signal` drops it.
+   */
+  preconnect(url: string, signal: AbortSignal): void {
+    void this.options
+      .fetch(url, { method: 'GET', headers: { 'user-agent': USER_AGENT }, signal })
+      .then(async (response) => {
+        await response.arrayBuffer()
+      })
+      .catch(() => undefined)
   }
 
   private init(request: HttpRequest): RequestInit {

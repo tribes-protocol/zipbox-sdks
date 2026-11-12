@@ -36,7 +36,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }
@@ -49,7 +49,7 @@
       "ready": true,
       "baseUrl": "{{BASE}}",
       "phase": "running",
-      "allowedActions": ["stop", "restart", "delete", "fork"],
+      "allowedActions": ["pause", "restart", "delete", "fork"],
       "readiness": "ready"
     }
   }

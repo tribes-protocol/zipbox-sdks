@@ -254,6 +254,10 @@ async function run(zb: Zipbox, op: string, args: Record<string, unknown>): Promi
       return zb.sandboxes.getOrCreate(arg(args, 'name'), createOptions(args))
     case 'sandboxes.waitReady':
       return zb.sandboxes.waitReady(arg(args, 'id'))
+    case 'sandboxes.pause':
+      return zb.sandboxes.pause(arg(args, 'id'))
+    case 'sandboxes.resume':
+      return zb.sandboxes.resume(arg(args, 'id'))
     case 'sandboxes.start':
       return zb.sandboxes.start(arg(args, 'id'))
     case 'sandboxes.stop':
@@ -387,7 +391,7 @@ describe('conformance', () => {
   })
 
   it('has fixtures', () => {
-    expect(files.length).toBeGreaterThanOrEqual(88)
+    expect(files.length).toBeGreaterThanOrEqual(94)
   })
 
   for (const file of files) {

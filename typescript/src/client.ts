@@ -1,18 +1,30 @@
+import { CLAIM_STREAM_MEDIA_TYPE, readClaimStream } from './claimstream.js'
 import {
   cancelTransition,
   type ClientContext,
   deleteBox,
   getDetail,
   lifecycle,
+  pauseBox,
   readDetailInWait,
+  remember,
+  requestResume,
+  resumeBox,
   setTier,
-  startBox,
   waitUntilReady
 } from './context.js'
 import { ZipboxError } from './errors.js'
 import { forkBox, getFork } from './fork.js'
-import { isArrayOf, isJsonObject, isRecord, isSandboxInfo, readJson } from './guards.js'
+import {
+  isArrayOf,
+  isJsonObject,
+  isRecord,
+  isSandboxDetail,
+  isSandboxInfo,
+  readJson
+} from './guards.js'
 import { HttpClient } from './http.js'
+import { readinessOf } from './readiness.js'
 import { Sandbox } from './sandbox.js'
 import { BoxTransport, ControlPlane } from './transport.js'
 import type {
@@ -21,6 +33,7 @@ import type {
   DeleteSandboxOptions,
   ForkSandboxOptions,
   JsonObject,
+  SandboxDetail,
   SandboxFork,
   SandboxInfo,
   SandboxTier,
@@ -55,9 +68,10 @@ export class Sandboxes {
   }
 
   /**
-   * Create a box and wait until it answers. Safe to retry: the request carries an
-   * Idempotency-Key. Waiting has no deadline; pass a signal to stop waiting (the
-   * box keeps booting).
+   * Create a box and return it once it answers: at once when the server bound a
+   * booted machine inside the request (`ready` in its answer), else after waiting
+   * for it. Safe to retry: the request carries an Idempotency-Key. Waiting has no
+   * deadline; pass a signal to stop waiting (the box keeps booting).
    */
   async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const body: Record<string, string | boolean> = {}
@@ -66,12 +80,18 @@ export class Sandboxes {
     if (options.sshPublicKey !== undefined) body.sshPublicKey = options.sshPublicKey
     if (options.mailbox !== undefined) body.mailbox = options.mailbox
     if (options.private !== undefined) body.private = options.private
+    // The answer streamed (conformance README, streamed create); its placed line is
+    // never dialled. A server that does not stream answers as before.
     const response = await this.ctx.api.request({
       method: 'POST',
       path: '/sandbox/identity/claim',
-      headers: { 'idempotency-key': crypto.randomUUID() },
+      headers: {
+        'idempotency-key': crypto.randomUUID(),
+        accept: `${CLAIM_STREAM_MEDIA_TYPE}, application/json`
+      },
       body: { json: body },
       retry: true,
+      unwrap: readClaimStream,
       signal: options.signal
     })
     const claimed = await readJson(
@@ -80,11 +100,19 @@ export class Sandboxes {
         isRecord(value) && typeof value.sandboxId === 'string',
       'POST /sandbox/identity/claim'
     )
+    const created = { ...claimed, id: claimed.sandboxId }
+    if (
+      isSandboxDetail(created) &&
+      readinessOf(created) === 'ready' &&
+      typeof created.baseUrl === 'string'
+    ) {
+      return new Sandbox(this.ctx, created.id, remember(this.ctx, created))
+    }
     return this.waitReady(claimed.sandboxId, options)
   }
 
   /**
-   * The box with this name, started if it was stopped, or a new one created with
+   * The box with this name, resumed if it was paused, or a new one created with
    * `options`. Use it to reuse an environment across runs.
    *
    * The options (tier, SSH key, mailbox, private) apply only when a box is
@@ -97,41 +125,37 @@ export class Sandboxes {
     options: Omit<CreateSandboxOptions, 'name'> = {}
   ): Promise<Sandbox> {
     const existing = (await this.list(options)).find(
-      (row) =>
-        row.name === name &&
-        row.status !== 'destroyed' &&
-        row.status !== 'stopped' &&
-        row.status !== 'deleting'
+      (row) => row.name === name && row.status !== 'destroyed' && row.status !== 'deleting'
     )
     if (existing === undefined) return this.create({ ...options, name })
-    // `stopping`: a stop is still landing; startBox waits it out, then starts.
-    // `pausing`: paused while its backup uploads; the start boots it at once.
-    if (
-      existing.status === 'archived' ||
-      existing.status === 'stopping' ||
-      existing.status === 'pausing'
-    ) {
+    // `stopping`: a Pause is still landing; requestResume waits it out, then resumes.
+    if (existing.status === 'paused' || existing.status === 'stopping') {
+      let accepted: SandboxDetail | null = null
       try {
-        await startBox(this.ctx, existing.id, options.signal)
+        accepted = await requestResume(this.ctx, existing.id, options.signal)
       } catch (error) {
         if (!(error instanceof ZipboxError)) throw error
         // The name was being deleted: it is gone now, so make it.
         if (error.code === 'not_found') return this.create({ ...options, name })
-        // Another caller started it first: the server's idempotent answer to a
-        // second restore. A box now coming up is waited on like any other.
+        // Another caller resumed it first: the server's idempotent answer to a
+        // second resume. A box now coming up is waited on like any other.
         if (error.code !== 'conflict') throw error
         const detail = await readDetailInWait(this.ctx, existing.id, options.signal)
         if (detail.status !== 'provisioning' && detail.status !== 'running') throw error
+      }
+      if (accepted !== null && readinessOf(accepted) === 'ready') {
+        return new Sandbox(this.ctx, existing.id, accepted)
       }
     }
     return this.waitReady(existing.id, options)
   }
 
   /**
-   * Re-read a box with backoff until it is ready. No deadline; pass a signal to
-   * stop waiting. A private box that has not joined a tailnet yet is returned once
-   * it is running with its key, since it is not ready until it joins. A box that
-   * will not become ready by itself raises: paused `box_not_running`, a failed
+   * Wait until a box is ready, on `GET /sandbox/:id/wait` (the server answers when
+   * it is; an older API is polled with backoff instead). No deadline; pass a signal
+   * to stop waiting. A private box that has not joined a tailnet yet is returned
+   * once it is running with its key, since it is not ready until it joins. A box
+   * that will not become ready by itself raises: paused `box_not_running`, a failed
    * start `start_failed`, deleting or gone `conflict`, none of them retryable.
    */
   async waitReady(id: string, options: CallOptions = {}): Promise<Sandbox> {
@@ -139,25 +163,43 @@ export class Sandboxes {
   }
 
   /**
-   * Start a stopped box. A box still `stopping` is started once its stop lands.
-   * Credit-gated: `insufficient_credits` when the balance is dry.
+   * Pause a box and return it paused. Nothing is billed while it is paused, and
+   * `resume` brings it back with its files and installed software. Returns at once
+   * when the server answers with the paused box, else waits for the Pause to take
+   * effect (no deadline; pass a signal to stop waiting). A box that reads running
+   * again (the Pause was cancelled) raises `conflict`.
    */
-  start(id: string, options: CallOptions = {}): Promise<void> {
-    return startBox(this.ctx, id, options.signal)
-  }
-
-  /** Stop a box. Its disk is archived and nothing is billed while it is stopped. */
-  stop(id: string, options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, id, 'pause', options.signal)
-  }
-
-  /** Hard-restart a running box; files survive, running processes do not. */
-  restart(id: string, options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, id, 'reset', options.signal)
+  async pause(id: string, options: CallOptions = {}): Promise<Sandbox> {
+    return new Sandbox(this.ctx, id, await pauseBox(this.ctx, id, options.signal))
   }
 
   /**
-   * Cancel the box's state change in flight - a stop, a start, a restart, a tier
+   * Resume a paused box and return it ready. A box still `stopping` is resumed once
+   * its Pause lands. Returns at once when the server answers with the ready box,
+   * else waits as `waitReady` does. Credit-gated: `insufficient_credits` when the
+   * balance is dry.
+   */
+  async resume(id: string, options: CallOptions = {}): Promise<Sandbox> {
+    return new Sandbox(this.ctx, id, await resumeBox(this.ctx, id, options.signal))
+  }
+
+  /** Alias of {@link pause}: the same request and the same result. */
+  stop(id: string, options: CallOptions = {}): Promise<Sandbox> {
+    return this.pause(id, options)
+  }
+
+  /** Alias of {@link resume}: the same request and the same result. */
+  start(id: string, options: CallOptions = {}): Promise<Sandbox> {
+    return this.resume(id, options)
+  }
+
+  /** Hard-restart a running box; files survive, running processes do not. */
+  async restart(id: string, options: CallOptions = {}): Promise<void> {
+    await lifecycle(this.ctx, id, 'reset', options.signal)
+  }
+
+  /**
+   * Cancel the box's state change in flight - a pause, a resume, a restart, a tier
    * change - and return it to where it was. Returns what happened: `cleared` (it is
    * back already), `cancelling` (the host's abort is on its way) or `none` (nothing
    * was in flight). Past the point of no return it raises `conflict` with the reason.

@@ -72,10 +72,10 @@ describe('waitReady verdicts', () => {
     })
   }
 
-  it('a paused box that cannot start now says so instead of "start it"', async () => {
+  it('a paused box that cannot resume now says so instead of "resume it"', async () => {
     const paused = {
       ...READY_DETAIL,
-      status: 'archived',
+      status: 'paused',
       ready: false,
       readiness: 'paused',
       allowedActions: ['delete']
@@ -84,7 +84,7 @@ describe('waitReady verdicts', () => {
       .sandboxes.waitReady('sbx_1')
       .catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'box_not_running', retryable: false })
-    expect(String(error)).toMatch(/cannot be started now/)
+    expect(String(error)).toMatch(/cannot be resumed now/)
   })
 
   it('a status from a later server, with no readiness, keeps waiting', async () => {
@@ -94,7 +94,8 @@ describe('waitReady verdicts', () => {
   })
 })
 
-// A box turns ready ~1 s after it serves; doubling slept up to seconds past it.
+// A box turns ready ~1 s after it serves; doubling slept up to seconds past it. An
+// API without GET /sandbox/:id/wait answers it 404, and the wait polls instead.
 describe('waitReady poll ladder', () => {
   afterEach(() => {
     vi.useRealTimers()
@@ -110,7 +111,10 @@ describe('waitReady poll ladder', () => {
     const zb = new Zipbox({
       apiKey: API_KEY,
       baseUrl: 'https://api.test',
-      fetch: () => {
+      fetch: (input) => {
+        if (new URL(input).pathname.endsWith('/wait')) {
+          return Promise.resolve(new Response('{"error":"Route not found"}', { status: 404 }))
+        }
         reads.push(Date.now())
         const body = reads.length <= 14 ? settling : READY_DETAIL
         return Promise.resolve(new Response(JSON.stringify(body)))
@@ -129,5 +133,198 @@ describe('waitReady poll ladder', () => {
       Array.from({ length: 14 }, (_, n) => Math.round(Math.min(10_000, 1000 * 1.25 ** n)))
     )
     expect(gaps.slice(-3)).toEqual([10_000, 10_000, 10_000])
+  })
+})
+
+interface SentRequest {
+  method: string
+  path: string
+  authorization: string | null
+  body: string
+}
+
+// Answers in order and records every request; a box answers one exec.
+function scripted(answers: { status?: number; body: unknown }[], sent: SentRequest[]): FetchLike {
+  return (input, init) => {
+    const url = new URL(input)
+    sent.push({
+      method: init?.method ?? 'GET',
+      path: `${url.pathname}${url.search}`,
+      authorization: new Headers(init?.headers).get('authorization'),
+      body: typeof init?.body === 'string' ? init.body : ''
+    })
+    if (url.pathname === '/exec') {
+      return Promise.resolve(
+        new Response(
+          'id: 0-0\nevent: start\ndata: {"id":"c"}\n\nid: 0-0\nevent: exit\ndata: {"state":"exited","exitCode":0}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } }
+        )
+      )
+    }
+    const next = answers.shift()
+    if (next === undefined) throw new Error(`unexpected ${url.pathname}`)
+    return Promise.resolve(new Response(JSON.stringify(next.body), { status: next.status ?? 200 }))
+  }
+}
+
+const SETTLING = { ...READY_DETAIL, status: 'stopping', ready: false, readiness: 'settling' }
+const PAUSED = {
+  ...READY_DETAIL,
+  status: 'paused',
+  ready: false,
+  readiness: 'paused',
+  baseUrl: null,
+  boxToken: null
+}
+
+describe('GET /sandbox/:id/wait', () => {
+  it('asks again at once after a held answer that is still settling', async () => {
+    const sent: SentRequest[] = []
+    // A poll ladder of a minute: the test times out if the wait slept on it.
+    const zb = new Zipbox({
+      apiKey: API_KEY,
+      baseUrl: 'https://api.test',
+      pollIntervalMs: 60_000,
+      fetch: scripted([{ body: SETTLING }, { body: SETTLING }, { body: READY_DETAIL }], sent)
+    })
+    const box = await zb.sandboxes.waitReady('sbx_1')
+    expect(box.ready).toBe(true)
+    expect(sent.map((request) => request.path)).toEqual([
+      '/sandbox/sbx_1/wait?until=ready',
+      '/sandbox/sbx_1/wait?until=ready',
+      '/sandbox/sbx_1/wait?until=ready'
+    ])
+  })
+
+  it('falls back to polling GET /sandbox/:id when the API predates /wait', async () => {
+    const sent: SentRequest[] = []
+    const zb = new Zipbox({
+      apiKey: API_KEY,
+      baseUrl: 'https://api.test',
+      pollIntervalMs: 1,
+      fetch: scripted(
+        [
+          { status: 404, body: { error: 'Route not found' } },
+          { body: SETTLING },
+          { body: READY_DETAIL }
+        ],
+        sent
+      )
+    })
+    const box = await zb.sandboxes.waitReady('sbx_1')
+    expect(box.ready).toBe(true)
+    expect(sent.map((request) => request.path)).toEqual([
+      '/sandbox/sbx_1/wait?until=ready',
+      '/sandbox/sbx_1',
+      '/sandbox/sbx_1'
+    ])
+  })
+})
+
+describe('Sandboxes.create bound inside the request', () => {
+  it('returns at once and calls the box with the token from the claim', async () => {
+    const sent: SentRequest[] = []
+    const claim = {
+      sandboxId: 'sbx_1',
+      name: 'demo',
+      status: 'running',
+      created: true,
+      ready: true,
+      readiness: 'ready',
+      httpsReady: true,
+      baseUrl: 'https://demo.zbox.sh',
+      boxToken: 'bt_claim'
+    }
+    const zb = new Zipbox({ apiKey: API_KEY, fetch: scripted([{ body: claim }], sent) })
+    const box = await zb.sandboxes.create({ name: 'demo' })
+    expect(box.id).toBe('sbx_1')
+    expect(box.ready).toBe(true)
+    expect(box.info?.boxToken).toBeUndefined()
+    await box.exec('true')
+    expect(sent.map((request) => `${request.method} ${request.path}`)).toEqual([
+      'POST /sandbox/identity/claim',
+      'POST /exec'
+    ])
+    expect(sent.at(-1)?.authorization).toBe('Bearer bt_claim')
+  })
+
+  it('waits when the claim answer is not ready', async () => {
+    const sent: SentRequest[] = []
+    const claim = { sandboxId: 'sbx_1', status: 'provisioning', created: true, ready: false }
+    const zb = new Zipbox({
+      apiKey: API_KEY,
+      fetch: scripted([{ body: claim }, { body: READY_DETAIL }], sent)
+    })
+    await zb.sandboxes.create({ name: 'demo' })
+    expect(sent.map((request) => request.path)).toEqual([
+      '/sandbox/identity/claim',
+      '/sandbox/sbx_1/wait?until=ready'
+    ])
+  })
+})
+
+describe('pause and resume', () => {
+  async function requests(
+    run: (zb: Zipbox) => Promise<unknown>,
+    answers: { status?: number; body: unknown }[]
+  ): Promise<SentRequest[]> {
+    const sent: SentRequest[] = []
+    await run(new Zipbox({ apiKey: API_KEY, fetch: scripted(answers, sent) }))
+    return sent
+  }
+
+  it('stop sends exactly what pause sends, and returns the same box', async () => {
+    const answers = (): { body: unknown }[] => [{ body: PAUSED }]
+    const paused = await requests((zb) => zb.sandboxes.pause('sbx_1'), answers())
+    const stopped = await requests((zb) => zb.sandboxes.stop('sbx_1'), answers())
+    expect(stopped).toEqual(paused)
+    expect(paused.map((request) => `${request.method} ${request.path}`)).toEqual([
+      'POST /sandbox/sbx_1/pause'
+    ])
+    const onBox = await requests((zb) => zb.sandbox('sbx_1').stop(), answers())
+    expect(onBox).toEqual(paused)
+  })
+
+  it('start sends exactly what resume sends', async () => {
+    const answers = (): { body: unknown }[] => [{ body: READY_DETAIL }]
+    const resumed = await requests((zb) => zb.sandboxes.resume('sbx_1'), answers())
+    const started = await requests((zb) => zb.sandboxes.start('sbx_1'), answers())
+    expect(started).toEqual(resumed)
+    expect(resumed.map((request) => `${request.method} ${request.path}`)).toEqual([
+      'POST /sandbox/sbx_1/resume'
+    ])
+    const onBox = await requests((zb) => zb.sandbox('sbx_1').start(), answers())
+    expect(onBox).toEqual(resumed)
+  })
+
+  it('a pause answered 202 waits for paused and updates the box', async () => {
+    const sent: SentRequest[] = []
+    const zb = new Zipbox({
+      apiKey: API_KEY,
+      fetch: scripted([{ status: 202, body: SETTLING }, { body: PAUSED }], sent)
+    })
+    const box = zb.sandbox('sbx_1')
+    const detail = await box.pause()
+    expect(detail.status).toBe('paused')
+    expect(box.status).toBe('paused')
+    expect(sent.map((request) => request.path)).toEqual([
+      '/sandbox/sbx_1/pause',
+      '/sandbox/sbx_1/wait?until=paused'
+    ])
+  })
+
+  it('a resume answered with the ready box makes no further request and keeps its token', async () => {
+    const sent: SentRequest[] = []
+    const zb = new Zipbox({
+      apiKey: API_KEY,
+      fetch: scripted([{ body: { ...READY_DETAIL, boxToken: 'bt_resumed' } }], sent)
+    })
+    const box = await zb.sandboxes.resume('sbx_1')
+    await box.exec('true')
+    expect(sent.map((request) => `${request.method} ${request.path}`)).toEqual([
+      'POST /sandbox/sbx_1/resume',
+      'POST /exec'
+    ])
+    expect(sent.at(-1)?.authorization).toBe('Bearer bt_resumed')
   })
 })

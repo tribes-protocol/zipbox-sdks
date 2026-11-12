@@ -1,6 +1,6 @@
 {
   "name": "sandboxes_get_or_create_waits_out_stopping",
-  "description": "getOrCreate on a name whose box is still stopping: it never hands back the stopping box and never creates a second one. It starts the box once the stop lands, then waits until it is ready.",
+  "description": "getOrCreate on a name whose box is still stopping (a Pause still landing): it never hands back the stopping box and never creates a second one. It resumes the box once the Pause lands, then waits until it is ready.",
   "call": {
     "op": "sandboxes.getOrCreate",
     "args": {
@@ -40,7 +40,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -104,7 +104,7 @@
           "name": "worker-1",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "archived",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,
@@ -122,7 +122,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -137,7 +137,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -167,7 +167,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }

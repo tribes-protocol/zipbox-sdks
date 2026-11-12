@@ -207,7 +207,9 @@ func TestBoxUnsentFailureReresolvesOnAGrowingLadder(t *testing.T) {
 	var reads []time.Time
 	var auth string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sandbox/sbx_1", func(w http.ResponseWriter, r *http.Request) {
+	// The first read resolves the box; each re-read after an unsent failure is the
+	// readiness wait.
+	read := func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		reads = append(reads, time.Now())
 		n := len(reads)
@@ -218,7 +220,9 @@ func TestBoxUnsentFailureReresolvesOnAGrowingLadder(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id":"sbx_1","status":"running","readiness":"ready","createdAt":"2026-11-10T00:00:00Z","updatedAt":"2026-11-10T00:00:00Z","ready":true,"baseUrl":%q,"boxToken":"bt_%d"}`, base, n)
-	})
+	}
+	mux.HandleFunc("/sandbox/sbx_1", read)
+	mux.HandleFunc("/sandbox/sbx_1/wait", read)
 	mux.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		auth = r.Header.Get("Authorization")
@@ -300,7 +304,7 @@ func TestPtyRefusedDialOnAPausedBoxEnds(t *testing.T) {
 				fmt.Fprintf(w, `{"id":"sbx_1","status":"running","createdAt":"2026-11-10T00:00:00Z","updatedAt":"2026-11-10T00:00:00Z","ready":true,"baseUrl":%q,"boxToken":"bt_dead"}`, dead)
 				return true
 			}
-			_, _ = io.WriteString(w, `{"id":"sbx_1","status":"archived","phase":"paused","readiness":"paused","createdAt":"2026-11-10T00:00:00Z","updatedAt":"2026-11-10T00:00:00Z","ready":false}`)
+			_, _ = io.WriteString(w, `{"id":"sbx_1","status":"paused","phase":"paused","readiness":"paused","createdAt":"2026-11-10T00:00:00Z","updatedAt":"2026-11-10T00:00:00Z","ready":false}`)
 			return true
 		},
 	}

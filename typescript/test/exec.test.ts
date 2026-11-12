@@ -195,7 +195,7 @@ describe('exec', () => {
     expect(error).toMatchObject({ code: 'unavailable', retryable: true })
   })
 
-  it('a box that is running but not ready yet is a retryable box_not_running; a stopped one is not', async () => {
+  it('a box that is running but not ready yet is a retryable box_not_running; a paused one is not', async () => {
     const run = async (status: string): Promise<unknown> => {
       const zb = new Zipbox({
         apiKey: 'zb_test',
@@ -211,15 +211,15 @@ describe('exec', () => {
         .catch((caught: unknown) => caught)
     }
     expect(await run('running')).toMatchObject({ code: 'box_not_running', retryable: true })
-    expect(await run('archived')).toMatchObject({ code: 'box_not_running', retryable: false })
+    expect(await run('paused')).toMatchObject({ code: 'box_not_running', retryable: false })
   })
 
   // audit-ax AX-03: `retryable` follows the server's readiness, and a private box
   // awaiting its tailnet names the remedy instead of "start it".
   it.each([
-    ['settling', 'archived', { code: 'box_not_running', retryable: true }],
-    ['paused', 'archived', { code: 'box_not_running', retryable: false }],
-    ['start_failed', 'archived', { code: 'box_not_running', retryable: false }],
+    ['settling', 'paused', { code: 'box_not_running', retryable: true }],
+    ['paused', 'paused', { code: 'box_not_running', retryable: false }],
+    ['start_failed', 'paused', { code: 'box_not_running', retryable: false }],
     ['awaits_tailnet', 'running', { code: 'tailnet_not_connected', retryable: false }]
   ])(
     'a detail reading %s (%s) raises %o without calling the box',

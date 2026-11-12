@@ -333,7 +333,8 @@ func getOrCreateServer(t *testing.T, row string, details []string) (*Client, *in
 	mux.HandleFunc("/sandbox", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "["+row+"]")
 	})
-	mux.HandleFunc("/sandbox/sbx_1", func(w http.ResponseWriter, r *http.Request) {
+	// A detail read and a readiness wait answer the same sequence.
+	read := func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		i := reads
 		reads++
@@ -342,7 +343,9 @@ func getOrCreateServer(t *testing.T, row string, details []string) (*Client, *in
 			i = len(details) - 1
 		}
 		io.WriteString(w, details[i])
-	})
+	}
+	mux.HandleFunc("/sandbox/sbx_1", read)
+	mux.HandleFunc("/sandbox/sbx_1/wait", read)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	return New("zb_x", WithBaseURL(server.URL), WithPollInterval(time.Millisecond, time.Millisecond)), &reads

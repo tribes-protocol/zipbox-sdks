@@ -1,8 +1,8 @@
 {
-  "name": "sandboxes_start_waits_out_stopping_survives_unavailable",
-  "description": "start waits out a stop with no deadline: four 503s in a row on GET /sandbox/:id while the box reads stopping (more than the request's own retries) stay on the poll ladder, and the box is restored once it reads archived.",
+  "name": "sandboxes_resume_waits_out_stopping",
+  "description": "resume on a box whose Pause is still landing: the resume answers 409 conflict while GET /sandbox/:id reads stopping; the SDK re-reads with backoff until paused, then resumes once more, and the 200 answer is the ready box.",
   "call": {
-    "op": "sandboxes.start",
+    "op": "sandboxes.resume",
     "args": {
       "id": "sbx_1"
     }
@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -69,70 +69,24 @@
         }
       },
       "response": {
-        "status": 503,
+        "status": 200,
         "body": {
-          "error": {
-            "code": "unavailable",
-            "message": "The control plane is restarting",
-            "retryable": true
-          }
-        }
-      }
-    },
-    {
-      "request": {
-        "method": "GET",
-        "path": "/sandbox/sbx_1",
-        "headers": {
-          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-        }
-      },
-      "response": {
-        "status": 503,
-        "body": {
-          "error": {
-            "code": "unavailable",
-            "message": "The control plane is restarting",
-            "retryable": true
-          }
-        }
-      }
-    },
-    {
-      "request": {
-        "method": "GET",
-        "path": "/sandbox/sbx_1",
-        "headers": {
-          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-        }
-      },
-      "response": {
-        "status": 503,
-        "body": {
-          "error": {
-            "code": "unavailable",
-            "message": "The control plane is restarting",
-            "retryable": true
-          }
-        }
-      }
-    },
-    {
-      "request": {
-        "method": "GET",
-        "path": "/sandbox/sbx_1",
-        "headers": {
-          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-        }
-      },
-      "response": {
-        "status": 503,
-        "body": {
-          "error": {
-            "code": "unavailable",
-            "message": "The control plane is restarting",
-            "retryable": true
-          }
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-10-29T00:00:00.000Z",
+          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
         }
       }
     },
@@ -151,7 +105,7 @@
           "name": "worker-1",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "archived",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,
@@ -169,7 +123,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -177,12 +131,35 @@
       "response": {
         "status": 200,
         "body": {
-          "success": true
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": true,
+          "readiness": "ready",
+          "httpsReady": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["pause", "restart", "delete", "fork"]
         }
       }
     }
   ],
   "expect": {
-    "result": null
+    "result": {
+      "id": "sbx_1",
+      "status": "running",
+      "readiness": "ready"
+    }
   }
 }

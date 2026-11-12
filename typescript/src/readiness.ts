@@ -32,7 +32,7 @@ function awaitsTailnet(detail: SandboxDetail): boolean {
 /**
  * Whether the box will answer, as the server decided it (`readiness`). A control
  * plane that predates the field gets the rule this SDK used before it: ready,
- * private and waiting for a tailnet, ended (`destroyed`, `stopped`, `deleting`),
+ * private and waiting for a tailnet, ended (`destroyed`, `deleting`),
  * or still settling. The fallback can be removed once every control plane sends
  * `readiness`.
  */
@@ -43,24 +43,25 @@ export function readinessOf(detail: SandboxDetail): SandboxReadiness {
 function fallbackReadiness(detail: SandboxDetail): SandboxReadiness {
   if (detail.ready) return 'ready'
   if (awaitsTailnet(detail)) return 'awaits_tailnet'
-  if (detail.status === 'destroyed' || detail.status === 'stopped') return 'gone'
+  if (detail.status === 'destroyed') return 'gone'
+  if (detail.status === 'paused') return 'paused'
   if (detail.status === 'deleting') return 'deleting'
   // Every other status, a later one this SDK does not know included, may still come up.
   return 'settling'
 }
 
-/** The remedy for a paused box: start it, unless the server says it cannot start now. */
+/** The remedy for a paused box: resume it, unless the server says it cannot resume now. */
 function pausedRemedy(detail: SandboxDetail): string {
   const actions = detail.allowedActions
-  return actions === undefined || actions === null || actions.includes('start')
-    ? 'start it with sandboxes.start'
-    : 'it cannot be started now; see its allowedActions'
+  return actions === undefined || actions === null || actions.includes('resume')
+    ? 'resume it with sandboxes.resume'
+    : 'it cannot be resumed now; see its allowedActions'
 }
 
 /**
  * The error a wait raises for a box that will not become ready by itself, or null
  * while it may (`ready`, `settling`, `awaits_tailnet`). Each is an answered verdict,
- * never retryable: nothing but the caller starts the box again.
+ * never retryable: nothing but the caller resumes the box.
  */
 export function endedError(id: string, detail: SandboxDetail): ZipboxError | null {
   const readiness = readinessOf(detail)
@@ -72,16 +73,13 @@ export function endedError(id: string, detail: SandboxDetail): ZipboxError | nul
     case 'paused':
       return new ZipboxError({
         code: 'box_not_running',
-        message: `box ${id} is paused and nothing will start it; ${pausedRemedy(detail)}`,
+        message: `box ${id} is paused and nothing will resume it; ${pausedRemedy(detail)}`,
         retryable: false
       })
     case 'start_failed':
       return new ZipboxError({
         code: 'start_failed',
-        message:
-          detail.status === 'stopped'
-            ? `box ${id} failed to start and its name was released; create it again`
-            : `box ${id} failed to start; start it again with sandboxes.start`,
+        message: `box ${id} failed to start; ${pausedRemedy(detail)}`,
         retryable: false
       })
     case 'deleting':
@@ -89,6 +87,36 @@ export function endedError(id: string, detail: SandboxDetail): ZipboxError | nul
       return new ZipboxError({
         code: 'conflict',
         message: `box ${id} is ${detail.status} and will not become ready`,
+        retryable: false
+      })
+  }
+}
+
+/**
+ * The error a wait for a Pause raises for a box that will not reach `paused` by
+ * itself, or null while it may (`paused`, `settling`). A box that reads ready again
+ * had its Pause cancelled or refused; a deleted, gone or failed box will not pause.
+ * Each is an answered verdict, never retryable.
+ */
+export function pauseEndedError(id: string, detail: SandboxDetail): ZipboxError | null {
+  const readiness = readinessOf(detail)
+  switch (readiness) {
+    case 'paused':
+    case 'settling':
+      return null
+    case 'ready':
+    case 'awaits_tailnet':
+      return new ZipboxError({
+        code: 'conflict',
+        message: `box ${id} is running: its pause was cancelled or did not take effect`,
+        retryable: false
+      })
+    case 'start_failed':
+    case 'deleting':
+    case 'gone':
+      return new ZipboxError({
+        code: 'conflict',
+        message: `box ${id} is ${readiness} and will not pause`,
         retryable: false
       })
   }
@@ -112,7 +140,7 @@ export function boxNotReadyError(id: string, detail: SandboxDetail): ZipboxError
   }
   return new ZipboxError({
     code: 'box_not_running',
-    message: `box ${id} is not ready (status: ${detail.status}); start it with sandboxes.start`,
+    message: `box ${id} is not ready (status: ${detail.status}); resume it with sandboxes.resume`,
     // Without `readiness` (an older control plane), the rule before it: booting or
     // restarting comes back by itself, and nothing else does.
     retryable:

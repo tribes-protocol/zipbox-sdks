@@ -1,0 +1,41 @@
+{
+  "name": "sandboxes_restart_paused_conflict",
+  "description": "sandboxes.restart of a paused box: the server answers 409 conflict (resume it first). It is raised as conflict, not retried, and not turned into a resume.",
+  "call": {
+    "op": "sandboxes.restart",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/reset",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "conflict",
+            "message": "This machine is paused. Resume it first.",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#conflict"
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "conflict",
+      "status": 409,
+      "retryable": false
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
-  "name": "sandboxes_get_or_create_lost_start_race",
-  "description": "Two callers start one paused name: the loser's restore answers 409, and the box reads provisioning. That is the server's idempotent answer, so getOrCreate waits on the box instead of raising conflict.",
+  "name": "sandboxes_get_or_create_lost_resume_race",
+  "description": "Two callers resume one paused name: the loser's resume answers 409, and the box reads provisioning. That is the server's idempotent answer, so getOrCreate waits on the box instead of raising conflict.",
   "call": {
     "op": "sandboxes.getOrCreate",
     "args": {
@@ -24,14 +24,14 @@
             "name": "demo",
             "domain": "zbox.sh",
             "ipv6": "2a01::1",
-            "status": "archived",
+            "status": "paused",
             "tier": "s",
             "pendingTier": null,
             "isArchived": true,
             "createdAt": "2026-11-09T00:00:00.000Z",
             "updatedAt": "2026-11-09T00:00:00.000Z",
             "phase": "paused",
-            "allowedActions": ["start", "delete", "fork"]
+            "allowedActions": ["resume", "delete", "fork"]
           }
         ]
       }
@@ -39,7 +39,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -118,7 +118,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -140,7 +140,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }

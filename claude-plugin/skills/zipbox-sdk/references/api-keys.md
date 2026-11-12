@@ -6,7 +6,7 @@
 
 Account keys (zb_…) - create, delete, what a key can and cannot do, rate limits and OAuth rows.
 
-An API key is an account credential. It does everything the dashboard can do on your boxes - create, start, stop, run commands, move files - and nothing that touches money or other credentials.
+An API key is an account credential. It does everything the dashboard can do on your boxes - create, pause, resume, run commands, move files - and nothing that touches money or other credentials.
 
 ## Create a key
 
@@ -22,7 +22,7 @@ Keys live at the account level only. There is nothing key-related inside a box: 
 
 ## Delete a key
 
-Press **Delete** next to the key in Settings. The key is gone for good: its row disappears from the list, it fails on the control plane at once, and within seconds every running box stops accepting that key's box tokens and closes the sockets they opened (stopped boxes learn it when they start). Apps connected through OAuth with that key are signed out. Other keys are untouched, and deleting one frees a slot under the 20-key limit. A command started with the key keeps running: the box is still yours, and deleting the box is the kill switch.
+Press **Delete** next to the key in Settings. The key is gone for good: its row disappears from the list, it fails on the control plane at once, and within seconds every running box stops accepting that key's box tokens and closes the sockets they opened (paused boxes learn it when they resume). Apps connected through OAuth with that key are signed out. Other keys are untouched, and deleting one frees a slot under the 20-key limit. A command started with the key keeps running: the box is still yours, and deleting the box is the kill switch.
 
 ## What a key can and cannot do
 

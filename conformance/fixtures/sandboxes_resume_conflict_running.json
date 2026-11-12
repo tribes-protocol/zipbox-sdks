@@ -1,8 +1,8 @@
 {
-  "name": "sandboxes_start_conflict_running",
-  "description": "start on a running box: the 409 conflict is raised as it came; the SDK reads the box once and does not wait or retry.",
+  "name": "sandboxes_resume_conflict_running",
+  "description": "resume on a running box: the 409 conflict is raised as it came; the SDK reads the box once and does not wait or retry.",
   "call": {
-    "op": "sandboxes.start",
+    "op": "sandboxes.resume",
     "args": {
       "id": "sbx_1"
     }
@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }

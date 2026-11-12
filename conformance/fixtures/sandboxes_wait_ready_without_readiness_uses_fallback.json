@@ -1,6 +1,6 @@
 {
   "name": "sandboxes_wait_ready_without_readiness_uses_fallback",
-  "description": "A control plane that predates readiness: the wait falls back to ready and status. provisioning keeps polling, and deleting raises conflict.",
+  "description": "An API older than /wait answers GET /sandbox/:id/wait 404 and its rows carry no readiness: the SDK polls GET /sandbox/:id and applies the rule before readiness (provisioning keeps reading, deleting raises conflict).",
   "call": {
     "op": "sandboxes.waitReady",
     "args": {
@@ -8,6 +8,21 @@
     }
   },
   "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1/wait?until=ready",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": "Route not found"
+        }
+      }
+    },
     {
       "request": {
         "method": "GET",

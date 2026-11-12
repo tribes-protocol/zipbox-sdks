@@ -9,13 +9,14 @@ use zipbox::{CreateOptions, ErrorCode, ForkOptions, ForkSourcePolicy, Zipbox};
 
 use common::MockServer;
 
-// A legacy `stopped` row is dead: waiting for it to become ready would poll forever.
+// A destroyed row without readiness is dead: waiting for it to become ready would
+// wait forever.
 #[tokio::test]
 async fn wait_ready_gives_up_on_a_dead_box() {
     let (api, listener) = MockServer::bind().await;
     api.state.lock().unwrap().exchanges = vec![json!({
-        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
-        "response": { "status": 200, "body": { "id": "sbx_1", "status": "stopped", "ready": false } }
+        "request": { "method": "GET", "path": "/sandbox/sbx_1/wait?until=ready" },
+        "response": { "status": 200, "body": { "id": "sbx_1", "status": "destroyed", "ready": false } }
     })];
     api.serve(listener);
     let zb = Zipbox::builder()
@@ -31,6 +32,8 @@ async fn wait_ready_gives_up_on_a_dead_box() {
     assert_eq!(err.code, ErrorCode::Conflict);
     assert!(api.finish().is_empty(), "{:?}", api.finish());
 }
+
+const WAIT: &str = "/sandbox/sbx_1/wait?until=ready";
 
 fn private_detail(base_url: &str) -> serde_json::Value {
     json!({
@@ -150,7 +153,7 @@ async fn get_or_create_returns_an_unjoined_private_box_once_running_with_its_key
             "response": { "status": 200, "body": [private_row(false, None)] }
         }),
         json!({
-            "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+            "request": { "method": "GET", "path": WAIT },
             "response": { "status": 200, "body": private_row(false, None) }
         }),
     ];
@@ -177,11 +180,11 @@ async fn get_or_create_waits_for_ready_on_a_joined_private_box() {
             "response": { "status": 200, "body": [private_row(false, Some("100.101.32.7"))] }
         }),
         json!({
-            "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+            "request": { "method": "GET", "path": WAIT },
             "response": { "status": 200, "body": private_row(false, Some("100.101.32.7")) }
         }),
         json!({
-            "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+            "request": { "method": "GET", "path": WAIT },
             "response": { "status": 200, "body": private_row(true, Some("100.101.32.7")) }
         }),
     ];
@@ -218,7 +221,7 @@ async fn get_or_create_with_sends_every_create_option_on_the_claim() {
             "response": { "status": 200, "body": { "sandboxId": "sbx_1", "created": true } }
         }),
         json!({
-            "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+            "request": { "method": "GET", "path": WAIT },
             "response": { "status": 200, "body": private_row(false, None) }
         }),
     ];
@@ -258,7 +261,7 @@ async fn get_or_create_with_returns_an_existing_box_as_it_is() {
             "response": { "status": 200, "body": [row.clone()] }
         }),
         json!({
-            "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+            "request": { "method": "GET", "path": WAIT },
             "response": { "status": 200, "body": row }
         }),
     ];
@@ -309,6 +312,11 @@ async fn a_dropped_fork_wait_leaves_the_fork_running() {
         "request": { "method": "POST", "path": "/sandbox/sbx_1/fork" },
         "response": { "status": 202, "body": accepted }
     })];
+    // An API without /wait, so the wait polls on the flat ladder below.
+    exchanges.push(json!({
+        "request": { "method": "GET", "path": "/sandbox/sbx_2/wait?until=ready" },
+        "response": { "status": 404, "body": { "error": "Route not found" } }
+    }));
     // The new box keeps provisioning for longer than the caller waits.
     exchanges.extend((0..10_000).map(|_| {
         json!({
@@ -380,18 +388,18 @@ fn exec_exchange() -> serde_json::Value {
 async fn not_ready_reads_and_lifecycle_calls_drop_cached_access() {
     let (api, listener) = MockServer::bind().await;
     let paused = json!({
-        "id": "sbx_1", "status": "archived", "ready": false, "readiness": "paused"
+        "id": "sbx_1", "status": "paused", "ready": false, "readiness": "paused"
     });
     let mut exchanges = Vec::new();
     for (method, path) in [
         ("GET", "/sandbox/sbx_1"),
-        ("POST", "/sandbox/sbx_1/restore"),
+        ("POST", "/sandbox/sbx_1/pause"),
         ("POST", "/sandbox/sbx_1/reset"),
         ("POST", "/sandbox/sbx_1/tier"),
     ] {
         exchanges.push(exchange("GET", "/sandbox/sbx_1", ready_row(&api.base)));
         exchanges.push(exec_exchange());
-        let answer = if method == "GET" {
+        let answer = if method == "GET" || path.ends_with("/pause") {
             paused.clone()
         } else {
             json!({})
@@ -404,11 +412,11 @@ async fn not_ready_reads_and_lifecycle_calls_drop_cached_access() {
     api.serve(listener);
     let zb = client(&api.base);
     let mut sandbox = zb.sandbox("sbx_1");
-    for step in ["refresh", "start", "restart", "set_tier"] {
+    for step in ["refresh", "pause", "restart", "set_tier"] {
         sandbox.exec("true").await.unwrap();
         match step {
             "refresh" => sandbox.refresh().await.map(|_| ()).unwrap(),
-            "start" => sandbox.start().await.unwrap(),
+            "pause" => sandbox.pause().await.map(|_| ()).unwrap(),
             "restart" => sandbox.restart().await.unwrap(),
             _ => sandbox.set_tier("m").await.unwrap(),
         }
@@ -497,5 +505,158 @@ async fn an_unknown_code_maps_by_status() {
     let err = client(&api.base).sandboxes().list().await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Conflict);
     assert!(!err.retryable);
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+fn answer(method: &str, path: &str, status: u16, body: serde_json::Value) -> serde_json::Value {
+    json!({
+        "request": { "method": method, "path": path },
+        "response": { "status": status, "body": body }
+    })
+}
+
+fn settling_row() -> serde_json::Value {
+    json!({ "id": "sbx_1", "status": "provisioning", "ready": false, "readiness": "settling" })
+}
+
+// The server holds /wait until the box gets there or its hold limit passes, so a
+// settling answer is asked again at once: no poll rung in between. A 1 s poll base
+// would put three settling answers well past 2 s if they slept.
+#[tokio::test]
+async fn a_settling_wait_answer_is_asked_again_at_once() {
+    let (api, listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![
+        answer("GET", WAIT, 200, settling_row()),
+        answer("GET", WAIT, 200, settling_row()),
+        answer("GET", WAIT, 200, settling_row()),
+        answer("GET", WAIT, 200, ready_row(&api.base)),
+    ];
+    api.serve(listener);
+    let zb = Zipbox::builder()
+        .api_key("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+        .base_url(&api.base)
+        .poll_interval(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let sandbox = zb.sandboxes().wait_ready("sbx_1").await.unwrap();
+    assert!(sandbox.info().unwrap().ready);
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "slept between held answers: {:?}",
+        started.elapsed()
+    );
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// An API that predates /wait answers it 404 on a box that exists: the wait reads
+// GET /sandbox/:id and, finding the box, polls it on the poll ladder (the old wait).
+#[tokio::test]
+async fn a_wait_falls_back_to_polling_on_an_api_without_wait() {
+    let (api, listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![
+        answer("GET", WAIT, 404, json!({ "error": "Route not found" })),
+        answer("GET", "/sandbox/sbx_1", 200, settling_row()),
+        answer("GET", "/sandbox/sbx_1", 200, settling_row()),
+        answer("GET", "/sandbox/sbx_1", 200, ready_row(&api.base)),
+    ];
+    api.serve(listener);
+    let zb = Zipbox::builder()
+        .api_key("zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+        .base_url(&api.base)
+        .poll_interval(Duration::from_millis(40))
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let sandbox = zb.sandboxes().wait_ready("sbx_1").await.unwrap();
+    assert!(sandbox.info().unwrap().ready);
+    // Two poll rungs (40 ms, then 50 ms, each jittered no lower than half).
+    assert!(
+        started.elapsed() >= Duration::from_millis(40),
+        "the fallback did not sleep between reads: {:?}",
+        started.elapsed()
+    );
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// A create the server answered with the box already bound returns at once, and box
+// calls use the token in that answer: no wait and no detail read follow.
+#[tokio::test]
+async fn a_ready_claim_returns_at_once_with_its_token() {
+    let (api, listener) = MockServer::bind().await;
+    api.state.lock().unwrap().exchanges = vec![
+        answer(
+            "POST",
+            "/sandbox/identity/claim",
+            200,
+            json!({
+                "sandboxId": "sbx_1", "name": "demo", "status": "running", "created": true,
+                "ready": true, "readiness": "ready", "httpsReady": true,
+                "baseUrl": api.base, "boxToken": "bt_claim",
+                "phase": "running", "allowedActions": ["pause", "restart", "delete", "fork"]
+            }),
+        ),
+        json!({
+            "request": {
+                "method": "POST", "path": "/exec",
+                "headers": { "authorization": "Bearer bt_claim" }
+            },
+            "response": {
+                "status": 200,
+                "headers": { "content-type": "text/event-stream" },
+                "bodyText": "id: 0-0\nevent: start\ndata: {\"id\":\"c\"}\n\nid: 1-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n"
+            }
+        }),
+    ];
+    api.serve(listener);
+    let sandbox = client(&api.base)
+        .sandboxes()
+        .create(CreateOptions {
+            name: Some("demo".into()),
+            ..CreateOptions::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(sandbox.id(), "sbx_1");
+    assert!(sandbox.info().unwrap().ready);
+    assert_eq!(sandbox.exec("true").await.unwrap().exit_code, Some(0));
+    assert!(api.finish().is_empty(), "{:?}", api.finish());
+}
+
+// stop and start are aliases: the same requests as pause and resume, the same result.
+#[tokio::test]
+async fn stop_and_start_send_what_pause_and_resume_send() {
+    let paused =
+        json!({ "id": "sbx_1", "status": "paused", "ready": false, "readiness": "paused" });
+    let (api, listener) = MockServer::bind().await;
+    // The box answers nowhere: start's background pre-connect of the origin resume
+    // left (tests/preconnect.rs) fails quietly instead of reaching this strict server.
+    // Port 1 is refused in every run (a freed bind(0) port can be any server's next).
+    let box_origin = "http://127.0.0.1:1".to_string();
+    api.state.lock().unwrap().exchanges = vec![
+        answer("POST", "/sandbox/sbx_1/pause", 202, settling_row()),
+        answer(
+            "GET",
+            "/sandbox/sbx_1/wait?until=paused",
+            200,
+            paused.clone(),
+        ),
+        answer("POST", "/sandbox/sbx_1/pause", 202, settling_row()),
+        answer("GET", "/sandbox/sbx_1/wait?until=paused", 200, paused),
+        answer("POST", "/sandbox/sbx_1/resume", 202, settling_row()),
+        answer("GET", WAIT, 200, ready_row(&box_origin)),
+        answer("POST", "/sandbox/sbx_1/resume", 202, settling_row()),
+        answer("GET", WAIT, 200, ready_row(&box_origin)),
+    ];
+    api.serve(listener);
+    let zb = client(&api.base);
+    let by_pause = serde_json::to_value(zb.sandboxes().pause("sbx_1").await.unwrap()).unwrap();
+    let by_stop = serde_json::to_value(zb.sandboxes().stop("sbx_1").await.unwrap()).unwrap();
+    assert_eq!(by_pause, by_stop);
+    assert_eq!(by_pause["readiness"], "paused");
+    let by_resume = serde_json::to_value(zb.sandboxes().resume("sbx_1").await.unwrap()).unwrap();
+    let by_start = serde_json::to_value(zb.sandboxes().start("sbx_1").await.unwrap()).unwrap();
+    assert_eq!(by_resume, by_start);
+    assert_eq!(by_resume["readiness"], "ready");
     assert!(api.finish().is_empty(), "{:?}", api.finish());
 }

@@ -5,8 +5,8 @@ import { Zipbox } from '@zipbox/sdk'
 const repo = process.env.GITHUB_REPOSITORY ?? ''
 const sha = process.env.GITHUB_SHA ?? 'HEAD'
 const zb = new Zipbox()
-// One box per repository, reused across runs; nothing stops it on a clock, so stop
-// it explicitly when the job is done.
+// One box per repository, reused across runs; nothing stops it on a clock, so pause
+// it explicitly when the job is done (the next run's getOrCreate resumes it).
 // The tier applies only the first time, when the box is created.
 const box = await zb.sandboxes.getOrCreate(
   `ci-${repo.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`.slice(0, 63),
@@ -26,5 +26,5 @@ for await (const event of box.execStream(script)) {
   if (event.type === 'stderr') process.stderr.write(event.data)
   if (event.type === 'exit') exitCode = event.exitCode
 }
-await box.stop()
+await box.pause()
 process.exit(exitCode ?? 1)

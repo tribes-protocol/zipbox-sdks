@@ -103,7 +103,7 @@ export function fakeZipbox(on: On, options: FakeOptions = {}) {
       if (path === '/sandbox')
         return answer(200, [
           { id: 'b-1', name: 'dev', status: 'running', tier: 's' },
-          { id: 'b-2', name: 'old', status: 'stopped', tier: 's' }
+          { id: 'b-2', name: 'old', status: 'paused', tier: 's' }
         ])
       if (path === '/sandbox/b-1')
         return answer(200, {

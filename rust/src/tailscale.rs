@@ -54,7 +54,7 @@ impl Tailscale {
                     let mut err = Error::new(
                         ErrorCode::BoxNotRunning,
                         format!(
-                            "box {} is {}; start it before connecting Tailscale",
+                            "box {} is {}; resume it before connecting Tailscale",
                             self.id, detail.info.status
                         ),
                     );

@@ -1,6 +1,6 @@
 {
   "name": "zipbox",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Zipbox in Claude Code: a pane of your boxes and their agent tasks, /zipbox commands, the Zipbox MCP server and the zipbox-sdk skill.",
   "author": { "name": "Zipbox", "email": "support@tribes.xyz" },
   "homepage": "https://zipbox.ai/docs/integrations",

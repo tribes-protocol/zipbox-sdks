@@ -10,9 +10,9 @@ An account holds **250 machine names**. Reuse them: a fleet that needs many boxe
 
 ## What counts
 
-A machine **name** is permanent. The first time you create a box with a name, its subdomain (`worker-07.zbox.sh`), its mailbox address (`worker-07@zbox.sh`) and its wallets are reserved to your account, and deleting the box keeps all of them. That is what lets `getOrCreate(name)` bring a deleted box back under the same address.
+A machine **name** is permanent. The first time you create a box with a name, its subdomain (`worker-07.zbox.sh`) and its mailbox address (`worker-07@zbox.sh`) are reserved to your account, and so are its mailbox and wallets once they are first used. Deleting the box keeps all of them. That is what lets `getOrCreate(name)` bring a deleted box back under the same address.
 
-Every name your account has ever created counts toward the 250, whether its box is running, stopped or deleted. A name you already own never counts again: creating, starting or rebooting it uses nothing up.
+Every name your account has ever created counts toward the 250, whether its box is running, paused or deleted. A name you already own never counts again: creating, resuming or rebooting it uses nothing up.
 
 ## What happens at the limit
 
@@ -31,7 +31,7 @@ Once the account holds 250 names, a `create` with a **new** name answers `403 ma
 }
 ```
 
-The full message also says that deleted names stay yours, links this page and gives the support address. Nothing is created or charged, and the SDKs do not retry it. Every name you already own keeps working: get-or-create it, start it, or create it again after deleting its box. The dashboard shows the same message under the **Boot machine** button.
+The full message also says that deleted names stay yours, links this page and gives the support address. Nothing is created or charged, and the SDKs do not retry it. Every name you already own keeps working: get-or-create it, resume it, or create it again after deleting its box. The dashboard shows the same message under the **Boot machine** button.
 
 ## Keep a pool of names and reuse them
 

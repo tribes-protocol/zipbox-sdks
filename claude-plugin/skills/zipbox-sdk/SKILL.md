@@ -4,7 +4,7 @@ description: >-
   Drive Zipbox boxes (long-lived Linux machines) from code or a terminal: create or
   reuse a box, run commands and stream their output, start background jobs and
   re-attach, read and write files, open a PTY, publish a port as a public HTTPS
-  preview, read logs, stop or delete the box. Covers the TypeScript, Python, Go and
+  preview, read logs, pause or delete the box. Covers the TypeScript, Python, Go and
   Rust SDKs, the `zipbox` CLI, the MCP server and plain HTTP. Load it whenever a task
   says Zipbox, a box or sandbox to create or drive, ZIPBOX_API_KEY, @zipbox/sdk,
   zipbox-go, or the zipbox crate — including an agent on one box driving another.
@@ -15,8 +15,7 @@ allowed-tools: bash read
 
 Zipbox gives you machines ("boxes") you drive from code. A box is a real, long-lived
 Linux machine with root, a public IPv6 address, its own `<name>.zbox.sh` domain and a
-desktop. **Nothing on a box stops on a clock** — no idle timeout, no auto-stop, no
-default command deadline. It runs until someone stops it.
+desktop. **Nothing on a box stops on a clock**: it runs until someone pauses it.
 
 One credential does everything: an **account API key** (`zb_…`), read from
 `ZIPBOX_API_KEY`. The SDKs, the CLI and the MCP server use it to reach the control
@@ -91,16 +90,17 @@ cmd = box.exec_background("npm run dev -- --port 3000 --host 127.0.0.1")
 # public https://app.<box host>
 print(box.preview.create(3000, label="app").url)
 
-# disk archived, bills nothing; start() brings it back
-zb.sandboxes.stop(box.id)
+# bills nothing while paused; resume() brings it back as it was
+zb.sandboxes.pause(box.id)
 ```
 
 Async code: `from zipbox import AsyncZipbox`, then the same calls with `await`
 (`async with AsyncZipbox() as zb:`).
 
 Other Python calls you will need: `zb.sandboxes.list()`, `get(id)`, `create(name=, tier=)`,
-`wait_ready(id)`, `start(id)`, `restart(id)`, `set_tier(id, tier)`, `cancel_transition(id)` (cancels
-a stop/start/restart/resize/fork still in flight: `"cleared"`, `"cancelling"` or `"none"`;
+`wait_ready(id)`, `resume(id)` (returns the box once ready; `stop`/`start` are aliases of
+`pause`/`resume`), `restart(id)`, `set_tier(id, tier)`, `cancel_transition(id)` (cancels
+a pause/resume/restart/resize/fork still in flight: `"cleared"`, `"cancelling"` or `"none"`;
 `conflict` past the point of no return), `fork(id, name=, source_policy=, private=None)` (a running
 source needs `"pause_and_resume"`; the new box starts public unless `private=True`), `get_fork(child_id)`, `delete(id, archive=None)`; `box.run_code("python",
 code, cwd=)`; `box.commands.get/events/stdin/close_stdin/signal`;
@@ -171,7 +171,7 @@ zipbox exec worker --background -- npm run dev
 zipbox files put worker ./local.txt remote.txt
 zipbox files cat worker remote.txt
 zipbox preview worker 3000
-zipbox sandbox stop worker
+zipbox sandbox pause worker
 zipbox docs box-api                     # any docs page as markdown
 ```
 
@@ -209,7 +209,7 @@ You are an agent on box A and need a clean machine for a job:
 1. Preflight: `ZIPBOX_API_KEY` must be set on box A (see Preflight).
 2. `zipbox sandbox create --name job-1` (or `get_or_create("job-1", tier="m")`).
 3. Run the work there with `exec`; copy results back with `files.read` / `zipbox files cat`.
-4. **Stop it** (`zipbox sandbox stop job-1`) — nothing stops it for you, and a
+4. **Pause it** (`zipbox sandbox pause job-1`) — nothing pauses it for you, and a
    running box bills by the hour. Delete it if it will never be reused.
 
 Prefer one named box per recurring job; a fresh box per run leaks a reserved address
@@ -228,9 +228,9 @@ GitHub in zipbox.ai Settings: `box.exec("git clone https://github.com/org/repo")
 ## Rules that save you a retry
 
 - **Exit codes are results.** Check `exit_code`; a failing command does not raise.
-- **Box not ready → `box_not_running`.** Start it (`start(id)`) and retry; `retryable` says if it comes back by itself, and a private box off its tailnet raises `tailnet_not_connected`.
-- **Waits never hang.** `create`, `get_or_create`, `wait_ready` and `fork` wait while `readiness` is `settling`, then raise `box_not_running` (paused), `start_failed` (start it again, or create a new box's name again) or `conflict` (deleting or gone). Rows carry `phase` and `allowed_actions`.
-- **Stop what you start.** No idle timeout exists to clean up after you.
+- **Box not ready → `box_not_running`.** Resume it (`resume(id)`) and retry; `retryable` says if it comes back by itself, and a private box off its tailnet raises `tailnet_not_connected`.
+- **Waits never hang.** `create`, `get_or_create`, `wait_ready`, `resume` and `fork` wait on `GET /sandbox/:id/wait` while `readiness` is `settling`, then raise `box_not_running` (paused), `start_failed` (resume it again) or `conflict` (deleting or gone). `pause` waits for `paused` and raises `conflict` if the pause was cancelled. Rows carry `phase` and `allowed_actions`.
+- **Pause what you start.** No idle timeout exists to clean up after you.
 - **Relative paths** resolve under `/root/workspace`; raw HTTP box routes need absolute paths.
 - **Do not retry `exec` blindly** — it runs the command again. The SDKs only retry safe requests, plus any box call that never reached the box (refused connection, DNS, failed TLS handshake): they re-read the box first, because a new box's `baseUrl` moves once, to `box--<name>`, a few minutes after create. Keep one client and let it follow; with raw HTTP, re-read `GET /sandbox/:id` on a connect error.
 - **Files over 250 MiB** fail with `invalid_request`; move them with `exec`
@@ -266,7 +266,7 @@ Every error carries a `code`; branch on it, not on the message:
 | `forbidden`                   | Dashboard-only action; send the user there             |
 | `not_found`                   | Wrong box id, command id or path                       |
 | `conflict`                    | Wrong state (e.g. already running): read the box first |
-| `box_not_running`             | Start the box, then retry                              |
+| `box_not_running`             | Resume the box, then retry                             |
 | `rate_limited`, `unavailable` | Wait (`retry_after_ms`) and retry                      |
 | `invalid_request`             | Fix the request                                        |
 | `machine_limit_reached`       | Reuse one of the account's existing names              |
@@ -280,7 +280,7 @@ Each error's `docs_url` / `docsUrl` points at the matching section of
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
 | Get started from nothing                               | `references/quickstart.md`                                                                           |
 | Understand keys, revocation, rate limits               | `references/api-keys.md`                                                                             |
-| Create, stop, start, resize, delete boxes              | `references/lifecycle.md`                                                                            |
+| Create, pause, resume, resize, delete boxes            | `references/lifecycle.md`                                                                            |
 | Stream, background, stdin, signals, files, PTY         | `references/box-api.md`                                                                              |
 | Publish a port                                         | `references/previews.md`                                                                             |
 | Fork a box: same files, new name and identity          | `references/fork.md`                                                                                 |

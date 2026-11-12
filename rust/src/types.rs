@@ -21,10 +21,9 @@ pub struct SandboxInfo {
     /// The box's public IPv6 address (SSH goes here directly).
     #[serde(default)]
     pub ipv6: Option<String>,
-    /// `provisioning`, `running`, `stopping`, `pausing` (paused: the VM is stopped and its
-    /// disk is safe on its host; its backup is still uploading; a start boots it at once),
-    /// `stopped`, `archived`, `deleting` (signing out of its tailnet before it is
-    /// destroyed) or `destroyed`.
+    /// `provisioning`, `running`, `stopping` (a Pause still landing), `paused` (nothing
+    /// is billed; a resume brings it back with its files), `deleting` (signing out of
+    /// its tailnet before it is destroyed) or `destroyed`.
     pub status: String,
     /// The machine tier (`xs` … `xxl`).
     #[serde(default)]
@@ -35,7 +34,7 @@ pub struct SandboxInfo {
     /// vCPUs, memory and disk the box runs with.
     #[serde(default)]
     pub machine_size: Option<Value>,
-    /// True while the disk is archived (a stopped box) or being archived.
+    /// True while the box has a backup copy of its disk (a paused box) or one is on its way.
     #[serde(default)]
     pub is_archived: Option<bool>,
     /// CPU use, percent of the box's vCPUs.
@@ -92,7 +91,7 @@ pub struct SandboxInfo {
     /// box still runs), `start_failed` or `gone`. `None` from an older control plane.
     #[serde(default)]
     pub phase: Option<String>,
-    /// The lifecycle verbs the box accepts now (`start`, `stop`, `restart`, `delete`,
+    /// The lifecycle verbs the box accepts now (`resume`, `pause`, `restart`, `delete`,
     /// `cancel_transition`, `fork`). A listed verb can still be refused for a reason
     /// outside the box: credit, capacity, an argument. `None` from an older control
     /// plane.
@@ -108,7 +107,7 @@ pub struct SandboxInfo {
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleStatus {
     /// `joining`, `connected`, `needsApproval`, `needsLogin`, `stopped` or `failed`;
-    /// `None` when only the identity is known (the box is stopped).
+    /// `None` when only the identity is known (the box is paused).
     #[serde(default)]
     pub state: Option<String>,
     /// The tailnet's name, e.g. `example.com`.
@@ -182,9 +181,10 @@ pub struct SandboxDetail {
     #[serde(default)]
     pub ready: bool,
     /// Whether the box will answer, from the same connection gate as `ready`: what
-    /// every wait reads. `ready`, `settling`, `awaits_tailnet`, `paused`,
-    /// `start_failed`, `deleting` or `gone`. `None` from an older control plane, where
-    /// the client falls back to `ready` and `status`.
+    /// every wait reads (on `GET /sandbox/:id`, its `/wait`, and lifecycle answers).
+    /// `ready`, `settling`, `awaits_tailnet`, `paused`, `start_failed`, `deleting` or
+    /// `gone`. `None` from an older control plane, where the client falls back to
+    /// `ready` and `status`.
     #[serde(default)]
     pub readiness: Option<String>,
     /// Whether `base_url` completes a TLS handshake with a trusted certificate yet.

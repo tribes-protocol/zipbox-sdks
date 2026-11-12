@@ -17,7 +17,7 @@ cargo add tokio --features full
 
 ## Quickstart
 
-Create a box, run a command, write and read a file, open a preview, stop the box. (`box` is a Rust keyword, so the examples call the handle `sbx`.)
+Create a box, run a command, write and read a file, open a preview, pause the box. (`box` is a Rust keyword, so the examples call the handle `sbx`.)
 
 ```rust
 use zipbox::Zipbox;
@@ -40,7 +40,7 @@ async fn main() -> Result<(), zipbox::Error> {
     sbx.exec_background("python3 -m http.server 8000 --bind 127.0.0.1").await?;
     println!("{}", sbx.preview().create(8000, None).await?.url);
 
-    zb.sandboxes().stop(sbx.id()).await?;
+    zb.sandboxes().pause(sbx.id()).await?;
     Ok(())
 }
 ```
@@ -57,7 +57,10 @@ async fn main() -> Result<(), zipbox::Error> {
 | `zb.sandboxes().get_or_create(name)` / `get_or_create_with(name, CreateOptions)`                   | `Sandbox`                                                                                             |
 | `zb.sandboxes().list()`                                                                            | `Vec<SandboxInfo>`                                                                                    |
 | `zb.sandboxes().get(id)`                                                                           | `Sandbox`                                                                                             |
-| `zb.sandboxes().start(id)` / `stop` / `restart`                                                    | `()`                                                                                                  |
+| `zb.sandboxes().pause(id)`                                                                         | `Sandbox`, paused                                                                                     |
+| `zb.sandboxes().resume(id)`                                                                        | `Sandbox`, ready                                                                                      |
+| `zb.sandboxes().stop(id)` / `start`                                                                | aliases of `pause` / `resume`: the same request and result                                            |
+| `zb.sandboxes().restart(id)`                                                                       | `()`                                                                                                  |
 | `zb.sandboxes().cancel_transition(id)`                                                             | `TransitionCancelOutcome` (`Cleared` / `Cancelling` / `None`; `Conflict` past the point of no return) |
 | `zb.sandboxes().fork(id, ForkOptions::new(name, source_policy))` (`private`, `tailscale_auth_key`) | `Sandbox`: the new box, ready (private: running; `wait: false`: as accepted)                          |
 | `zb.sandboxes().get_fork(id)`                                                                      | `SandboxFork` of the new box `id`                                                                     |
@@ -66,7 +69,7 @@ async fn main() -> Result<(), zipbox::Error> {
 | `zb.sandboxes().wait_ready(id)`                                                                    | `Sandbox`, ready (private, not joined: running)                                                       |
 | `zb.sandbox(id)`                                                                                   | `Sandbox` handle, no network call                                                                     |
 
-Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+Every wait (`create`, `get_or_create`, `wait_ready`, `resume`, `fork`) waits on `GET /sandbox/:id/wait?until=ready`, which the server answers as soon as the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is no longer `settling`, so it returns the moment the box is up; a held answer that is still `settling` is asked again at once, with no deadline, and a read that fails with a retryable error waits on the poll ladder. An API older than `/wait` is polled on `GET /sandbox/:id` instead. `pause` waits the same way with `until=paused`, and only when the server did not answer with the paused box already; a box that reads running again (its pause was cancelled) raises `conflict`. The wait returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowed_actions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
 
 A created box's `base_url` changes once, to `box--<name>`, a few minutes after create, and the SDK follows it. A box call whose request never reached the box (a refused connect, DNS, a failed TLS handshake) waits one backoff rung, re-reads the box with this same wait, and retries on the address and token it returns, with no attempt ceiling; a paused, failed or deleted box ends the call with the wait's error. A `Pty` dial that is refused before the upgrade re-reads the box the same way.
 
@@ -81,7 +84,7 @@ let opts = zipbox::CreateOptions {
 let sbx = zb.sandboxes().get_or_create_with("ci-runner", opts).await?;
 ```
 
-A `Sandbox` has `id()`, `info()` (the last `SandboxDetail` read), `refresh()` and `wait_ready()`, plus `start`, `stop`, `restart`, `cancel_transition`, `set_tier`, `delete`, `delete_with`, `fork` and `fork_status` on itself.
+A `Sandbox` has `id()`, `info()` (the last `SandboxDetail` read), `refresh()` and `wait_ready()`, plus `pause` and `resume` (each returns the new `&SandboxDetail`; `stop` and `start` are aliases), `restart`, `cancel_transition`, `set_tier`, `delete`, `delete_with`, `fork` and `fork_status` on itself.
 
 ### Fork
 
@@ -178,7 +181,7 @@ Dropping a stream disconnects it, which stops a foreground command; `exec_backgr
 Every failure is a `zipbox::Error` with `code` (`zipbox::ErrorCode`), `status`, `message`, `request_id`, `retryable`, `retry_after` (a `Duration`) and `docs_url`; a transport failure has code `Unavailable` and its cause in `source`. A box call does not return a failure to reach the box: it re-reads the box and retries (see the wait above) until the box answers or the wait ends it; drop the future to stop sooner. A non-zero exit code is a result.
 
 ```rust
-if let Err(e) = zb.sandboxes().start(&id).await {
+if let Err(e) = zb.sandboxes().resume(&id).await {
     if e.code == zipbox::ErrorCode::InsufficientCredits {
         println!("top up: {}", e.docs_url);
     } else {

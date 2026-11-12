@@ -1,6 +1,6 @@
 {
   "name": "exec_unsent_failure_on_paused_box_raises",
-  "description": "An unsent box failure re-enters the readiness wait, and the wait's own verdict ends the call: a box that reads paused raises box_not_running, not retryable, exactly as sandboxes.waitReady does. The retry has no attempt ceiling, so this verdict is what stops a call on a box nobody will start.",
+  "description": "An unsent box failure re-enters the readiness wait, and the wait's own verdict ends the call: a box that reads paused raises box_not_running, not retryable, exactly as sandboxes.waitReady does. The retry has no attempt ceiling, so this verdict is what stops a call on a box nobody will resume.",
   "call": {
     "op": "sandbox.exec",
     "args": {
@@ -41,7 +41,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -53,7 +53,7 @@
           "name": "demo",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "archived",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,
@@ -64,7 +64,7 @@
           "boxToken": null,
           "phase": "paused",
           "readiness": "paused",
-          "allowedActions": ["start", "delete", "fork"]
+          "allowedActions": ["resume", "delete", "fork"]
         }
       }
     }

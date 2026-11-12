@@ -1,6 +1,6 @@
 {
-  "name": "sandboxes_get_or_create_starts_pausing",
-  "description": "getOrCreate on a name whose box is pausing (Paused: the VM is stopped and its disk is safe on its host while its backup still uploads) starts it as it starts an archived box: the restore is accepted at once, then the wait reads it ready. It never hands back the paused box and never creates a second one.",
+  "name": "sandboxes_get_or_create_resumes_paused",
+  "description": "getOrCreate on a name whose box is paused resumes it: the resume is accepted with the box still settling (202), then the wait answers it ready. It never hands back the paused box and never creates a second one.",
   "call": {
     "op": "sandboxes.getOrCreate",
     "args": {
@@ -24,7 +24,7 @@
             "name": "worker-1",
             "domain": "zbox.sh",
             "ipv6": "2a01::1",
-            "status": "pausing",
+            "status": "paused",
             "tier": "s",
             "pendingTier": null,
             "isArchived": true,
@@ -34,7 +34,7 @@
             "createdAt": "2026-11-10T00:00:00.000Z",
             "updatedAt": "2026-11-10T00:00:00.000Z",
             "phase": "paused",
-            "allowedActions": ["start", "delete"]
+            "allowedActions": ["resume", "delete"]
           }
         ]
       }
@@ -42,22 +42,41 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
       },
       "response": {
-        "status": 200,
+        "status": 202,
         "body": {
-          "success": true
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "provisioning",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "starting",
+          "allowedActions": ["cancel_transition", "delete"]
         }
       }
     },
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -90,7 +109,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -115,7 +134,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }

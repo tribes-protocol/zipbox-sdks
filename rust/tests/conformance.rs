@@ -109,16 +109,18 @@ async fn run_op(zb: &Zipbox, op: &str, args: &Value) -> Result<Value, Error> {
         "sandboxes.waitReady" => Ok(to(serde_json::to_value(
             zb.sandboxes().wait_ready(arg(args, "id")).await?,
         ))),
-        "sandboxes.start" => zb
-            .sandboxes()
-            .start(arg(args, "id"))
-            .await
-            .map(|_| Value::Null),
-        "sandboxes.stop" => zb
-            .sandboxes()
-            .stop(arg(args, "id"))
-            .await
-            .map(|_| Value::Null),
+        "sandboxes.pause" => Ok(to(serde_json::to_value(
+            zb.sandboxes().pause(arg(args, "id")).await?,
+        ))),
+        "sandboxes.resume" => Ok(to(serde_json::to_value(
+            zb.sandboxes().resume(arg(args, "id")).await?,
+        ))),
+        "sandboxes.stop" => Ok(to(serde_json::to_value(
+            zb.sandboxes().stop(arg(args, "id")).await?,
+        ))),
+        "sandboxes.start" => Ok(to(serde_json::to_value(
+            zb.sandboxes().start(arg(args, "id")).await?,
+        ))),
         "sandboxes.restart" => zb
             .sandboxes()
             .restart(arg(args, "id"))

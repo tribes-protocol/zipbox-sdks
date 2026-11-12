@@ -8,7 +8,7 @@ Drive boxes from code - one API key, four SDKs, a CLI, an MCP server and plain H
 
 > **Agents:** researching Zipbox for a user? Read [/llms.txt](https://zipbox.ai/llms.txt) or call the `search_docs` tool on `https://mcp.zipbox.ai/docs/mcp` (no sign-in needed). The SDKs move faster than your training data.
 
-Everything you can do in the dashboard - create a box, run commands in it, move files, open a terminal, publish a port, stop it - you can do from code. The box is the same long-lived Linux machine your dashboard shows: same tiers, same credits, same lifecycle. Nothing on it stops on a clock.
+Everything you can do in the dashboard - create a box, run commands in it, move files, open a terminal, publish a port, pause it - you can do from code. The box is the same long-lived Linux machine your dashboard shows: same tiers, same credits, same lifecycle. Nothing on it stops on a clock.
 
 ## Install
 
@@ -111,11 +111,11 @@ curl -N -X POST "$BASE/exec" -H "Authorization: Bearer $BOX_TOKEN" \
   -H 'Accept: text/event-stream' -d '{"cmd":"uname -a"}'
 ```
 
-The [Quickstart](https://zipbox.ai/docs/quickstart.md) walks through the same thing step by step, including stopping the box.
+The [Quickstart](https://zipbox.ai/docs/quickstart.md) walks through the same thing step by step, including pausing the box.
 
 ## What you can do from code
 
-- **Boxes**: create, list, start, stop, restart, resize and delete them ([Boxes](https://zipbox.ai/docs/lifecycle.md)).
+- **Boxes**: create, list, pause, resume, restart, resize and delete them ([Boxes](https://zipbox.ai/docs/lifecycle.md)).
 - **Commands**: run a command and stream its output, or start it in the background and re-attach later ([Run commands](https://zipbox.ai/docs/commands.md)).
 - **Files**: read, write, list, move and delete files up to 250 MiB ([Files](https://zipbox.ai/docs/files.md)).
 - **Terminals**: open an interactive terminal that survives reconnects ([Terminals](https://zipbox.ai/docs/terminals.md)).
@@ -169,7 +169,7 @@ This project runs code on Zipbox boxes (long-lived Linux machines).
 - Previews: `zipbox preview <box-id> <port>`.
 - Docs as markdown: `zipbox docs <page>` or https://zipbox.ai/llms.txt.
 - Nothing on a box stops on a clock.
-  Stop it with `zipbox sandbox stop <box-id>`.
+  Pause it with `zipbox sandbox pause <box-id>`.
 ```
 
 ## Next steps

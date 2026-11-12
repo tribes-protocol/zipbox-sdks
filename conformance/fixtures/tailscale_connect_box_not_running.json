@@ -1,6 +1,6 @@
 {
   "name": "tailscale_connect_box_not_running",
-  "description": "A box with no agentPublicKey (not started) raises box_not_running without sending anything. A stopped box will not grow one by itself, so it is not retryable.",
+  "description": "A box with no agentPublicKey (not started) raises box_not_running without sending anything. A paused box will not grow one by itself, so it is not retryable.",
   "call": {
     "op": "tailscale.connect",
     "args": {
@@ -24,7 +24,7 @@
           "name": "demo",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "stopped",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": false,

@@ -16,7 +16,7 @@ npm install @zipbox/sdk
 
 ## Quickstart
 
-Create a box, run a command, write and read a file, open a preview, stop the box.
+Create a box, run a command, write and read a file, open a preview, pause the box.
 
 ```ts
 import { Zipbox } from '@zipbox/sdk'
@@ -34,7 +34,7 @@ await box.execBackground('python3 -m http.server 8000 --bind 127.0.0.1')
 const { url } = await box.preview.create(8000)
 console.log(url)
 
-await zb.sandboxes.stop(box.id)
+await zb.sandboxes.pause(box.id)
 ```
 
 ## Client
@@ -60,12 +60,15 @@ No request has a timeout unless you pass an `AbortSignal`.
 
 | Method                                                                              | Returns                                                                        | Route                                                  |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `zb.sandboxes.create({ name?, tier?, sshPublicKey?, mailbox?, private? })`          | `Sandbox` (ready; with `private`, running)                                     | claim, then `GET /sandbox/:id` until ready             |
+| `zb.sandboxes.create({ name?, tier?, sshPublicKey?, mailbox?, private? })`          | `Sandbox` (ready; with `private`, running)                                     | claim, then `GET /sandbox/:id/wait` unless ready       |
 | `zb.sandboxes.getOrCreate(name, { tier?, sshPublicKey?, mailbox?, private? })`      | `Sandbox`                                                                      | `GET /sandbox`, then create                            |
-| `zb.sandboxes.waitReady(id)`                                                        | `Sandbox` (ready; private and not joined: running)                             | `GET /sandbox/:id` until ready                         |
+| `zb.sandboxes.waitReady(id)`                                                        | `Sandbox` (ready; private and not joined: running)                             | `GET /sandbox/:id/wait?until=ready`                    |
 | `zb.sandboxes.list()`                                                               | `SandboxInfo[]`                                                                | `GET /sandbox`                                         |
 | `zb.sandboxes.get(id)`                                                              | `Sandbox`                                                                      | `GET /sandbox/:id`                                     |
-| `zb.sandboxes.start(id)` / `stop(id)` / `restart(id)`                               | `void`                                                                         | restore / pause / reset                                |
+| `zb.sandboxes.pause(id)`                                                            | `Sandbox`, paused                                                              | `POST /sandbox/:id/pause`, then `/wait` unless paused  |
+| `zb.sandboxes.resume(id)`                                                           | `Sandbox`, ready                                                               | `POST /sandbox/:id/resume`, then `/wait` unless ready  |
+| `zb.sandboxes.stop(id)` / `start(id)`                                               | aliases of `pause` / `resume`: the same request and result                     |                                                        |
+| `zb.sandboxes.restart(id)`                                                          | `void`                                                                         | `POST /sandbox/:id/reset`                              |
 | `zb.sandboxes.cancelTransition(id)`                                                 | `'cleared' \| 'cancelling' \| 'none'` (`conflict` past the point of no return) | `POST /sandbox/:id/transition/cancel`                  |
 | `zb.sandboxes.fork(id, { name, sourcePolicy, private?, tailscaleAuthKey?, wait? })` | `Sandbox`: the new box (ready; private: running; `wait: false`: as accepted)   | `POST /sandbox/:id/fork`, then the new box until ready |
 | `zb.sandboxes.getFork(id)`                                                          | `SandboxFork` of the new box `id`                                              | `GET /sandbox/:id/fork`                                |
@@ -73,7 +76,7 @@ No request has a timeout unless you pass an `AbortSignal`.
 | `zb.sandboxes.delete(id, { archive? })`                                             | `void`                                                                         | `DELETE /sandbox/:id`                                  |
 | `zb.sandbox(id)`                                                                    | `Sandbox` handle, no network call                                              |                                                        |
 
-Every wait (`create`, `getOrCreate`, `waitReady`, `fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowedActions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+Every wait (`create`, `getOrCreate`, `waitReady`, `resume`, `fork`) waits on `GET /sandbox/:id/wait?until=ready`, which the server answers as soon as the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is no longer `settling`, so it returns the moment the box is up; a held answer that is still `settling` is asked again at once, with no deadline, and a read that fails with a retryable error waits on the poll ladder. An API older than `/wait` is polled on `GET /sandbox/:id` instead. `pause` waits the same way with `until=paused`, and only when the server did not answer with the paused box already; a box that reads running again (its pause was cancelled) raises `conflict`. The wait returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `phase` and `allowedActions`; a detail also carries `readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
 
 A created box's `baseUrl` changes once, to `box--<name>`, a few minutes after create, and the SDK follows it. A box call that fails before anything was sent (connect, DNS, TLS handshake) waits one step of its backoff ladder (500 ms doubling to 30 s, jitter), re-reads the box with the same wait `create` uses, and retries on the address that read returned, with no attempt ceiling; the ladder starts over only when the box answers. A box that reads paused, failed or deleted ends the call with that wait's error (`box_not_running`, `start_failed`, `conflict`). A PTY whose dial fails re-reads the box the same way before it redials. A request that was sent is never repeated this way.
 
@@ -86,7 +89,7 @@ const box = await zb.sandboxes.getOrCreate('ci-runner', {
 })
 ```
 
-A `Sandbox` has `id`, the getters `name`, `status`, `tier`, `ready`, `baseUrl` and `ipv6`, `info` (the last `SandboxDetail` read, with every documented row field such as `cpuPct`), `refresh()`, `waitReady()`, `start()` / `stop()` / `restart()` / `cancelTransition()` / `setTier(tier)` / `delete({ archive? })`, `fork({ name, sourcePolicy, … })` / `forkStatus()`, and the methods below. Its box token and address are fetched on first use, cached for the life of the client, re-fetched once on a `401`, and re-read on a box call nothing was sent for (above).
+A `Sandbox` has `id`, the getters `name`, `status`, `tier`, `ready`, `baseUrl` and `ipv6`, `info` (the last `SandboxDetail` read, with every documented row field such as `cpuPct`), `refresh()`, `waitReady()`, `pause()` / `resume()` (each returns the new `SandboxDetail`; `stop()` / `start()` are aliases) / `restart()` / `cancelTransition()` / `setTier(tier)` / `delete({ archive? })`, `fork({ name, sourcePolicy, … })` / `forkStatus()`, and the methods below. Its box token and address are fetched on first use, cached for the life of the client, re-fetched once on a `401`, and re-read on a box call nothing was sent for (above).
 
 ### Fork
 
@@ -214,7 +217,7 @@ Every failure throws a `ZipboxError` with `code`, `status`, `message`, `requestI
 import { ZipboxError } from '@zipbox/sdk'
 
 try {
-  await zb.sandboxes.start(id)
+  await zb.sandboxes.resume(id)
 } catch (error) {
   if (error instanceof ZipboxError && error.code === 'insufficient_credits') {
     console.log('Top up first:', error.docsUrl)

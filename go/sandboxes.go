@@ -4,22 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
+	"strings"
 	"time"
 )
 
 // Status is a box's lifecycle state.
 type Status string
 
-// Box lifecycle states. StatusPausing reads as paused: the VM is stopped and its
-// disk is safe on its host; its backup is still uploading; Start boots it at once.
+// Box lifecycle states. StatusPaused: its Pause took effect and nothing is billed;
+// Resume brings it back with its files and installed software. StatusStopping is a
+// Pause still landing.
 const (
 	StatusProvisioning Status = "provisioning"
 	StatusRunning      Status = "running"
 	StatusStopping     Status = "stopping"
-	StatusPausing      Status = "pausing" // paused while its backup uploads
-	StatusStopped      Status = "stopped"
-	StatusArchived     Status = "archived"
+	StatusPaused       Status = "paused"
 	StatusDeleting     Status = "deleting" // signing out of its tailnet before it is destroyed
 	StatusDestroyed    Status = "destroyed"
 )
@@ -62,8 +63,8 @@ type Action string
 
 // Lifecycle verbs, as AllowedActions names them.
 const (
-	ActionStart            Action = "start"
-	ActionStop             Action = "stop"
+	ActionResume           Action = "resume"
+	ActionPause            Action = "pause"
 	ActionRestart          Action = "restart"
 	ActionDelete           Action = "delete"
 	ActionCancelTransition Action = "cancel_transition"
@@ -87,7 +88,7 @@ type Sandbox struct {
 	Tier        *string      `json:"tier,omitempty"`
 	PendingTier *string      `json:"pendingTier,omitempty"`
 	MachineSize *MachineSize `json:"machineSize,omitempty"`
-	// IsArchived is true when the disk is archived (a stopped box) or an archive is in flight.
+	// IsArchived is true when the box has a backup in cold storage or one is in flight.
 	IsArchived     *bool      `json:"isArchived,omitempty"`
 	CPUPct         *float64   `json:"cpuPct,omitempty"`
 	MemPct         *float64   `json:"memPct,omitempty"`
@@ -185,23 +186,57 @@ type createResponse struct {
 	Created   bool   `json:"created"`
 }
 
-// Create creates a box and waits until it is ready, re-reading it with
-// backoff. The wait has no deadline of its own; bound it with ctx. The request
-// carries an Idempotency-Key, so a retried create never makes two boxes. With
-// Private set it waits until the box is running with its key instead.
+// Create creates a box and returns it once it is ready: at once when the server
+// bound a booted machine inside the request (its answer is ready), else after
+// waiting as WaitReady does. The wait has no deadline of its own; bound it with ctx.
+// The request carries an Idempotency-Key, so a retried create never makes two
+// boxes. With Private set it waits until the box is running with its key instead.
 func (s *SandboxesService) Create(ctx context.Context, opts CreateOptions) (*Box, error) {
-	var created createResponse
-	headers := map[string]string{"Idempotency-Key": newID()}
+	var raw json.RawMessage
+	headers := map[string]string{
+		"Idempotency-Key": newID(),
+		"Accept":          claimStreamMediaType + ", application/json",
+	}
 	body := createBody{Name: opts.Name, Tier: opts.Tier, SSHPublicKey: opts.SSHPublicKey, Mailbox: opts.Mailbox, Private: opts.Private}
-	if err := s.client.api(ctx, "POST", "/sandbox/identity/claim", body, &created, true, headers); err != nil {
+	// The answer streamed (conformance README, streamed create); its placed line is
+	// never dialled. An unstreamed answer reads as before.
+	if err := s.client.apiUnwrap(ctx, "POST", "/sandbox/identity/claim", body, &raw, true, headers, readClaimStream); err != nil {
 		return nil, err
+	}
+	var created createResponse
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return nil, err
+	}
+	if detail := claimedDetail(created.SandboxID, raw); detail != nil {
+		return s.readyBox(created.SandboxID, detail), nil
 	}
 	return s.WaitReady(ctx, created.SandboxID)
 }
 
+// claimedDetail is the box a create answer carries when the server bound it inside
+// the request (ready, with its baseUrl and box token), or nil when it must be
+// waited on. An answer without the detail fields (an older control plane) is nil.
+func claimedDetail(id string, raw json.RawMessage) *SandboxDetail {
+	var probe struct {
+		Ready *bool `json:"ready"`
+	}
+	if json.Unmarshal(raw, &probe) != nil || probe.Ready == nil {
+		return nil
+	}
+	var detail SandboxDetail
+	if json.Unmarshal(raw, &detail) != nil {
+		return nil
+	}
+	detail.ID = id
+	if detail.readiness() != ReadinessReady || detail.BaseURL == nil {
+		return nil
+	}
+	return &detail
+}
+
 // readiness is the box's Readiness as the server decided it. A control plane that
 // predates the field gets the rule before it: ready, private and waiting for a
-// tailnet, ended (destroyed, stopped, deleting), or still settling. The fallback can
+// tailnet, ended (destroyed, deleting), or still settling. The fallback can
 // be removed once every control plane sends readiness.
 func (d *SandboxDetail) readiness() Readiness {
 	switch d.Readiness {
@@ -221,44 +256,61 @@ func (d *SandboxDetail) fallbackReadiness() Readiness {
 		return ReadinessAwaitsTailnet
 	}
 	switch d.Status {
-	case StatusDestroyed, StatusStopped:
+	case StatusDestroyed:
 		return ReadinessGone
 	case StatusDeleting:
 		return ReadinessDeleting
+	case StatusPaused:
+		return ReadinessPaused
 	}
 	return ReadinessSettling
 }
 
-// pausedRemedy is how to start a paused box, unless the server says it cannot start now.
+// pausedRemedy is how to resume a paused box, unless the server says it cannot resume now.
 func pausedRemedy(d *SandboxDetail) string {
 	if d.AllowedActions == nil {
-		return "start it with Start"
+		return "resume it with Sandboxes.Resume"
 	}
 	for _, action := range d.AllowedActions {
-		if action == ActionStart {
-			return "start it with Start"
+		if action == ActionResume {
+			return "resume it with Sandboxes.Resume"
 		}
 	}
-	return "it cannot be started now; see its AllowedActions"
+	return "it cannot be resumed now; see its AllowedActions"
 }
 
 // endedError is the error a wait returns for a box that will not become ready by
-// itself, or nil while it may. Each is an answered verdict, never retryable.
+// itself, or nil while it may. Each is an answered verdict, never retryable:
+// nothing but the caller resumes the box.
 func endedError(id string, d *SandboxDetail) error {
 	var zerr *Error
 	switch d.readiness() {
 	case ReadinessPaused:
-		zerr = newError(CodeBoxNotRunning, "box "+id+" is paused and nothing will start it; "+pausedRemedy(d))
+		zerr = newError(CodeBoxNotRunning, "box "+id+" is paused and nothing will resume it; "+pausedRemedy(d))
 	case ReadinessStartFailed:
-		remedy := "start it again with Start"
-		if d.Status == StatusStopped {
-			remedy = "its name was released; create it again"
-		}
-		zerr = newError(CodeStartFailed, "box "+id+" failed to start; "+remedy)
+		zerr = newError(CodeStartFailed, "box "+id+" failed to start; "+pausedRemedy(d))
 	case ReadinessDeleting, ReadinessGone:
 		zerr = newError(CodeConflict, "box "+id+" is "+string(d.Status)+" and will not become ready")
 	default:
 		return nil
+	}
+	zerr.Retryable = false
+	return zerr
+}
+
+// pauseEndedError is the error a wait for a Pause returns for a box that will not
+// reach paused by itself, or nil while it may (paused, settling). A box that reads
+// ready again had its Pause cancelled or refused; a deleted, gone or failed box
+// will not pause. Each is an answered verdict, never retryable.
+func pauseEndedError(id string, d *SandboxDetail) error {
+	var zerr *Error
+	switch readiness := d.readiness(); readiness {
+	case ReadinessPaused, ReadinessSettling:
+		return nil
+	case ReadinessReady, ReadinessAwaitsTailnet:
+		zerr = newError(CodeConflict, "box "+id+" is running: its pause was cancelled or did not take effect")
+	default:
+		zerr = newError(CodeConflict, "box "+id+" is "+string(readiness)+" and will not pause")
 	}
 	zerr.Retryable = false
 	return zerr
@@ -275,7 +327,7 @@ func boxNotReadyError(id string, d *SandboxDetail) *Error {
 		zerr.Retryable = false
 		return zerr
 	}
-	zerr := newError(CodeBoxNotRunning, "box "+id+" is "+string(d.Status)+", not ready; start it or wait")
+	zerr := newError(CodeBoxNotRunning, "box "+id+" is "+string(d.Status)+", not ready; resume it with Sandboxes.Resume or wait")
 	if d.Readiness == stated {
 		zerr.Retryable = stated == ReadinessSettling
 	} else {
@@ -286,10 +338,11 @@ func boxNotReadyError(id string, d *SandboxDetail) *Error {
 	return zerr
 }
 
-// WaitReady re-reads a box with backoff until it is ready, and returns its
-// handle. The wait has no deadline of its own; bound it with ctx. A private box
-// that has not joined a tailnet yet is returned once it is running with its key.
-// A box that will not become ready by itself is an error: paused
+// WaitReady waits until a box is ready, on GET /sandbox/{id}/wait (the server
+// answers when it is; an older API is polled with backoff instead), and returns
+// its handle. The wait has no deadline of its own; bound it with ctx. A private
+// box that has not joined a tailnet yet is returned once it is running with its
+// key. A box that will not become ready by itself is an error: paused
 // CodeBoxNotRunning, a failed start CodeStartFailed, deleting or gone
 // CodeConflict, none of them retryable.
 func (s *SandboxesService) WaitReady(ctx context.Context, id string) (*Box, error) {
@@ -300,12 +353,108 @@ func (s *SandboxesService) WaitReady(ctx context.Context, id string) (*Box, erro
 	return s.readyBox(id, detail), nil
 }
 
-// waitSettled re-reads a box with backoff until it is ready or awaits its tailnet,
-// and returns that last read. The server's readiness decides: settling keeps
-// reading, and a box that will not become ready by itself is endedError. A read
-// that fails with a retryable error goes on the same ladder, never sooner than its
-// RetryAfter. The wait has no deadline of its own; ctx bounds it.
+// waitTarget is what a wait waits for, the `until` of GET /sandbox/{id}/wait: the
+// box answering (untilReady), or its Pause taking effect (untilPaused).
+type waitTarget string
+
+const (
+	untilReady  waitTarget = "ready"
+	untilPaused waitTarget = "paused"
+)
+
+// settle is one read inside a wait: the detail once the wait is over, nil while the
+// box may still get there, or the answered verdict of a box that will not get there
+// by itself. A wait for ready also ends on awaits_tailnet (a private box running
+// with its key: the caller seals an auth key to it).
+func settle(id string, d *SandboxDetail, until waitTarget) (*SandboxDetail, error) {
+	if until == untilReady {
+		if err := endedError(id, d); err != nil {
+			return nil, err
+		}
+		if d.readiness() == ReadinessSettling {
+			return nil, nil
+		}
+		return d, nil
+	}
+	if err := pauseEndedError(id, d); err != nil {
+		return nil, err
+	}
+	if d.readiness() == ReadinessPaused {
+		return d, nil
+	}
+	return nil, nil
+}
+
+// waitSettled waits until the box is ready or awaits its tailnet, and returns that
+// last read: what Create, GetOrCreate, WaitReady, Fork and a re-resolve wait on.
 func (s *SandboxesService) waitSettled(ctx context.Context, id string) (*SandboxDetail, error) {
+	return s.waitUntil(ctx, id, untilReady)
+}
+
+// remember caches the box target a ready read names; a box that is not ready no
+// longer answers where it did, so its cached credentials go.
+func (s *SandboxesService) remember(id string, detail *SandboxDetail) {
+	if s.client.storeCreds(id, detail) == nil {
+		s.client.forget(id)
+	}
+}
+
+// readWait is one GET /sandbox/{id}/wait?until=...: the server holds it until the
+// box reaches until, cannot reach it by itself, or its hold limit passes.
+func (s *SandboxesService) readWait(ctx context.Context, id string, until waitTarget) (*SandboxDetail, error) {
+	var out SandboxDetail
+	if err := s.client.api(ctx, "GET", "/sandbox/"+url.PathEscape(id)+"/wait?until="+string(until), nil, &out, true, nil); err != nil {
+		return nil, err
+	}
+	s.remember(id, &out)
+	return &out, nil
+}
+
+// waitUntil waits until the box reaches until, on GET /sandbox/{id}/wait: the
+// server holds the request until the box gets there (pushed when the host answers,
+// no polling), until it cannot get there by itself, or until its hold limit passes.
+// A held answer that is still settling is asked again at once: the server did the
+// waiting. A read that fails with a retryable error goes on the poll ladder, never
+// sooner than its RetryAfter. An API that predates /wait answers it 404 on a box
+// that exists: then this is the poll on GET /sandbox/{id} it replaced, whose 404 is
+// the box's own. The wait has no deadline of its own; ctx bounds it.
+func (s *SandboxesService) waitUntil(ctx context.Context, id string, until waitTarget) (*SandboxDetail, error) {
+	for attempt := 0; ; {
+		detail, err := s.readWait(ctx, id, until)
+		if err == nil {
+			done, verdict := settle(id, detail, until)
+			if verdict != nil {
+				return nil, verdict
+			}
+			if done != nil {
+				return done, nil
+			}
+			attempt = 0
+			continue
+		}
+		zerr, ok := asError(err)
+		if ok && zerr.Code == CodeNotFound {
+			return s.pollUntil(ctx, id, until)
+		}
+		if !ok || !zerr.Retryable {
+			return nil, err
+		}
+		wait := s.client.poll(attempt)
+		attempt++
+		if zerr.hasRetryAfter && zerr.RetryAfter > wait {
+			wait = zerr.RetryAfter
+		}
+		if err := sleep(ctx, wait); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// pollUntil is the wait for an API without /wait: it re-reads GET /sandbox/{id}
+// with backoff, never on a deadline, until the box reaches until or will not get
+// there by itself. A read that fails with a retryable error (a control-plane
+// deploy) goes on the same ladder, never sooner than its RetryAfter.
+func (s *SandboxesService) pollUntil(ctx context.Context, id string, until waitTarget) (*SandboxDetail, error) {
 	for attempt := 0; ; attempt++ {
 		var retryAfter time.Duration
 		detail, err := s.Get(ctx, id)
@@ -318,11 +467,12 @@ func (s *SandboxesService) waitSettled(ctx context.Context, id string) (*Sandbox
 				retryAfter = zerr.RetryAfter
 			}
 		} else {
-			if ended := endedError(id, detail); ended != nil {
-				return nil, ended
+			done, verdict := settle(id, detail, until)
+			if verdict != nil {
+				return nil, verdict
 			}
-			if detail.readiness() != ReadinessSettling {
-				return detail, nil
+			if done != nil {
+				return done, nil
 			}
 		}
 		wait := s.client.poll(attempt)
@@ -358,7 +508,7 @@ func (s *SandboxesService) getInWait(ctx context.Context, id string) (*SandboxDe
 	}
 }
 
-// readyBox is the handle for a box waitSettled returned.
+// readyBox is the handle for a box a wait or a lifecycle answer returned.
 func (s *SandboxesService) readyBox(id string, detail *SandboxDetail) *Box {
 	box := s.client.Sandbox(id)
 	s.client.storeCreds(id, detail)
@@ -366,10 +516,10 @@ func (s *SandboxesService) readyBox(id string, detail *SandboxDetail) *Box {
 	return box
 }
 
-// GetOrCreate returns the live box with this name, starting it if it is
-// stopped, or creates it with opts. It waits until the box is ready; a private
-// box that has not joined a tailnet yet is returned once it is running with its
-// key. opts.Name must be empty or name (CodeInvalidRequest otherwise).
+// GetOrCreate returns the live box with this name, resuming it if it is paused,
+// or creates it with opts. It waits until the box is ready; a private box that has
+// not joined a tailnet yet is returned once it is running with its key. opts.Name
+// must be empty or name (CodeInvalidRequest otherwise).
 //
 // The options apply only when a box is created. A box that already has this name
 // is returned as it is, even when it differs (another tier, not private): that is
@@ -384,19 +534,19 @@ func (s *SandboxesService) GetOrCreate(ctx context.Context, name string, opts Cr
 		return nil, err
 	}
 	for _, sb := range boxes {
-		if sb.Name == nil || *sb.Name != name || sb.Status == StatusDestroyed || sb.Status == StatusStopped || sb.Status == StatusDeleting {
+		if sb.Name == nil || *sb.Name != name || sb.Status == StatusDestroyed || sb.Status == StatusDeleting {
 			continue
 		}
-		// StatusStopping: a stop is still landing; Start waits it out, then starts.
-		// StatusPausing: paused while its backup uploads; Start boots it at once.
-		if sb.Status == StatusArchived || sb.Status == StatusStopping || sb.Status == StatusPausing {
-			if err := s.Start(ctx, sb.ID); err != nil {
+		// StatusStopping: a Pause is still landing; requestResume waits it out, then resumes.
+		if sb.Status == StatusPaused || sb.Status == StatusStopping {
+			accepted, err := s.requestResume(ctx, sb.ID)
+			if err != nil {
 				// The name was being deleted: it is gone now, so make it.
 				if IsCode(err, CodeNotFound) {
 					break
 				}
-				// Another caller started it first: the server's idempotent answer to a
-				// second restore. A box now coming up is waited on like any other.
+				// Another caller resumed it first: the server's idempotent answer to a
+				// second resume. A box now coming up is waited on like any other.
 				if !IsCode(err, CodeConflict) {
 					return nil, err
 				}
@@ -407,6 +557,8 @@ func (s *SandboxesService) GetOrCreate(ctx context.Context, name string, opts Cr
 				if detail.Status != StatusProvisioning && detail.Status != StatusRunning {
 					return nil, err
 				}
+			} else if accepted != nil && accepted.readiness() == ReadinessReady {
+				return s.readyBox(sb.ID, accepted), nil
 			}
 		}
 		return s.WaitReady(ctx, sb.ID)
@@ -439,58 +591,151 @@ func (s *SandboxesService) Get(ctx context.Context, id string) (*SandboxDetail, 
 	return &out, nil
 }
 
-// Start starts a stopped box. Credit-gated: insufficient_credits when dry.
-//
-// A stop is accepted at once but its disk takes seconds to minutes to land;
-// meanwhile the box reads StatusStopping and the restore answers conflict. Start
-// waits that out with backoff and starts the box once it reads StatusArchived.
-// A box that comes out of the wait already starting or running (a resize
-// restores itself, a failed archive leaves it running) is started. Any other
-// conflict is returned as it came.
-func (s *SandboxesService) Start(ctx context.Context, id string) error {
+// lifecycle sends a lifecycle verb. The answer is the box's detail: its final state
+// (200) when the host answered within the server's budget, or its state in
+// transition (202). Nil for an answer that carries no detail.
+func (s *SandboxesService) lifecycle(ctx context.Context, id, action string) (*SandboxDetail, error) {
 	s.client.forget(id)
+	var raw json.RawMessage
+	if err := s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/"+action, nil, &raw, false, nil); err != nil {
+		// An accepted verb with an empty body carries no detail.
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var probe struct {
+		ID     *string `json:"id"`
+		Status *string `json:"status"`
+		Ready  *bool   `json:"ready"`
+	}
+	if json.Unmarshal(raw, &probe) != nil || probe.ID == nil || probe.Status == nil || probe.Ready == nil {
+		return nil, nil
+	}
+	var detail SandboxDetail
+	if json.Unmarshal(raw, &detail) != nil {
+		return nil, nil
+	}
+	s.remember(id, &detail)
+	return &detail, nil
+}
+
+// finish is the accepted detail when it already shows until, else the wait for it.
+func (s *SandboxesService) finish(ctx context.Context, id string, until waitTarget, accepted *SandboxDetail) (*SandboxDetail, error) {
+	if accepted != nil && accepted.readiness() == Readiness(until) {
+		return accepted, nil
+	}
+	return s.waitUntil(ctx, id, until)
+}
+
+// Pause pauses a box and returns it paused. Nothing is billed while it is paused,
+// and Resume brings it back with its files and installed software. It returns at
+// once when the server answers with the paused box, else waits for the Pause to
+// take effect (no deadline of its own; bound it with ctx). A box that reads running
+// again (the Pause was cancelled) is CodeConflict.
+func (s *SandboxesService) Pause(ctx context.Context, id string) (*Box, error) {
+	accepted, err := s.lifecycle(ctx, id, "pause")
+	if err != nil {
+		return nil, err
+	}
+	detail, err := s.finish(ctx, id, untilPaused, accepted)
+	if err != nil {
+		return nil, err
+	}
+	return s.readyBox(id, detail), nil
+}
+
+// Resume resumes a paused box and returns it ready. A box still StatusStopping is
+// resumed once its Pause lands. It returns at once when the server answers with the
+// ready box, else waits as WaitReady does. Credit-gated: insufficient_credits when
+// dry.
+func (s *SandboxesService) Resume(ctx context.Context, id string) (*Box, error) {
+	accepted, err := s.requestResume(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := s.finish(ctx, id, untilReady, accepted)
+	if err != nil {
+		return nil, err
+	}
+	return s.readyBox(id, detail), nil
+}
+
+// Stop is an alias of Pause: the same request and the same result.
+func (s *SandboxesService) Stop(ctx context.Context, id string) (*Box, error) {
+	return s.Pause(ctx, id)
+}
+
+// Start is an alias of Resume: the same request and the same result.
+func (s *SandboxesService) Start(ctx context.Context, id string) (*Box, error) {
+	return s.Resume(ctx, id)
+}
+
+// requestResume sends Resume and returns the detail it answered with (nil when the
+// box came back by itself). A Pause the host has not answered yet leaves the box
+// StatusStopping, and Resume answers conflict meanwhile. requestResume waits that
+// out with backoff and resumes the box once it reads StatusPaused. A box that comes
+// out of the wait already starting or running (a resize restores itself, a failed
+// pause leaves it running) is not resumed again. Any other conflict is returned as
+// it came.
+//
+// In parallel with the resume, never waited for, the box's last known origin is
+// pre-connected (Client.preconnect), so the first call after it skips TCP and TLS.
+func (s *SandboxesService) requestResume(ctx context.Context, id string) (*SandboxDetail, error) {
+	origin, drop := s.client.preconnect(id)
+	accepted, err := s.sendResume(ctx, id)
+	if drop != nil && (err != nil || movedOrigin(accepted, origin)) {
+		// A failed resume, or a box that moved (a name cutover, private mode): reach
+		// it the normal way.
+		drop()
+	}
+	return accepted, err
+}
+
+// movedOrigin reports whether a resume answered on another origin than the one
+// pre-connected. An answer that names no origin yet moved nothing.
+func movedOrigin(accepted *SandboxDetail, origin string) bool {
+	return accepted != nil && accepted.BaseURL != nil && strings.TrimRight(*accepted.BaseURL, "/") != origin
+}
+
+// sendResume sends Resume, waiting out a Pause still landing (see requestResume).
+func (s *SandboxesService) sendResume(ctx context.Context, id string) (*SandboxDetail, error) {
 	waited := false
 	for {
-		err := s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/restore", nil, nil, false, nil)
+		accepted, err := s.lifecycle(ctx, id, "resume")
 		var zerr *Error
 		if !errors.As(err, &zerr) || zerr.Code != CodeConflict {
-			return err
+			return accepted, err
 		}
 		detail, getErr := s.getInWait(ctx, id)
 		if getErr != nil {
-			return getErr
+			return nil, getErr
 		}
 		if detail.Status != StatusStopping {
-			// A second conflict after a stop was waited out: the box restored itself,
-			// or it is archived and will not restore (that answer is final).
+			// A second conflict after a pause was waited out: the box came back by
+			// itself, or it is paused and will not resume (that answer is final).
 			if waited && (detail.Status == StatusProvisioning || detail.Status == StatusRunning) {
-				return nil
+				return nil, nil
 			}
-			return err
+			return nil, err
 		}
 		for attempt := 0; detail.Status == StatusStopping; attempt++ {
 			if sleepErr := sleep(ctx, s.client.poll(attempt)); sleepErr != nil {
-				return sleepErr
+				return nil, sleepErr
 			}
 			if detail, getErr = s.getInWait(ctx, id); getErr != nil {
-				return getErr
+				return nil, getErr
 			}
 		}
 		waited = true
 		switch detail.Status {
-		case StatusArchived:
+		case StatusPaused:
 		case StatusProvisioning, StatusRunning:
-			return nil
+			return nil, nil
 		default:
-			return err
+			return nil, err
 		}
 	}
-}
-
-// Stop stops a box: its disk is archived and nothing is billed while stopped.
-func (s *SandboxesService) Stop(ctx context.Context, id string) error {
-	s.client.forget(id)
-	return s.client.api(ctx, "POST", "/sandbox/"+url.PathEscape(id)+"/pause", nil, nil, false, nil)
 }
 
 // Restart hard-restarts a running box. Files survive; running processes do not.
@@ -512,7 +757,7 @@ const (
 	TransitionNone TransitionCancelOutcome = "none"
 )
 
-// CancelTransition cancels the box's state change in flight (a stop, a start, a
+// CancelTransition cancels the box's state change in flight (a pause, a resume, a
 // restart, a tier change) and returns it to where it was. Past the point of no
 // return it fails with CodeConflict carrying the server's reason. Not retried.
 func (s *SandboxesService) CancelTransition(ctx context.Context, id string) (TransitionCancelOutcome, error) {

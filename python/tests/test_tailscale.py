@@ -234,7 +234,7 @@ def _get_or_create(rows: list[dict[str, Any]]) -> Any:
         },
     ] + [
         {
-            "request": {"method": "GET", "path": "/sandbox/sbx"},
+            "request": {"method": "GET", "path": "/sandbox/sbx/wait?until=ready"},
             "response": {"status": 200, "body": row},
         }
         for row in rows

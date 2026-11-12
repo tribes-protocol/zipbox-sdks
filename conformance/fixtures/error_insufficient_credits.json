@@ -2,7 +2,7 @@
   "name": "error_insufficient_credits",
   "description": "402 is not retried.",
   "call": {
-    "op": "sandboxes.start",
+    "op": "sandboxes.resume",
     "args": {
       "id": "sbx_1"
     }
@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }

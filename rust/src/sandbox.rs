@@ -66,22 +66,37 @@ impl Sandbox {
         Ok(self.detail.insert(detail))
     }
 
-    /// Re-reads the box with backoff until it is ready (see
-    /// [`crate::Sandboxes::wait_ready`]).
+    /// Waits until the box is ready (see [`crate::Sandboxes::wait_ready`]).
     pub async fn wait_ready(&mut self) -> Result<&SandboxDetail> {
         let ready = self.client.sandboxes().wait_ready(&self.id).await?;
         let detail = ready.detail.expect("wait_ready returns the detail it read");
         Ok(self.detail.insert(detail))
     }
 
-    /// Starts the box if it is stopped.
-    pub async fn start(&self) -> Result<()> {
-        self.client.sandboxes().start(&self.id).await
+    /// Pauses the box (nothing billed while paused) and returns its detail, paused
+    /// (see [`crate::Sandboxes::pause`]).
+    pub async fn pause(&mut self) -> Result<&SandboxDetail> {
+        let paused = self.client.sandboxes().pause(&self.id).await?;
+        let detail = paused.detail.expect("pause returns the detail it read");
+        Ok(self.detail.insert(detail))
     }
 
-    /// Stops the box.
-    pub async fn stop(&self) -> Result<()> {
-        self.client.sandboxes().stop(&self.id).await
+    /// Resumes the paused box and returns its detail, ready. A box still `stopping`
+    /// is resumed once its Pause lands (see [`crate::Sandboxes::resume`]).
+    pub async fn resume(&mut self) -> Result<&SandboxDetail> {
+        let ready = self.client.sandboxes().resume(&self.id).await?;
+        let detail = ready.detail.expect("resume returns the detail it read");
+        Ok(self.detail.insert(detail))
+    }
+
+    /// Alias of [`Sandbox::pause`]: the same request and the same result.
+    pub async fn stop(&mut self) -> Result<&SandboxDetail> {
+        self.pause().await
+    }
+
+    /// Alias of [`Sandbox::resume`]: the same request and the same result.
+    pub async fn start(&mut self) -> Result<&SandboxDetail> {
+        self.resume().await
     }
 
     /// Hard-restarts the box.

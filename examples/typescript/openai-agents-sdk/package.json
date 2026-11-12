@@ -7,7 +7,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@zipbox/sdk": "0.1.7",
+    "@zipbox/sdk": "0.2.0",
     "@openai/agents": "0.20.0",
     "zod": "4.6.7"
   },

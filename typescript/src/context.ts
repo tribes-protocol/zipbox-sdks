@@ -1,7 +1,7 @@
 import { backoffDelay, sleep } from './backoff.js'
 import { ZipboxError } from './errors.js'
-import { isTransitionCancelResult, readJson } from './guards.js'
-import { endedError, readinessOf } from './readiness.js'
+import { isSandboxDetail, isTransitionCancelResult, readJson } from './guards.js'
+import { endedError, pauseEndedError, readinessOf } from './readiness.js'
 import type { BoxTransport, ControlPlane } from './transport.js'
 import type {
   SandboxDetail,
@@ -28,17 +28,21 @@ export function boxPath(id: string, suffix = ''): string {
   return `/sandbox/${encodeURIComponent(id)}${suffix}`
 }
 
-export async function getDetail(
-  ctx: ClientContext,
-  id: string,
-  signal?: AbortSignal
-): Promise<SandboxDetail> {
-  const detail = await ctx.api.getDetail(id, signal)
+/** Cache a detail's address and token, and return the row without the token. */
+export function remember(ctx: ClientContext, detail: SandboxDetail): SandboxDetail {
   ctx.boxes.seed(detail)
   // The token lives in the transport only, so logging or serializing a Sandbox never leaks it.
   const { boxToken, ...row } = detail
   void boxToken
   return row
+}
+
+export async function getDetail(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<SandboxDetail> {
+  return remember(ctx, await ctx.api.getDetail(id, signal))
 }
 
 // A box turns ready about a second after it serves, and nothing tells the client when,
@@ -58,18 +62,102 @@ function pollDelay(ctx: ClientContext, attempt: number): number {
 }
 
 /**
- * Re-read the box until it is ready, or, for a private box that has not joined a
- * tailnet yet, until it is running with its own key (the caller seals an auth key to
- * it). The server's `readiness` decides: `settling` keeps reading, and `paused`,
- * `start_failed`, `deleting` and `gone` raise their answered verdict. Client-side
- * polling with backoff, never on a deadline: a box that is still booting is still
- * booting. A read that fails with a retryable error (a control-plane deploy) goes
- * on the same ladder, never sooner than its `retryAfterMs`. Abort with the signal.
+ * What a wait waits for: the box answering (`ready`), or its Pause taking effect
+ * (`paused`). It is the `until` of `GET /sandbox/:id/wait`.
  */
-export async function waitUntilReady(
+export type WaitTarget = 'ready' | 'paused'
+
+/** Whether a read already shows what the caller waits for. */
+function reached(detail: SandboxDetail, until: WaitTarget): boolean {
+  return readinessOf(detail) === until
+}
+
+/**
+ * One read inside a wait: the detail once the wait is over, null while the box may
+ * still get there. A box that will not get there by itself raises its answered
+ * verdict. A wait for `ready` also ends on `awaits_tailnet` (a private box running
+ * with its key: the caller seals an auth key to it).
+ */
+function settle(id: string, detail: SandboxDetail, until: WaitTarget): SandboxDetail | null {
+  const ended = until === 'ready' ? endedError(id, detail) : pauseEndedError(id, detail)
+  if (ended !== null) throw ended
+  if (until === 'ready') return readinessOf(detail) === 'settling' ? null : detail
+  return reached(detail, until) ? detail : null
+}
+
+async function readWait(
+  ctx: ClientContext,
+  id: string,
+  until: WaitTarget,
+  signal: AbortSignal | undefined
+): Promise<SandboxDetail> {
+  const response = await ctx.api.request({
+    method: 'GET',
+    path: boxPath(id, `/wait?until=${until}`),
+    signal
+  })
+  return remember(ctx, await readJson(response, isSandboxDetail, 'GET /sandbox/:id/wait'))
+}
+
+/**
+ * Wait until the box reaches `until`, on `GET /sandbox/:id/wait`: the server holds
+ * the request until the box gets there (pushed when the host answers, no polling),
+ * until it cannot get there by itself, or until its hold limit passes. A held
+ * answer that is still settling is asked again at once: the server did the
+ * waiting. There is no deadline; abort with the signal. A read that fails with a
+ * retryable error goes on the poll ladder, never sooner than its `retryAfterMs`.
+ * An API that predates `/wait` answers it 404 on a box that exists: then this is
+ * the poll on `GET /sandbox/:id` it replaced, whose 404 is the box's own.
+ */
+export async function waitUntil(
+  ctx: ClientContext,
+  id: string,
+  until: WaitTarget,
+  signal?: AbortSignal
+): Promise<SandboxDetail> {
+  for (let attempt = 0; ; ) {
+    let retryAfterMs = 0
+    let detail: SandboxDetail | null = null
+    try {
+      detail = await readWait(ctx, id, until, signal)
+    } catch (error) {
+      if (!(error instanceof ZipboxError)) throw error
+      if (error.code === 'not_found') return pollUntil(ctx, id, until, signal)
+      if (!error.retryable) throw error
+      retryAfterMs = error.retryAfterMs ?? 0
+    }
+    if (detail !== null) {
+      const done = settle(id, detail, until)
+      if (done !== null) return done
+      attempt = 0
+      // No delay: the server held this request. The zero sleep only honours an abort.
+      await sleep(0, signal)
+      continue
+    }
+    await sleep(Math.max(retryAfterMs, pollDelay(ctx, attempt++)), signal)
+  }
+}
+
+/** {@link waitUntil} for `ready`: what `create`, `getOrCreate`, `waitReady` and `fork` wait on. */
+export function waitUntilReady(
   ctx: ClientContext,
   id: string,
   signal?: AbortSignal
+): Promise<SandboxDetail> {
+  return waitUntil(ctx, id, 'ready', signal)
+}
+
+/**
+ * The wait for an API without `/wait`: re-read `GET /sandbox/:id` with backoff,
+ * never on a deadline, until the box reaches `until` or will not get there by
+ * itself. A read that fails with a retryable error (a control-plane deploy) goes on
+ * the same ladder, never sooner than its `retryAfterMs`.
+ */
+async function pollUntil(
+  ctx: ClientContext,
+  id: string,
+  until: WaitTarget,
+  signal: AbortSignal | undefined
 ): Promise<SandboxDetail> {
   for (let attempt = 0; ; attempt++) {
     let retryAfterMs = 0
@@ -81,9 +169,8 @@ export async function waitUntilReady(
       retryAfterMs = error.retryAfterMs ?? 0
     }
     if (detail !== null) {
-      const ended = endedError(id, detail)
-      if (ended !== null) throw ended
-      if (readinessOf(detail) !== 'settling') return detail
+      const done = settle(id, detail, until)
+      if (done !== null) return done
     }
     await sleep(Math.max(retryAfterMs, pollDelay(ctx, attempt)), signal)
   }
@@ -109,42 +196,104 @@ export async function readDetailInWait(
   }
 }
 
-export async function lifecycle(
-  ctx: ClientContext,
-  id: string,
-  action: 'pause' | 'restore' | 'reset',
-  signal?: AbortSignal
-): Promise<void> {
-  ctx.boxes.invalidate(id)
-  await ctx.api.request({ method: 'POST', path: boxPath(id, `/${action}`), signal })
+function parseBody(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
 }
 
 /**
- * Start a stopped box. A stop is accepted at once but its disk takes seconds to
- * minutes to land; meanwhile the box reads `stopping` and `start` answers
- * `conflict`. Wait that out, client-side with backoff, and start the box once it
- * reads `archived`. A box that comes out of the wait already starting or running
- * (a resize restores itself, a failed archive leaves it running) is started.
- * Any other `conflict` (a running box that was never stopping, a box that will
- * not restore) is raised as it came.
+ * Send a lifecycle verb. The answer is the box's detail: its final state (200) when
+ * the host answered within the server's budget, or its state in transition (202).
+ * Null for an answer that carries no detail.
  */
-export async function startBox(
+export async function lifecycle(
+  ctx: ClientContext,
+  id: string,
+  action: 'pause' | 'resume' | 'reset',
+  signal?: AbortSignal
+): Promise<SandboxDetail | null> {
+  ctx.boxes.invalidate(id)
+  const response = await ctx.api.request({
+    method: 'POST',
+    path: boxPath(id, `/${action}`),
+    signal
+  })
+  const body = parseBody(await response.text())
+  return isSandboxDetail(body) ? remember(ctx, body) : null
+}
+
+/** The accepted detail when it already shows `until`, else the wait for it. */
+function finish(
+  ctx: ClientContext,
+  id: string,
+  until: WaitTarget,
+  accepted: SandboxDetail | null,
+  signal: AbortSignal | undefined
+): Promise<SandboxDetail> {
+  if (accepted !== null && reached(accepted, until)) return Promise.resolve(accepted)
+  return waitUntil(ctx, id, until, signal)
+}
+
+/**
+ * Pause the box and return it paused: at once when the server answered with the
+ * final state (200), else after waiting for the Pause to take effect (202).
+ */
+export async function pauseBox(
   ctx: ClientContext,
   id: string,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<SandboxDetail> {
+  return finish(ctx, id, 'paused', await lifecycle(ctx, id, 'pause', signal), signal)
+}
+
+/**
+ * Send Resume, and return the detail it answered with (null when the box came back
+ * by itself). A Pause the host has not answered yet leaves the box `stopping`, and
+ * Resume answers `conflict` meanwhile. Wait that out, client-side with backoff, and
+ * resume the box once it reads `paused`. A box that comes out of the wait already
+ * starting or running (a resize restores itself, a failed pause leaves it running)
+ * is not resumed again. Any other `conflict` (a running box that was never
+ * stopping, a box that will not resume) is raised as it came.
+ */
+export async function requestResume(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<SandboxDetail | null> {
+  // In parallel with the resume, never waited for: the first call after it reuses
+  // the connection instead of paying TCP + TLS (conformance README, pre-connect).
+  const preconnect = ctx.boxes.preconnect(id)
+  try {
+    const accepted = await sendResume(ctx, id, signal)
+    ctx.boxes.settlePreconnect(preconnect, accepted)
+    return accepted
+  } catch (error) {
+    preconnect?.controller.abort()
+    throw error
+  }
+}
+
+async function sendResume(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<SandboxDetail | null> {
   let waited = false
   for (;;) {
     try {
-      await lifecycle(ctx, id, 'restore', signal)
-      return
+      return await lifecycle(ctx, id, 'resume', signal)
     } catch (error) {
       if (!(error instanceof ZipboxError) || error.code !== 'conflict') throw error
       let detail = await readDetailInWait(ctx, id, signal)
       if (detail.status !== 'stopping') {
-        // A second conflict after a stop was waited out: the box restored itself,
-        // or it is archived and will not restore (that answer is final).
-        if (waited && (detail.status === 'provisioning' || detail.status === 'running')) return
+        // A second conflict after a pause was waited out: the box came back by itself,
+        // or it is paused and will not resume (that answer is final).
+        if (waited && (detail.status === 'provisioning' || detail.status === 'running')) {
+          return null
+        }
         throw error
       }
       for (let attempt = 0; detail.status === 'stopping'; attempt++) {
@@ -152,10 +301,23 @@ export async function startBox(
         detail = await readDetailInWait(ctx, id, signal)
       }
       waited = true
-      if (detail.status === 'provisioning' || detail.status === 'running') return
-      if (detail.status !== 'archived') throw error
+      if (detail.status === 'provisioning' || detail.status === 'running') return null
+      if (detail.status !== 'paused') throw error
     }
   }
+}
+
+/**
+ * Resume the box and return it ready: at once when the server answered with the
+ * final state (200), else after waiting for it (202, or a Pause still landing, see
+ * {@link requestResume}). Credit-gated: `insufficient_credits` when the balance is dry.
+ */
+export async function resumeBox(
+  ctx: ClientContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<SandboxDetail> {
+  return finish(ctx, id, 'ready', await requestResume(ctx, id, signal), signal)
 }
 
 /**

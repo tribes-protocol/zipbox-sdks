@@ -2,7 +2,6 @@ package zipbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -57,8 +56,7 @@ func (b *Box) Refresh(ctx context.Context) (*SandboxDetail, error) {
 	return detail, nil
 }
 
-// WaitReady re-reads the box with backoff until it is ready (see
-// SandboxesService.WaitReady).
+// WaitReady waits until the box is ready (see SandboxesService.WaitReady).
 func (b *Box) WaitReady(ctx context.Context) (*SandboxDetail, error) {
 	ready, err := b.client.Sandboxes.WaitReady(ctx, b.ID)
 	if err != nil {
@@ -68,11 +66,33 @@ func (b *Box) WaitReady(ctx context.Context) (*SandboxDetail, error) {
 	return b.Detail, nil
 }
 
-// Start starts the box if it is stopped (see SandboxesService.Start).
-func (b *Box) Start(ctx context.Context) error { return b.client.Sandboxes.Start(ctx, b.ID) }
+// Pause pauses the box (nothing billed while paused) and returns its row, paused
+// (see SandboxesService.Pause).
+func (b *Box) Pause(ctx context.Context) (*SandboxDetail, error) {
+	paused, err := b.client.Sandboxes.Pause(ctx, b.ID)
+	if err != nil {
+		return nil, err
+	}
+	b.Detail = paused.Detail
+	return b.Detail, nil
+}
 
-// Stop stops the box: its disk is archived and nothing is billed while stopped.
-func (b *Box) Stop(ctx context.Context) error { return b.client.Sandboxes.Stop(ctx, b.ID) }
+// Resume resumes the paused box and returns its row, ready. A box still stopping
+// is resumed once its Pause lands (see SandboxesService.Resume).
+func (b *Box) Resume(ctx context.Context) (*SandboxDetail, error) {
+	ready, err := b.client.Sandboxes.Resume(ctx, b.ID)
+	if err != nil {
+		return nil, err
+	}
+	b.Detail = ready.Detail
+	return b.Detail, nil
+}
+
+// Stop is an alias of Pause: the same request and the same result.
+func (b *Box) Stop(ctx context.Context) (*SandboxDetail, error) { return b.Pause(ctx) }
+
+// Start is an alias of Resume: the same request and the same result.
+func (b *Box) Start(ctx context.Context) (*SandboxDetail, error) { return b.Resume(ctx) }
 
 // Restart hard-restarts the box. Files survive; running processes do not.
 func (b *Box) Restart(ctx context.Context) error { return b.client.Sandboxes.Restart(ctx, b.ID) }
@@ -114,6 +134,7 @@ func (c *Client) storeCreds(id string, detail *SandboxDetail) *boxCreds {
 		creds.reachable = previous.reachable
 	}
 	c.creds[id] = creds
+	c.lastOrigins[id] = creds
 	c.mu.Unlock()
 	return creds
 }
@@ -308,7 +329,7 @@ func (b *Box) json(ctx context.Context, method, boxPath string, query url.Values
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return decodeJSON(resp.Body, out)
 }
 
 // host is the custom preview apex, without the transport prefix or port: `box--` on
@@ -346,4 +367,49 @@ func ResolvePath(p string) string {
 type boxResponse struct {
 	*http.Response
 	creds *boxCreds
+}
+
+// preconnectPath is the box's health route: unauthenticated and cheap, and what its
+// host itself probes. A resume pre-connects with it.
+const preconnectPath = "/healthz"
+
+// preconnect opens a connection to the box's last known origin on the client's own
+// pool: one GET of its health route, its body drained so the connection returns to
+// the pool. It runs in the background and is never waited for or retried; a failure
+// changes nothing. It returns that origin and a func that drops the request, or ""
+// and nil when this client never saw the box ready or the box is private (off its
+// tailnet the connect would hang).
+//
+// Safe to dial early, unlike a create's placed origin: it is the origin a ready answer
+// already named for this box, an existing name whose DNS record is live and proven,
+// never a fresh name.
+func (c *Client) preconnect(id string) (string, context.CancelFunc) {
+	c.mu.Lock()
+	last := c.lastOrigins[id]
+	c.mu.Unlock()
+	if last == nil || last.detail == nil || last.detail.PrivateMode {
+		return "", nil
+	}
+	return last.baseURL, c.preconnectOrigin(last.baseURL)
+}
+
+// preconnectOrigin opens a connection to origin the same way. It returns the func that
+// drops the request.
+func (c *Client) preconnectOrigin(origin string) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+preconnectPath, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("User-Agent", "zipbox-sdk-go/"+Version)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	return cancel
 }

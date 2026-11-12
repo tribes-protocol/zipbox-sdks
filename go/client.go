@@ -31,7 +31,7 @@ import (
 )
 
 // Version is the SDK version, sent in the User-Agent header.
-const Version = "0.1.7"
+const Version = "0.2.0"
 
 // DefaultBaseURL is the Zipbox control plane.
 const DefaultBaseURL = "https://api.tribes.xyz"
@@ -60,7 +60,10 @@ type Client struct {
 
 	mu    sync.Mutex
 	creds map[string]*boxCreds
-	rnd   *rand.Rand
+	// lastOrigins is the last target each box answered on, kept across forget: a
+	// paused box's detail names none, and its resume pre-connects to the one it had.
+	lastOrigins map[string]*boxCreds
+	rnd         *rand.Rand
 }
 
 // Option configures a Client.
@@ -121,6 +124,7 @@ func New(apiKey string, opts ...Option) *Client {
 		ptyBase:     500 * time.Millisecond,
 		ptyMax:      30 * time.Second,
 		creds:       map[string]*boxCreds{},
+		lastOrigins: map[string]*boxCreds{},
 		rnd:         rand.New(rand.NewSource(time.Now().UnixNano())),
 
 		privateProbeTimeout: defaultPrivateProbeTimeout,
@@ -148,6 +152,10 @@ type request struct {
 	// box marks a box-plane request: an unsent failure is returned to Box.do, which
 	// re-reads the box before it retries, since a box's origin can move.
 	box bool
+	// unwrap turns the response into the one the request answers before its status is
+	// read: a streamed create's last line stands for its answer. Its error is a sent
+	// failure, retried like a dropped connection.
+	unwrap func(*http.Response) (*http.Response, error)
 }
 
 func jsonBody(v any) (func() (io.Reader, error), error) {
@@ -231,6 +239,15 @@ func (c *Client) once(ctx context.Context, req *request) (*http.Response, error)
 		zerr.unsent = sent.unsent(err)
 		return nil, zerr
 	}
+	if req.unwrap != nil {
+		resp, err = req.unwrap(resp)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, newError(CodeUnavailable, err.Error())
+		}
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
 	}
@@ -298,10 +315,15 @@ func isUnsent(err error) bool {
 
 // api calls the control plane with the account key.
 func (c *Client) api(ctx context.Context, method, path string, in any, out any, retry bool, headers map[string]string) error {
+	return c.apiUnwrap(ctx, method, path, in, out, retry, headers, nil)
+}
+
+// apiUnwrap is api with an unwrap step (see request.unwrap).
+func (c *Client) apiUnwrap(ctx context.Context, method, path string, in any, out any, retry bool, headers map[string]string, unwrap func(*http.Response) (*http.Response, error)) error {
 	if c.apiKey == "" {
 		return newError(CodeUnauthorized, "no API key: pass one to zipbox.New or set ZIPBOX_API_KEY")
 	}
-	req := &request{method: method, url: c.baseURL + path, retry: retry, headers: map[string]string{
+	req := &request{method: method, url: c.baseURL + path, retry: retry, unwrap: unwrap, headers: map[string]string{
 		"Authorization": "Bearer " + c.apiKey,
 	}}
 	for k, v := range headers {
@@ -324,7 +346,19 @@ func (c *Client) api(ctx context.Context, method, path string, in any, out any, 
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return decodeJSON(resp.Body, out)
+}
+
+// decodeJSON reads one JSON body into out. A connection the server closed mid-body is
+// the usual retryable network error, for the control plane and a box alike.
+func decodeJSON(body io.Reader, out any) error {
+	if err := json.NewDecoder(body).Decode(out); err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return newError(CodeUnavailable, err.Error())
+		}
+		return err
+	}
+	return nil
 }
 
 // backoff is exponential with jitter: a delay in [d/2, d) where d doubles from

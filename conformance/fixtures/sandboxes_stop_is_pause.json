@@ -1,0 +1,53 @@
+{
+  "name": "sandboxes_stop_is_pause",
+  "description": "sandboxes.stop → POST /sandbox/sbx_1/pause. The server answered with the final state (200, readiness paused), so it returns at once with no wait. sandboxes.stop is an alias of sandboxes.pause: the two fixtures are identical but for the op.",
+  "call": {
+    "op": "sandboxes.stop",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/pause",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "paused",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "paused",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["resume", "delete", "fork"]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "status": "paused",
+      "readiness": "paused"
+    }
+  }
+}

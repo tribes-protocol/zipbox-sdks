@@ -79,7 +79,7 @@ class TailscaleStatus:
 
     ``state`` is ``joining``, ``connected``, ``needsApproval``, ``needsLogin``,
     ``stopped`` or ``failed``, or None when only the identity is known (the box is
-    stopped). ``pending`` is True while an auth key is on its way to the box; it
+    paused). ``pending`` is True while an auth key is on its way to the box; it
     dropping without the state advancing means the key never arrived.
     ``key_expiry`` is None when key expiry is off, which is the recommended setting.
     ``peers`` is the owner's other devices (online first, at most 50), or None while
@@ -198,9 +198,9 @@ class SandboxInfo:
     name: str | None
     domain: str | None
     ipv6: str | None
-    # provisioning, running, stopping, pausing, stopped, archived, deleting or destroyed.
-    # pausing reads as paused: the VM is stopped and its disk is safe on its host; its
-    # backup is still uploading; start() boots it at once.
+    # provisioning, running, stopping, paused, deleting or destroyed. paused: its Pause
+    # took effect and nothing is billed; resume() brings it back. stopping is a Pause
+    # still landing.
     status: str
     tier: str | None
     pending_tier: str | None
@@ -226,7 +226,7 @@ class SandboxInfo:
     # What the box is doing now: starting, running, stopping, paused, resizing, forking,
     # deleting, delete_failed, start_failed or gone. None from an older control plane.
     phase: str | None
-    # The lifecycle verbs the box accepts now (start, stop, restart, delete,
+    # The lifecycle verbs the box accepts now (resume, pause, restart, delete,
     # cancel_transition, fork). A listed verb can still be refused for a reason outside
     # the box: credit, capacity, an argument. None from an older control plane.
     allowed_actions: tuple[str, ...] | None

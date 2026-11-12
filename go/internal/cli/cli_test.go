@@ -514,7 +514,8 @@ func newFakeFork(t *testing.T, private, failed bool) *fakeFork {
 			}
 			w.WriteHeader(202)
 			fmt.Fprintf(w, `{"operationId":"fork_1","sandbox":{"id":"sbx_2","name":"demo-2","status":"provisioning","privateMode":%t,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"},"fork":{%s,"sourcePolicy":"pause_and_resume","phase":"queued"}}`, f.private, forkRow)
-		case "GET /sandbox/sbx_2":
+		// The readiness wait and a detail read answer the same row.
+		case "GET /sandbox/sbx_2", "GET /sandbox/sbx_2/wait":
 			switch {
 			case f.failed:
 				// The failed fork removed its box: the API answers not_found for it.
@@ -709,7 +710,7 @@ func TestForkJSON(t *testing.T) {
 	if accepted["id"] != "sbx_2" || accepted["status"] != "provisioning" || accepted["ready"] != false || fork["operationId"] != "fork_1" || fork["phase"] != "queued" {
 		t.Fatalf("--no-wait --json %v", accepted)
 	}
-	if f.find("GET", "/sandbox/sbx_2") != nil {
+	if f.find("GET", "/sandbox/sbx_2") != nil || f.find("GET", "/sandbox/sbx_2/wait") != nil {
 		t.Fatal("--no-wait waited")
 	}
 
@@ -736,5 +737,85 @@ func TestForkReportsWhyTheForkEnded(t *testing.T) {
 	stderr := h.err.String()
 	if !strings.Contains(stderr, "(copy_failed)") || !strings.Contains(stderr, "https://zipbox.ai/docs/errors#copy_failed") {
 		t.Fatalf("stderr %q", stderr)
+	}
+}
+
+// fakeLifecycle serves one box, demo (sbx_1), whose Pause and Resume answer the
+// final state, and records each lifecycle request.
+func fakeLifecycle(t *testing.T) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var sent []string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testKey {
+			w.WriteHeader(401)
+			return
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /sandbox":
+			io.WriteString(w, `[{"id":"sbx_1","name":"demo","status":"running","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}]`)
+			return
+		case "POST /sandbox/sbx_1/pause":
+			io.WriteString(w, `{"id":"sbx_1","name":"demo","status":"paused","phase":"paused","readiness":"paused","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":false}`)
+		case "POST /sandbox/sbx_1/resume":
+			fmt.Fprintf(w, `{"id":"sbx_1","name":"demo","status":"running","phase":"running","readiness":"ready","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":true,"baseUrl":%q,"boxToken":"bt_cli"}`, server.URL)
+		default:
+			http.NotFound(w, r)
+		}
+		mu.Lock()
+		sent = append(sent, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+	}))
+	t.Cleanup(server.Close)
+	return server, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := append([]string(nil), sent...)
+		sent = nil
+		return out
+	}
+}
+
+// `zipbox sandbox pause` / `resume` wait for the final state and say so; `stop` and
+// `start` are aliases that send the same request and print the same thing.
+func TestPauseAndResumeWithStopAndStartAliases(t *testing.T) {
+	server, sent := fakeLifecycle(t)
+	h := newHarness(t, server.URL, "")
+	h.env["ZIPBOX_API_KEY"] = testKey
+	for _, tc := range []struct {
+		args    []string
+		request string
+		output  string
+		action  string
+		status  string
+	}{
+		{[]string{"sandbox", "pause", "demo"}, "POST /sandbox/sbx_1/pause", "sbx_1 paused.\n", "pause", "paused"},
+		{[]string{"sandbox", "stop", "demo"}, "POST /sandbox/sbx_1/pause", "sbx_1 paused.\n", "pause", "paused"},
+		{[]string{"sandbox", "resume", "demo"}, "POST /sandbox/sbx_1/resume", "sbx_1 resumed.\n", "resume", "running"},
+		{[]string{"sandbox", "start", "demo"}, "POST /sandbox/sbx_1/resume", "sbx_1 resumed.\n", "resume", "running"},
+	} {
+		h.out.Reset()
+		if code := h.run(tc.args...); code != 0 {
+			t.Fatalf("%v: exit %d: %s", tc.args, code, h.err)
+		}
+		if got := sent(); len(got) != 1 || got[0] != tc.request {
+			t.Fatalf("%v: sent %v, want [%s]", tc.args, got, tc.request)
+		}
+		if h.out.String() != tc.output {
+			t.Fatalf("%v: printed %q, want %q", tc.args, h.out, tc.output)
+		}
+		h.out.Reset()
+		if code := h.run(append(tc.args, "--json")...); code != 0 {
+			t.Fatalf("%v --json: exit %d: %s", tc.args, code, h.err)
+		}
+		sent()
+		var out map[string]string
+		if err := json.Unmarshal(h.out.Bytes(), &out); err != nil {
+			t.Fatalf("%v --json: %v: %s", tc.args, err, h.out)
+		}
+		if out["id"] != "sbx_1" || out["action"] != tc.action || out["status"] != tc.status {
+			t.Fatalf("%v --json %v", tc.args, out)
+		}
 	}
 }

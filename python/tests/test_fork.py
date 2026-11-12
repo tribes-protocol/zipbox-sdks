@@ -105,7 +105,7 @@ def test_a_forked_handle_and_its_info_carry_no_auth_key() -> None:
                 "response": {"status": 202, "body": accepted},
             },
             {
-                "request": {"method": "GET", "path": "/sandbox/kid"},
+                "request": {"method": "GET", "path": "/sandbox/kid/wait?until=ready"},
                 "response": {"status": 200, "body": RUNNING},
             },
             {
@@ -133,7 +133,8 @@ def test_a_forked_handle_and_its_info_carry_no_auth_key() -> None:
 
 
 def _a_fork_that_keeps_provisioning() -> MockServer:
-    """Accepts the fork, then answers every read of the new box with provisioning."""
+    """Accepts the fork, then answers every read of the new box with provisioning. Its
+    /wait answers 404 (an API that predates it), so the wait polls on its ladder."""
     server = MockServer()
     server.start()
     accepted = {"operationId": "fork_1", "sandbox": CHILD, "fork": FORK}
@@ -146,6 +147,10 @@ def _a_fork_that_keeps_provisioning() -> MockServer:
             {
                 "request": {"method": "POST", "path": "/sandbox/src/fork"},
                 "response": {"status": 202, "body": accepted},
+            },
+            {
+                "request": {"method": "GET", "path": "/sandbox/kid/wait?until=ready"},
+                "response": {"status": 404, "body": {"error": "Route not found"}},
             },
             *[provisioning] * 10_000,
         ]

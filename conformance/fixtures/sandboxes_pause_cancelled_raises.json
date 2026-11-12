@@ -1,0 +1,86 @@
+{
+  "name": "sandboxes_pause_cancelled_raises",
+  "description": "A pause whose box reads running and ready again (the pause was cancelled or refused) raises conflict, not retryable, instead of waiting for a pause that will not come.",
+  "call": {
+    "op": "sandboxes.pause",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/pause",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "stopping",
+          "allowedActions": ["cancel_transition", "delete"]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1/wait?until=paused",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "running",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": 3,
+          "memPct": 10,
+          "diskPct": 20,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": true,
+          "readiness": "ready",
+          "httpsReady": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["pause", "restart", "delete", "fork"]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "conflict",
+      "retryable": false
+    }
+  }
+}

@@ -6,7 +6,7 @@
 
 Put a box on your own tailnet with a one-off auth key sealed on your machine, read its tailnet status, and make it private so only your tailnet can reach it.
 
-A box can join **your own** [Tailscale](https://tailscale.com) tailnet. You create a one-off auth key in your Tailscale admin and hand it to the box; the box shows up as a device next to your laptop and phone, and keeps its tailnet identity across reboots, stops and restarts. Once it is connected you can make it **private**: every public way into it closes, and its usual names (`demo.zbox.sh`, its previews, its terminal, `ssh root@demo.zbox.sh`) answer only to devices on your tailnet.
+A box can join **your own** [Tailscale](https://tailscale.com) tailnet. You create a one-off auth key in your Tailscale admin and hand it to the box; the box shows up as a device next to your laptop and phone, and keeps its tailnet identity across reboots, pauses and restarts. Once it is connected you can make it **private**: every public way into it closes, and its usual names (`demo.zbox.sh`, its previews, its terminal, `ssh root@demo.zbox.sh`) answer only to devices on your tailnet.
 
 The auth key is sealed on your machine to the box's own key and opened only inside the box. Zipbox relays it once and never stores, decrypts or logs it.
 
@@ -14,12 +14,12 @@ The auth key is sealed on your machine to the box's own key and opened only insi
 
 In the Tailscale admin console, open **Settings → Keys → Generate auth key**, and choose:
 
-| Setting      | Choose | Why                                                                           |
-| ------------ | ------ | ----------------------------------------------------------------------------- |
-| Reusable     | Off    | A one-off key is spent when the box joins, so a leaked copy is useless        |
-| Ephemeral    | Off    | An ephemeral node is removed when it goes offline; a stopped box would vanish |
-| Pre-approved | On     | Otherwise the box waits as `needsApproval` until you approve it               |
-| Tags         | None   | Not required                                                                  |
+| Setting      | Choose | Why                                                                          |
+| ------------ | ------ | ---------------------------------------------------------------------------- |
+| Reusable     | Off    | A one-off key is spent when the box joins, so a leaked copy is useless       |
+| Ephemeral    | Off    | An ephemeral node is removed when it goes offline; a paused box would vanish |
+| Pre-approved | On     | Otherwise the box waits as `needsApproval` until you approve it              |
+| Tags         | None   | Not required                                                                 |
 
 The key looks like `tskey-auth-…`. Copy it once and use it once. Keep it out of chat, issue trackers and agent transcripts.
 
@@ -74,7 +74,7 @@ curl -X PUT https://api.tribes.xyz/sandbox/$ID/tailscale \
   -H 'Content-Type: application/json' -d @envelope.json
 ```
 
-The box joins with `--accept-dns=false --accept-routes=false`, under its own name as the hostname. If the key never reaches the box (the box stopped before it arrived), `pending` drops back to false without the state advancing: send a new key. A key that reached the box is spent, so a later failure shows the real Tailscale state instead, such as `needsApproval`.
+The box joins with `--accept-dns=false --accept-routes=false`, under its own name as the hostname. If the key never reaches the box (the box paused before it arrived), `pending` drops back to false without the state advancing: send a new key. A key that reached the box is spent, so a later failure shows the real Tailscale state instead, such as `needsApproval`.
 
 The dashboard does the same from **Settings → Tailscale**, or from the "Connect to your tailnet" card when you create a box.
 
@@ -155,16 +155,16 @@ curl https://api.tribes.xyz/sandbox/$ID/tailscale \
 
 `GET /sandbox/:id/tailscale` answers `{tailscale, privateMode, supported}`. `tailscale` is null when the box never joined a tailnet and no key is pending. The same object is on every box row as `tailscale`, next to `privateMode` and `tailscaleSupported`.
 
-| Field       | Meaning                                                                        |
-| ----------- | ------------------------------------------------------------------------------ |
-| `state`     | See below. Null while the box is stopped, or before it reports after a restart |
-| `tailnet`   | Your tailnet's name, e.g. `example.com`                                        |
-| `ipv4`      | The box's tailnet address, e.g. `100.101.32.7`                                 |
-| `ipv6`      | Its tailnet IPv6 address                                                       |
-| `dnsName`   | Its MagicDNS name, e.g. `demo.tail1234.ts.net`                                 |
-| `keyExpiry` | When the node key expires (ISO 8601); null when expiry is disabled             |
-| `pending`   | A key is on its way to the box                                                 |
-| `peers`     | Your other devices on the tailnet (see below); null while the box is stopped   |
+| Field       | Meaning                                                                       |
+| ----------- | ----------------------------------------------------------------------------- |
+| `state`     | See below. Null while the box is paused, or before it reports after a restart |
+| `tailnet`   | Your tailnet's name, e.g. `example.com`                                       |
+| `ipv4`      | The box's tailnet address, e.g. `100.101.32.7`                                |
+| `ipv6`      | Its tailnet IPv6 address                                                      |
+| `dnsName`   | Its MagicDNS name, e.g. `demo.tail1234.ts.net`                                |
+| `keyExpiry` | When the node key expires (ISO 8601); null when expiry is disabled            |
+| `pending`   | A key is on its way to the box                                                |
+| `peers`     | Your other devices on the tailnet (see below); null while the box is paused   |
 
 | `state`         | Meaning                                                                     |
 | --------------- | --------------------------------------------------------------------------- |
@@ -186,7 +186,7 @@ curl https://api.tribes.xyz/sandbox/$ID/tailscale \
 | `ipv4`       | Its tailnet address                                                             |
 | `connection` | `direct` (peer to peer), `relay` (through a Tailscale relay), or null when idle |
 
-Tailscale does not tell a device whether its own key is ephemeral, so the box cannot report it. Use a key that is **not** ephemeral (step 1): an ephemeral node is removed from your tailnet whenever it goes offline, for example while the box is stopped.
+Tailscale does not tell a device whether its own key is ephemeral, so the box cannot report it. Use a key that is **not** ephemeral (step 1): an ephemeral node is removed from your tailnet whenever it goes offline, for example while the box is paused.
 
 ### Boxes that need a ZipOS update
 
@@ -365,7 +365,7 @@ The box is reachable from your tailnet once it has joined and its `*.demo.zbox.s
 | `ssh root@<name>.zbox.sh`                 | From a tailnet device only                                                     |
 | Another box                               | Only if it is on the same tailnet                                              |
 
-**Lifecycle calls always work**, from anywhere: start, stop, restart, status, the private switch, and Tailscale connect and disconnect all go through the control plane.
+**Lifecycle calls always work**, from anywhere: pause, resume, restart, status, the private switch, and Tailscale connect and disconnect all go through the control plane.
 
 **Box calls** (exec, files, PTY, previews, logs) go straight to the box. On a box whose row says `privateMode: true`, the SDKs first check that the box answers (a short probe of `<baseUrl>/challenge`, a 5 s deadline, cached once it succeeds). Off the tailnet that check fails and the call raises `box_private_unreachable` instead of hanging. Turn on Tailscale on your device ([tailscale.com/download](https://tailscale.com/download)) and retry.
 
@@ -376,7 +376,7 @@ The box is reachable from your tailnet once it has joined and its `*.demo.zbox.s
 Deleting a box removes it from your tailnet, so you are never left with a dead device in your admin.
 
 - **A running box** is signed out first, then deleted. Its `status` is `deleting` meanwhile, and the dashboard shows Signing out of Tailscale, then Deleting. A sign-out that fails because Tailscale's servers are unreachable is retried with backoff, with no attempt ceiling, until it succeeds; a node that is already gone from your admin counts as signed out.
-- **A stopped box that joined a tailnet** is brought back just long enough to sign out: its disk is restored, it boots in a minimal mode that runs none of your services, signs out of Tailscale, and is deleted. Nothing is billed for that boot. The dashboard shows the stages (Restoring with a percentage, Starting, Signing out of Tailscale, Deleting), and the box reads "Deleting… 42%" in the machines list until it is gone.
+- **A paused box that joined a tailnet** is brought back just long enough to sign out: it boots in a minimal mode that runs none of your services, signs out of Tailscale, and is deleted. Nothing is billed for that boot. The dashboard shows the stages (Restoring with a percentage, Starting, Signing out of Tailscale, Deleting), and the box reads "Deleting… 42%" in the machines list until it is gone.
 - **A box that never joined** deletes exactly as before.
 
 A new box needs a new key; tailnet identities are never copied between boxes.

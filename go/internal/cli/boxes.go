@@ -113,38 +113,55 @@ func (a *app) sandboxCommand() *cobra.Command {
 		},
 	}
 
-	lifecycle := func(use, short, verb string, run func(ctx context.Context, c *zipbox.Client, id string) error) *cobra.Command {
+	// lifecycle is one lifecycle verb. run returns the box's status once the verb is
+	// done ("" for a verb that returns once accepted). aliases are other names for the
+	// same command; the output always names the verb itself.
+	lifecycle := func(use string, aliases []string, short, verb string, run func(ctx context.Context, c *zipbox.Client, id string) (zipbox.Status, error)) *cobra.Command {
 		return &cobra.Command{
-			Use:   use + " <box>",
-			Short: short,
-			Args:  cobra.ExactArgs(1),
+			Use:     use + " <box>",
+			Aliases: aliases,
+			Short:   short,
+			Args:    cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				c, box, err := a.boxFor(cmd.Context(), args[0])
 				if err != nil {
 					return err
 				}
-				if err := run(cmd.Context(), c, box.ID); err != nil {
+				status, err := run(cmd.Context(), c, box.ID)
+				if err != nil {
 					return err
 				}
-				return a.emit(map[string]string{"id": box.ID, "action": use}, func() {
+				out := map[string]string{"id": box.ID, "action": use}
+				if status != "" {
+					out["status"] = string(status)
+				}
+				return a.emit(out, func() {
 					fmt.Fprintf(a.out, "%s %s.\n", box.ID, verb)
 				})
 			},
 		}
 	}
-	startCmd := lifecycle("start", "Start a stopped box", "starting", func(ctx context.Context, c *zipbox.Client, id string) error {
-		return c.Sandboxes.Start(ctx, id)
+	pauseCmd := lifecycle("pause", []string{"stop"}, "Pause a box and wait until it is paused (nothing billed while paused; alias: stop)", "paused", func(ctx context.Context, c *zipbox.Client, id string) (zipbox.Status, error) {
+		box, err := c.Sandboxes.Pause(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		return box.Detail.Status, nil
 	})
-	stopCmd := lifecycle("stop", "Stop a box (disk archived, nothing billed)", "stopping", func(ctx context.Context, c *zipbox.Client, id string) error {
-		return c.Sandboxes.Stop(ctx, id)
+	resumeCmd := lifecycle("resume", []string{"start"}, "Resume a paused box and wait until it is ready (alias: start)", "resumed", func(ctx context.Context, c *zipbox.Client, id string) (zipbox.Status, error) {
+		box, err := c.Sandboxes.Resume(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		return box.Detail.Status, nil
 	})
-	restartCmd := lifecycle("restart", "Hard-restart a box (files survive)", "restarting", func(ctx context.Context, c *zipbox.Client, id string) error {
-		return c.Sandboxes.Restart(ctx, id)
+	restartCmd := lifecycle("restart", nil, "Hard-restart a box (files survive)", "restarting", func(ctx context.Context, c *zipbox.Client, id string) (zipbox.Status, error) {
+		return "", c.Sandboxes.Restart(ctx, id)
 	})
 
 	cancelCmd := &cobra.Command{
 		Use:   "cancel <box>",
-		Short: "Cancel the box's change in flight (a stop, start, restart, tier change or fork)",
+		Short: "Cancel the box's change in flight (a pause, resume, restart, tier change or fork)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, box, err := a.boxFor(cmd.Context(), args[0])
@@ -215,7 +232,7 @@ func (a *app) sandboxCommand() *cobra.Command {
 			})
 		},
 	}
-	cmd.AddCommand(createCmd, listCmd, getCmd, startCmd, stopCmd, restartCmd, cancelCmd, deleteCmd, tierCmd)
+	cmd.AddCommand(createCmd, listCmd, getCmd, pauseCmd, resumeCmd, restartCmd, cancelCmd, deleteCmd, tierCmd)
 	return cmd
 }
 

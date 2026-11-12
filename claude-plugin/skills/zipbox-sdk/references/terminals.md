@@ -76,4 +76,4 @@ To pick up a session from another process, `attach(sessionId)` it: the shell, it
 
 ## Sessions and the dashboard
 
-A terminal your code opens is its own session. It never takes the box's terminal away from you in the dashboard, and the dashboard never takes it away from your code. Close a session with `close()` when you are done; it otherwise runs until the box stops.
+A terminal your code opens is its own session. It never takes the box's terminal away from you in the dashboard, and the dashboard never takes it away from your code. Close a session with `close()` when you are done; it otherwise runs until the box is paused or restarted.

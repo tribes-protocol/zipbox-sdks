@@ -1,0 +1,136 @@
+{
+  "name": "wait_uses_push_then_falls_back",
+  "description": "A pause the host has not answered within the server's budget is accepted (202, stopping). The SDK waits on GET /sandbox/:id/wait?until=paused; an API that predates /wait answers it 404, so the SDK reads GET /sandbox/:id (200: the box exists) and falls back to polling it with backoff until it reads paused.",
+  "call": {
+    "op": "sandboxes.pause",
+    "args": {
+      "id": "sbx_1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/pause",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 202,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "stopping",
+          "allowedActions": ["cancel_transition", "delete"]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1/wait?until=paused",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": "Route not found"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "stopping",
+          "allowedActions": ["cancel_transition", "delete"]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "paused",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "paused",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["resume", "delete", "fork"]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "status": "paused",
+      "readiness": "paused"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 //! # zipbox
 //!
 //! Drive [Zipbox](https://zipbox.ai) boxes from Rust: create a box, run commands,
-//! move files, open a terminal, publish a port, stop it when you are done. Nothing
+//! move files, open a terminal, publish a port, pause it when you are done. Nothing
 //! on a box stops on a clock.
 //!
 //! ```no_run
@@ -28,6 +28,7 @@
 
 mod account;
 mod backoff;
+mod claimstream;
 mod client;
 mod commands;
 mod envelope;

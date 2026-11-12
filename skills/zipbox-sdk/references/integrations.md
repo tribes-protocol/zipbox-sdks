@@ -20,8 +20,8 @@ One account, every agent. Each integration below drives the same boxes your dash
 
 ## What every integration shares
 
-- **Your boxes.** The same long-lived machines, tiers and credits as the dashboard. An agent can create, start, stop and delete them.
-- **Nothing stops on a clock.** A command an agent starts has no deadline unless it sets one, and a box runs until someone stops it.
+- **Your boxes.** The same long-lived machines, tiers and credits as the dashboard. An agent can create, pause, resume and delete them.
+- **Nothing stops on a clock.** A command an agent starts has no deadline unless it sets one, and a box runs until someone pauses it.
 - **One key.** Every integration holds an account key (`zb_…`) and trades it for a per-box token on each box it talks to. You never handle box tokens. A connector that signs in with OAuth gets a key named after the app ("Claude (OAuth)") in **Settings → API keys**; delete that row to disconnect it.
 - **The same tools.** Commands, files, previews, logs, the desktop screenshot and docs search are the hosted MCP server's tools in every harness that speaks MCP ([MCP server](https://zipbox.ai/docs/mcp.md)).
 
@@ -130,7 +130,7 @@ An agent that reads `AGENTS.md` instead can take the snippet on the [Overview](h
 
 | Feature                                          | Claude Code plugin | Claude connector | Codex | Cursor and stdio | Skill + SDK/CLI |
 | ------------------------------------------------ | ------------------ | ---------------- | ----- | ---------------- | --------------- |
-| Create, start, stop and delete boxes             | ✓                  | ✓                | ✓     | ✓                | ✓               |
+| Create, pause, resume and delete boxes           | ✓                  | ✓                | ✓     | ✓                | ✓               |
 | Run commands, background commands                | ✓                  | ✓                | ✓     | ✓                | ✓               |
 | Read, write and move files                       | ✓                  | ✓                | ✓     | ✓                | ✓               |
 | Public previews                                  | ✓                  | ✓                | ✓     | ✓                | ✓               |

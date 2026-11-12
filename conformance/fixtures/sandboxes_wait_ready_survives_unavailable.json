@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -30,7 +30,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -49,7 +49,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -68,7 +68,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -87,7 +87,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -109,7 +109,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }

@@ -5,10 +5,11 @@ import {
   deleteBox,
   getDetail,
   lifecycle,
+  pauseBox,
+  resumeBox,
   retryDelay,
   setPrivate,
   setTier,
-  startBox,
   waitUntilReady
 } from './context.js'
 import { ZipboxError } from './errors.js'
@@ -526,9 +527,8 @@ export class Sandbox {
   }
 
   /**
-   * Re-read the box with backoff until it is ready (no deadline; abort with the
-   * signal). A private box that has not joined a tailnet yet: until it is running
-   * with its key.
+   * Wait until the box is ready (no deadline; abort with the signal). A private box
+   * that has not joined a tailnet yet: until it is running with its key.
    */
   async waitReady(options: CallOptions = {}): Promise<SandboxDetail> {
     this.detail = await waitUntilReady(this.ctx, this.id, options.signal)
@@ -628,19 +628,37 @@ export class Sandbox {
     return Uint8Array.from(binary, (char) => char.charCodeAt(0))
   }
 
-  /** Start a stopped box. A box still `stopping` is started once its stop lands. */
-  start(options: CallOptions = {}): Promise<void> {
-    return startBox(this.ctx, this.id, options.signal)
+  /**
+   * Pause the box (nothing billed while paused) and return its row, paused. See
+   * {@link Sandboxes.pause}.
+   */
+  async pause(options: CallOptions = {}): Promise<SandboxDetail> {
+    this.detail = await pauseBox(this.ctx, this.id, options.signal)
+    return this.detail
   }
 
-  /** Stop the box (disk archived; nothing billed while stopped). */
-  stop(options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, this.id, 'pause', options.signal)
+  /**
+   * Resume the paused box and return its row, ready. A box still `stopping` is
+   * resumed once its Pause lands. See {@link Sandboxes.resume}.
+   */
+  async resume(options: CallOptions = {}): Promise<SandboxDetail> {
+    this.detail = await resumeBox(this.ctx, this.id, options.signal)
+    return this.detail
+  }
+
+  /** Alias of {@link pause}: the same request and the same result. */
+  stop(options: CallOptions = {}): Promise<SandboxDetail> {
+    return this.pause(options)
+  }
+
+  /** Alias of {@link resume}: the same request and the same result. */
+  start(options: CallOptions = {}): Promise<SandboxDetail> {
+    return this.resume(options)
   }
 
   /** Hard-restart the box; files survive. */
-  restart(options: CallOptions = {}): Promise<void> {
-    return lifecycle(this.ctx, this.id, 'reset', options.signal)
+  async restart(options: CallOptions = {}): Promise<void> {
+    await lifecycle(this.ctx, this.id, 'reset', options.signal)
   }
 
   /**

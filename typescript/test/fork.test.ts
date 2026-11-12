@@ -121,7 +121,7 @@ describe('Sandboxes.fork', () => {
     })
     expect(sent.map((request) => `${request.method} ${request.path}`)).toEqual([
       'POST /sandbox/sbx_1/fork',
-      'GET /sandbox/sbx_2',
+      'GET /sandbox/sbx_2/wait',
       'GET /sandbox/sbx_2',
       'PUT /sandbox/sbx_2/tailscale'
     ])
@@ -175,7 +175,7 @@ describe('Sandboxes.fork', () => {
     const answer = server(sent, false)
     const zb = client((input, init) => {
       const path = new URL(input).pathname
-      if (path === '/sandbox/sbx_2') {
+      if (path === '/sandbox/sbx_2' || path === '/sandbox/sbx_2/wait') {
         return Promise.resolve(json({ error: { code: 'not_found', message: 'gone' } }, 404))
       }
       if (path === '/sandbox/sbx_2/fork') {
@@ -201,7 +201,7 @@ describe('Sandboxes.fork', () => {
     const answer = server(sent, false)
     const zb = client((input, init) => {
       const path = new URL(input).pathname
-      if (path === '/sandbox/sbx_2') {
+      if (path === '/sandbox/sbx_2' || path === '/sandbox/sbx_2/wait') {
         return Promise.resolve(json({ error: { code: 'not_found', message: 'gone' } }, 404))
       }
       if (path === '/sandbox/sbx_2/fork') {
@@ -224,8 +224,8 @@ describe('Sandboxes.fork', () => {
     // The new box keeps provisioning; the caller gives up after a few reads.
     const zb = client((input, init) => {
       const method = init?.method ?? 'GET'
-      if (method === 'GET' && new URL(input).pathname === '/sandbox/sbx_2') {
-        sent.push({ method, path: '/sandbox/sbx_2', key: null, body: '' })
+      if (method === 'GET' && new URL(input).pathname === '/sandbox/sbx_2/wait') {
+        sent.push({ method, path: '/sandbox/sbx_2/wait', key: null, body: '' })
         reads += 1
         if (reads === 3) controller.abort()
         return Promise.resolve(json({ ...CHILD, status: 'provisioning' }))

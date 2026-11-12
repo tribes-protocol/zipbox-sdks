@@ -262,8 +262,17 @@ async fn refetches_once_on_401_and_stops_on_an_answered_verdict() {
 }
 
 fn ready(ws_origin: &str) -> Value {
+    ready_at("/sandbox/sbx_1", ws_origin)
+}
+
+// The re-read after a dial nobody answered is the readiness wait.
+fn ready_wait(ws_origin: &str) -> Value {
+    ready_at("/sandbox/sbx_1/wait?until=ready", ws_origin)
+}
+
+fn ready_at(path: &str, ws_origin: &str) -> Value {
     json!({
-        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+        "request": { "method": "GET", "path": path },
         "response": { "status": 200, "body": {
             "id": "sbx_1", "status": "running", "ready": true,
             "baseUrl": ws_origin, "boxToken": "bt_pty"
@@ -316,8 +325,11 @@ async fn the_first_dial_waits_out_a_box_that_does_not_answer_yet() {
         ws_listener.local_addr().unwrap().port()
     );
     let (api, api_listener) = MockServer::bind().await;
-    api.state.lock().unwrap().exchanges =
-        vec![ready(&dead_origin), ready(&dead_origin), ready(&ws_origin)];
+    api.state.lock().unwrap().exchanges = vec![
+        ready(&dead_origin),
+        ready_wait(&dead_origin),
+        ready_wait(&ws_origin),
+    ];
     api.serve(api_listener);
     let server = tokio::spawn(async move {
         let mut ws = accept(&ws_listener, &Seen::default()).await;
@@ -358,8 +370,11 @@ async fn a_reconnect_rereads_a_box_whose_dial_is_refused() {
         ws_listener.local_addr().unwrap().port()
     );
     let (api, api_listener) = MockServer::bind().await;
-    api.state.lock().unwrap().exchanges =
-        vec![ready(&ws_origin), ready(&dead_origin), ready(&ws_origin)];
+    api.state.lock().unwrap().exchanges = vec![
+        ready(&ws_origin),
+        ready(&dead_origin),
+        ready_wait(&ws_origin),
+    ];
     api.serve(api_listener);
     let (cached_tx, cached_rx) = tokio::sync::oneshot::channel::<()>();
     let seen = Seen::default();

@@ -14,16 +14,15 @@ export type JsonObject = Record<string, JsonValue>
 export type SandboxTier = 'xs' | 's' | 'm' | 'l' | 'xl' | 'xxl' | 'enterprise'
 
 /**
- * Lifecycle state of a box. `pausing` reads as paused: the VM is stopped and its disk
- * is safe on its host; its backup is still uploading; `start` boots it at once.
+ * Lifecycle state of a box. `paused`: its Pause took effect and nothing is billed;
+ * `resume` brings it back with its files and installed software. `stopping` is a
+ * Pause still landing.
  */
 export type SandboxStatus =
   | 'provisioning'
   | 'running'
   | 'stopping'
-  | 'pausing'
-  | 'stopped'
-  | 'archived'
+  | 'paused'
   | 'deleting'
   | 'destroyed'
 
@@ -60,8 +59,8 @@ export type SandboxReadiness =
   | 'deleting'
   | 'gone'
 
-/** A lifecycle verb a box can accept: `start`, `stop`, `restart`, `delete`, `cancel_transition`, `fork`. */
-export type SandboxAction = 'start' | 'stop' | 'restart' | 'delete' | 'cancel_transition' | 'fork'
+/** A lifecycle verb a box can accept: `resume`, `pause`, `restart`, `delete`, `cancel_transition`, `fork`. */
+export type SandboxAction = 'resume' | 'pause' | 'restart' | 'delete' | 'cancel_transition' | 'fork'
 
 /**
  * The box's managed Tailscale daemon: `joining` (key accepted, coming up),
@@ -97,7 +96,7 @@ export interface TailscalePeer {
 
 /** A box's tailnet status (`GET /sandbox/:id/tailscale`). */
 export interface TailscaleStatus {
-  /** Null when only the last known identity is known (the box is stopped). */
+  /** Null when only the last known identity is known (the box is paused). */
   state?: TailscaleState | null
   /** The tailnet's name, e.g. `example.com`. */
   tailnet?: string | null
@@ -241,8 +240,8 @@ export type TransitionCancelOutcome = 'cleared' | 'cancelling' | 'none'
 export type SandboxForkSourcePolicy = 'require_paused' | 'pause_and_resume'
 
 /**
- * Where a fork stands: `preparing_identity` (the new name, mailbox and wallets are
- * minted), `queued`, `capturing` (the source's disk is captured), `copying` (its
+ * Where a fork stands: `preparing_identity` (the new name and its mailbox address
+ * are reserved), `queued`, `capturing` (the source's disk is captured), `copying` (its
  * files are copied into the new box's fresh filesystem), `starting`, then
  * `complete` (the new box has its own disk and serves), `cancelling`, `cancelled`
  * or `failed`.

@@ -221,7 +221,8 @@ describe('sandboxes.getOrCreate on a private box', () => {
     let reads = 0
     const fetch: FetchLike = (url) => {
       if (url === 'https://api.test/sandbox') return json([row])
-      if (url === 'https://api.test/sandbox/sbx_1') {
+      // GET /sandbox/sbx_1/wait: the getOrCreate wait.
+      if (url.startsWith('https://api.test/sandbox/sbx_1')) {
         const next = details[Math.min(reads, details.length - 1)] ?? {}
         reads++
         return json(next)
@@ -268,7 +269,9 @@ describe('private box after an unsent failure', () => {
     let onTailnet = true
     const boxCalls: string[] = []
     const fetch: FetchLike = (url) => {
-      if (url === 'https://api.test/sandbox/sbx_1') return json(detail({ privateMode: true }))
+      // The first read, then the readiness wait (GET /sandbox/sbx_1/wait) after the drop.
+      if (url.startsWith('https://api.test/sandbox/sbx_1'))
+        return json(detail({ privateMode: true }))
       boxCalls.push(url)
       if (url.endsWith('/challenge') && onTailnet) {
         onTailnet = false

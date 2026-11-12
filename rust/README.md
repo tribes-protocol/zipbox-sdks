@@ -1,7 +1,7 @@
 # zipbox
 
 Drive [Zipbox](https://zipbox.ai) boxes from Rust: create a box, run commands, move
-files, open a terminal, publish a port, stop it when you are done. Nothing on a box
+files, open a terminal, publish a port, pause it when you are done. Nothing on a box
 stops on a clock.
 
 ```sh
@@ -28,7 +28,7 @@ async fn main() -> zipbox::Result<()> {
 
 | Area      | Calls                                                                                                                                                                                          |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lifecycle | `zb.sandboxes().create / get_or_create / get_or_create_with / list / get / wait_ready / start / stop / restart / cancel_transition / delete / delete_with / set_tier`                          |
+| Lifecycle | `zb.sandboxes().create / get_or_create / get_or_create_with / list / get / wait_ready / pause / resume / restart / cancel_transition / delete / delete_with / set_tier`                        |
 | Fork      | `zb.sandboxes().fork(source_id, ForkOptions::new(name, policy))` → the new box; `get_fork(child_id)`; `sandbox.fork(options)`, `sandbox.fork_status()`                                         |
 | Commands  | `sandbox.exec`, `exec_with`, `exec_stream` (`Stream` of events), `exec_background` → `Command` (`get`, `events(since)`, `wait`, `stdin`, `close_stdin`, `signal`), `run_code`, `run_code_with` |
 | Files     | `sandbox.files().read / read_text / write / list / stat / mkdir / move_to / copy / delete / upload / download`                                                                                 |
@@ -80,11 +80,19 @@ reconnecting). Lifecycle calls, `set_private` and `tailscale()` go through the c
 plane and always work. A private box that has not joined your tailnet cannot be ready,
 so `create` and `get_or_create` return it once it is running with its key.
 
-Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's `readiness`: it keeps reading
-while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
-the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
-the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
-or gone `conflict`. Rows carry `phase` and `allowed_actions`; a detail also carries `readiness`.
+Every wait (`create`, `get_or_create`, `wait_ready`, `fork`, `resume`) reads the box's `readiness`
+on `GET /sandbox/:id/wait`, which the server answers when the box gets there: it asks again
+while the box is `settling`, with no deadline (a retryable failed read waits on a backoff
+ladder; an API older than `/wait` is polled instead), returns on `ready` or, for a private
+box, `awaits_tailnet`, and raises on the rest, never retryable: paused `box_not_running`, a
+failed start `start_failed`, deleting or gone `conflict`. Rows carry `phase` and
+`allowed_actions`; a detail also carries `readiness`.
+
+`pause(id)` returns the box paused (nothing is billed while it is paused) and `resume(id)`
+returns it ready: at once when the server answers with the final state, else after waiting
+for it. A resume on a box whose Pause is still landing waits it out first. `create`
+returns at once when the server bound a booted machine inside the request. `stop` and
+`start` are aliases of `pause` and `resume`: the same request and the same result.
 A box call whose request never reached the box runs this same wait before it retries.
 One retry rule: an error is retried when its `retryable` is true.
 

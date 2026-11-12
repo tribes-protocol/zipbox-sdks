@@ -1,8 +1,8 @@
 {
-  "name": "sandboxes_start_stopping_comes_back_running",
-  "description": "start on a box whose stop is still landing, when the box comes back by itself (a resize restores it, or its archive failed and it kept running): the wait ends on provisioning or running, and start succeeds without another restore.",
+  "name": "sandboxes_resume_stopping_then_refused",
+  "description": "resume waits out a Pause still landing, but the paused box will not resume (the resume answers 409 conflict again): that answer is final and is raised, never retried.",
   "call": {
-    "op": "sandboxes.start",
+    "op": "sandboxes.resume",
     "args": {
       "id": "sbx_1"
     }
@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/resume",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -75,7 +75,59 @@
           "name": "worker-1",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "provisioning",
+          "status": "paused",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": true,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-10-29T00:00:00.000Z",
+          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "ready": false,
+          "baseUrl": null,
+          "boxToken": null
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/sbx_1/resume",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "conflict",
+            "message": "Sandbox archive key is missing",
+            "requestId": "req_test",
+            "retryable": false,
+            "retryAfterMs": null,
+            "docsUrl": "https://zipbox.ai/docs/errors#conflict"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/sandbox/sbx_1",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,
@@ -92,6 +144,10 @@
     }
   ],
   "expect": {
-    "result": null
+    "error": {
+      "code": "conflict",
+      "status": 409,
+      "requestId": "req_test"
+    }
   }
 }

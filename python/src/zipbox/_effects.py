@@ -72,13 +72,29 @@ class Sleep:
 
 
 @dataclass(frozen=True)
+class Preconnect:
+    """Start ``request`` in the background on the shared connection pool and return a
+    handle at once. Nothing waits for it, retries it or reads its answer: it only
+    leaves an open connection for the next call to that origin."""
+
+    request: HttpRequest
+
+
+@dataclass(frozen=True)
+class DropPreconnect:
+    """Stop a pre-connect that will not be used (a no-op once it has finished)."""
+
+    handle: Any
+
+
+@dataclass(frozen=True)
 class Emit:
     """Hand a value to the consumer of an iterating operation."""
 
     value: Any
 
 
-Effect = HttpRequest | ReadChunk | ReadAll | CloseStream | Sleep
+Effect = HttpRequest | ReadChunk | ReadAll | CloseStream | Sleep | Preconnect | DropPreconnect
 Op = Generator[Effect, Any, T]
 StreamOp = Generator[Effect | Emit, Any, None]
 
@@ -90,6 +106,8 @@ class SyncTransport(Protocol):
     def read_chunk(self, response: HttpResponse) -> bytes: ...
     def read_all(self, response: HttpResponse) -> bytes: ...
     def close_stream(self, response: HttpResponse) -> None: ...
+    def preconnect(self, request: HttpRequest) -> Any: ...
+    def drop_preconnect(self, handle: Any) -> None: ...
 
 
 class AsyncTransport(Protocol):
@@ -99,6 +117,8 @@ class AsyncTransport(Protocol):
     async def read_chunk(self, response: HttpResponse) -> bytes: ...
     async def read_all(self, response: HttpResponse) -> bytes: ...
     async def close_stream(self, response: HttpResponse) -> None: ...
+    def preconnect(self, request: HttpRequest) -> Any: ...
+    def drop_preconnect(self, handle: Any) -> None: ...
 
 
 class Streams:
@@ -130,6 +150,11 @@ def perform_sync(transport: SyncTransport, effect: Effect, streams: Streams) -> 
         streams.forget(effect.response)
         transport.close_stream(effect.response)
         return None
+    if isinstance(effect, Preconnect):
+        return transport.preconnect(effect.request)
+    if isinstance(effect, DropPreconnect):
+        transport.drop_preconnect(effect.handle)
+        return None
     if effect.seconds > 0:
         time.sleep(effect.seconds)
     return None
@@ -148,6 +173,11 @@ async def perform_async(transport: AsyncTransport, effect: Effect, streams: Stre
     if isinstance(effect, CloseStream):
         streams.forget(effect.response)
         await transport.close_stream(effect.response)
+        return None
+    if isinstance(effect, Preconnect):
+        return transport.preconnect(effect.request)
+    if isinstance(effect, DropPreconnect):
+        transport.drop_preconnect(effect.handle)
         return None
     await asyncio.sleep(max(0.0, effect.seconds))
     return None

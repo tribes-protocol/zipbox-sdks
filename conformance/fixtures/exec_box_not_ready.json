@@ -24,7 +24,7 @@
           "name": "demo",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "archived",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,

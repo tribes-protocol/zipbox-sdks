@@ -1,8 +1,8 @@
 {
-  "name": "sandboxes_start_waits_out_stopping",
-  "description": "start on a box whose stop is still landing: the restore answers 409 conflict while GET /sandbox/:id reads stopping; the SDK re-reads with backoff until archived, then restores once more.",
+  "name": "sandboxes_pause_accepted_waits_on_push",
+  "description": "A pause answered 202 (stopping, settling) waits on GET /sandbox/:id/wait?until=paused. A held answer that is still settling (the server's hold limit passed) is asked again at once; the answer that reads paused ends the wait.",
   "call": {
-    "op": "sandboxes.start",
+    "op": "sandboxes.pause",
     "args": {
       "id": "sbx_1"
     }
@@ -11,29 +11,41 @@
     {
       "request": {
         "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
+        "path": "/sandbox/sbx_1/pause",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
       },
       "response": {
-        "status": 409,
+        "status": 202,
         "body": {
-          "error": {
-            "code": "conflict",
-            "message": "Sandbox is not archived",
-            "requestId": "req_test",
-            "retryable": false,
-            "retryAfterMs": null,
-            "docsUrl": "https://zipbox.ai/docs/errors#conflict"
-          }
+          "id": "sbx_1",
+          "name": "worker-1",
+          "domain": "zbox.sh",
+          "ipv6": "2a01::1",
+          "status": "stopping",
+          "tier": "s",
+          "pendingTier": null,
+          "isArchived": false,
+          "cpuPct": null,
+          "memPct": null,
+          "diskPct": null,
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
+          "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
+          "baseUrl": null,
+          "boxToken": null,
+          "phase": "stopping",
+          "allowedActions": ["cancel_transition", "delete"]
         }
       }
     },
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=paused",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -48,22 +60,26 @@
           "status": "stopping",
           "tier": "s",
           "pendingTier": null,
-          "isArchived": true,
+          "isArchived": false,
           "cpuPct": null,
           "memPct": null,
           "diskPct": null,
-          "createdAt": "2026-10-29T00:00:00.000Z",
-          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
           "ready": false,
+          "readiness": "settling",
+          "httpsReady": false,
           "baseUrl": null,
-          "boxToken": null
+          "boxToken": null,
+          "phase": "stopping",
+          "allowedActions": ["cancel_transition", "delete"]
         }
       }
     },
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=paused",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -75,68 +91,31 @@
           "name": "worker-1",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "stopping",
+          "status": "paused",
           "tier": "s",
           "pendingTier": null,
           "isArchived": true,
           "cpuPct": null,
           "memPct": null,
           "diskPct": null,
-          "createdAt": "2026-10-29T00:00:00.000Z",
-          "updatedAt": "2026-10-29T00:00:00.000Z",
+          "createdAt": "2026-11-11T00:00:00.000Z",
+          "updatedAt": "2026-11-11T00:00:00.000Z",
           "ready": false,
+          "readiness": "paused",
+          "httpsReady": false,
           "baseUrl": null,
-          "boxToken": null
-        }
-      }
-    },
-    {
-      "request": {
-        "method": "GET",
-        "path": "/sandbox/sbx_1",
-        "headers": {
-          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-        }
-      },
-      "response": {
-        "status": 200,
-        "body": {
-          "id": "sbx_1",
-          "name": "worker-1",
-          "domain": "zbox.sh",
-          "ipv6": "2a01::1",
-          "status": "archived",
-          "tier": "s",
-          "pendingTier": null,
-          "isArchived": true,
-          "cpuPct": null,
-          "memPct": null,
-          "diskPct": null,
-          "createdAt": "2026-10-29T00:00:00.000Z",
-          "updatedAt": "2026-10-29T00:00:00.000Z",
-          "ready": false,
-          "baseUrl": null,
-          "boxToken": null
-        }
-      }
-    },
-    {
-      "request": {
-        "method": "POST",
-        "path": "/sandbox/sbx_1/restore",
-        "headers": {
-          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-        }
-      },
-      "response": {
-        "status": 200,
-        "body": {
-          "success": true
+          "boxToken": null,
+          "phase": "paused",
+          "allowedActions": ["resume", "delete", "fork"]
         }
       }
     }
   ],
   "expect": {
-    "result": null
+    "result": {
+      "id": "sbx_1",
+      "status": "paused",
+      "readiness": "paused"
+    }
   }
 }

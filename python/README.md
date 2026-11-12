@@ -35,17 +35,17 @@ async with AsyncZipbox() as zb:
 
 ## What is in it
 
-| Area      | Calls                                                                                                                                                                                                                                         |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lifecycle | `zb.sandboxes.create(name=, tier=, ssh_public_key=, mailbox=, private=)`, `get_or_create(name, tier=, …)`, `list`, `get`, `wait_ready`, `start`, `stop`, `restart`, `cancel_transition`, `delete(id, archive=)`, `set_tier`; `zb.sandbox(id)` |
-| Fork      | `zb.sandboxes.fork(source_id, name=, source_policy=, private=, tailscale_auth_key=, wait=True)` → the new box; `get_fork(child_id)` → `SandboxFork`; `box.fork(name=, source_policy=, …)`, `box.fork_status()`                                |
-| Exec      | `box.exec(cmd)` → `ExecResult(id, exit_code, stdout, stderr)`; `exec_stream(cmd)`; `exec_background(cmd)` → `Command`; `run_code("python", code, cwd=)`                                                                                       |
-| Commands  | `Command.get()`, `events(since=)`, `wait()`, `stdin(data)`, `close_stdin()`, `signal("TERM")`; `box.commands.list/get/handle/events/stdin/close_stdin/signal`                                                                                 |
-| Files     | `box.files.read`, `read_text`, `write`, `list`, `stat`, `mkdir`, `move`, `copy`, `delete`, `upload`, `download`                                                                                                                               |
-| PTY       | `box.pty.create(cols=, rows=, client_label=)` / `attach(session_id, …)` → `write`, `resize`, `takeover`, `on_data`, iterate, `detach`, `close`, `wait`                                                                                        |
-| Previews  | `box.preview.create(port, label=)` → `Preview(url, label)`; `remove(label)`                                                                                                                                                                   |
-| Other     | `box.logs(since=, lines=, unit=)`, `box.ssh_info()`, `box.screenshot()`, `zb.account.balance()`, `usage()`, `whoami()`                                                                                                                        |
-| Tailscale | `box.tailscale.status()` → `TailscaleStatus` or `None`; `connect(auth_key)`; `disconnect()`; `box.set_private(enabled)`; `create(private=True)`                                                                                               |
+| Area      | Calls                                                                                                                                                                                                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lifecycle | `zb.sandboxes.create(name=, tier=, ssh_public_key=, mailbox=, private=)`, `get_or_create(name, tier=, …)`, `list`, `get`, `wait_ready`, `pause`, `resume` (`stop`, `start` are aliases), `restart`, `cancel_transition`, `delete(id, archive=)`, `set_tier`; `zb.sandbox(id)` |
+| Fork      | `zb.sandboxes.fork(source_id, name=, source_policy=, private=, tailscale_auth_key=, wait=True)` → the new box; `get_fork(child_id)` → `SandboxFork`; `box.fork(name=, source_policy=, …)`, `box.fork_status()`                                                                |
+| Exec      | `box.exec(cmd)` → `ExecResult(id, exit_code, stdout, stderr)`; `exec_stream(cmd)`; `exec_background(cmd)` → `Command`; `run_code("python", code, cwd=)`                                                                                                                       |
+| Commands  | `Command.get()`, `events(since=)`, `wait()`, `stdin(data)`, `close_stdin()`, `signal("TERM")`; `box.commands.list/get/handle/events/stdin/close_stdin/signal`                                                                                                                 |
+| Files     | `box.files.read`, `read_text`, `write`, `list`, `stat`, `mkdir`, `move`, `copy`, `delete`, `upload`, `download`                                                                                                                                                               |
+| PTY       | `box.pty.create(cols=, rows=, client_label=)` / `attach(session_id, …)` → `write`, `resize`, `takeover`, `on_data`, iterate, `detach`, `close`, `wait`                                                                                                                        |
+| Previews  | `box.preview.create(port, label=)` → `Preview(url, label)`; `remove(label)`                                                                                                                                                                                                   |
+| Other     | `box.logs(since=, lines=, unit=)`, `box.ssh_info()`, `box.screenshot()`, `zb.account.balance()`, `usage()`, `whoami()`                                                                                                                                                        |
+| Tailscale | `box.tailscale.status()` → `TailscaleStatus` or `None`; `connect(auth_key)`; `disconnect()`; `box.set_private(enabled)`; `create(private=True)`                                                                                                                               |
 
 A string command runs under `bash -lc` (your PATH, nvm, pyenv); a list is spawned as argv.
 A command that exits non-zero is a result: check `exit_code`. Relative paths resolve
@@ -55,6 +55,19 @@ against `/root/workspace`.
 merely drops after the command started re-attaches from its last cursor by itself. A command
 started with `exec_background` keeps running with nobody attached — re-attach any time
 with `box.commands.handle(id).events(since=cursor)`.
+
+## Pause and resume
+
+```python
+box = zb.sandboxes.pause(box.id)  # returns the box paused; nothing is billed while paused
+box = zb.sandboxes.resume(box.id)  # returns the box ready, files and software as they were
+```
+
+`pause` and `resume` return once the box is there: at once when the server answers with the
+final state, else after waiting for it on `GET /sandbox/:id/wait`, with no deadline. A box
+whose Pause was cancelled raises `conflict`. `resume` on a box still `stopping` (a Pause still
+landing) waits that out, then resumes it. `stop` and `start` are aliases that send the same
+requests. On a box object, `box.pause()` / `box.resume()` return the updated detail.
 
 ## Tailscale and private boxes
 
@@ -96,11 +109,13 @@ A fork is a new box with the source's files, packages and settings, and a new id
 `private=True`, whatever the source's privacy. A running
 source needs `source_policy="pause_and_resume"`: it pauses for the capture (its sessions
 disconnect) and resumes right after; `"require_paused"` raises `pause_required` instead.
-Every wait (`create`, `get_or_create`, `wait_ready`, `fork`) reads the box's `readiness`: it keeps reading
-while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
-the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
+Every wait (`create`, `get_or_create`, `wait_ready`, `resume`, `fork`) asks
+`GET /sandbox/:id/wait?until=ready`, which the server answers when the box gets there; it
+asks again while the box is `settling`, with no deadline (a retryable failed read waits on a
+backoff ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
 the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
-or gone `conflict`. Rows carry `phase` and `allowed_actions`; a detail also carries `readiness`.
+or gone `conflict`. An API older than `/wait` is polled with `GET /sandbox/:id` instead. A
+`create` the server answers with the box already bound returns at once, with no wait. Rows carry `phase` and `allowed_actions`; a detail also carries `readiness`.
 One retry rule: an error is retried when its `retryable` is true.
 
 A created box's `base_url` changes once, a few minutes after create: from its boot address
@@ -138,8 +153,8 @@ machine names, and a deleted box keeps its name: reuse a fixed pool of names wit
 retry_base_delay_s=0.5, retry_max_delay_s=30.0, poll_interval_s=1.0,
 poll_max_interval_s=10.0, pty_base_delay_s=0.5, pty_max_delay_s=30.0)`. The key and URL
 default to `ZIPBOX_API_KEY` and `ZIPBOX_API_URL` (else `https://api.tribes.xyz`). A wait's
-readiness checks start at `poll_interval_s` and grow 1.25× per check to
-`poll_max_interval_s`, with jitter.
+retries after a failed read, and its checks against an API older than `/wait`, start at
+`poll_interval_s` and grow 1.25× per check to `poll_max_interval_s`, with jitter.
 
 Docs: [zipbox.ai/docs/sdk-python](https://zipbox.ai/docs/sdk-python) · Agent index:
 [zipbox.ai/llms.txt](https://zipbox.ai/llms.txt) · Apache-2.0.

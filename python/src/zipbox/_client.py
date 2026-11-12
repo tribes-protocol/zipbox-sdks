@@ -116,7 +116,8 @@ class Sandboxes:
         mailbox: bool | None = None,
         private: bool | None = None,
     ) -> Sandbox:
-        """Create a box and wait until it is ready (no deadline).
+        """Create a box and return it once it is ready (no deadline): at once when the
+        server bound a booted machine inside the request.
 
         ``mailbox=True`` creates the box's mailbox now; by default it is created
         the first time the box uses mail. ``private=True`` creates it private
@@ -144,7 +145,7 @@ class Sandboxes:
         mailbox: bool | None = None,
         private: bool | None = None,
     ) -> Sandbox:
-        """Return the live box named ``name`` (starting it if stopped), or create it with
+        """Return the live box named ``name`` (resuming it if paused), or create it with
         these options.
 
         The options apply only when a box is created. A box that already has this name
@@ -172,13 +173,31 @@ class Sandboxes:
         detail = self._client._run(self._client._core.get(sandbox_id))
         return Sandbox(self._client, sandbox_id, detail)
 
-    def start(self, sandbox_id: str) -> None:
-        """Start a stopped box, or a ``stopping`` one once its stop lands (402 when dry)."""
-        self._client._run(self._client._core.start(sandbox_id))
+    def pause(self, sandbox_id: str) -> Sandbox:
+        """Pause a box and return it paused: nothing is billed while it is paused, and
+        ``resume`` brings it back with its files and installed software.
 
-    def stop(self, sandbox_id: str) -> None:
-        """Stop a box: disk archived, nothing billed while stopped."""
-        self._client._run(self._client._core.lifecycle(sandbox_id, "pause"))
+        Returns at once when the server answers with the paused box, else waits for the
+        Pause to take effect (no deadline). A box that reads running again (the Pause
+        was cancelled) raises ``conflict``.
+        """
+        detail = self._client._run(self._client._core.pause(sandbox_id))
+        return Sandbox(self._client, sandbox_id, detail)
+
+    def resume(self, sandbox_id: str) -> Sandbox:
+        """Resume a paused box and return it ready; a ``stopping`` one is resumed once
+        its Pause lands. Returns at once when the server answers with the ready box,
+        else waits as ``wait_ready`` does (402 ``insufficient_credits`` when dry)."""
+        detail = self._client._run(self._client._core.resume(sandbox_id))
+        return Sandbox(self._client, sandbox_id, detail)
+
+    def stop(self, sandbox_id: str) -> Sandbox:
+        """Alias of ``pause``: the same request and the same result."""
+        return self.pause(sandbox_id)
+
+    def start(self, sandbox_id: str) -> Sandbox:
+        """Alias of ``resume``: the same request and the same result."""
+        return self.resume(sandbox_id)
 
     def restart(self, sandbox_id: str) -> None:
         """Hard-restart a running box; files survive."""
@@ -350,13 +369,24 @@ class Sandbox:
         """A PNG of the box's desktop."""
         return self._client._run(self._client._core.screenshot(self.id))
 
-    def start(self) -> None:
-        """Start this box."""
-        self._client.sandboxes.start(self.id)
+    def pause(self) -> SandboxDetail:
+        """Pause this box (nothing billed while paused) and return its detail, paused."""
+        self.info = self._client._run(self._client._core.pause(self.id))
+        return self.info
 
-    def stop(self) -> None:
-        """Stop this box."""
-        self._client.sandboxes.stop(self.id)
+    def resume(self) -> SandboxDetail:
+        """Resume this box and return its detail, ready; a ``stopping`` box is resumed
+        once its Pause lands."""
+        self.info = self._client._run(self._client._core.resume(self.id))
+        return self.info
+
+    def stop(self) -> SandboxDetail:
+        """Alias of ``pause``: the same request and the same result."""
+        return self.pause()
+
+    def start(self) -> SandboxDetail:
+        """Alias of ``resume``: the same request and the same result."""
+        return self.resume()
 
     def restart(self) -> None:
         """Hard-restart this box."""

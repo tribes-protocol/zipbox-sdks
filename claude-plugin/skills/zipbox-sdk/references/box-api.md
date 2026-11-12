@@ -25,9 +25,9 @@ curl "$BASE/exec" -H "Authorization: Bearer $BOX_TOKEN" ...
 
 The box token is derived from your key and this one box. It has **no expiry and no refresh**: a client holding a terminal open for a week needs nothing. It works on no other box, and it stops working within seconds of the key being deleted.
 
-**401 recovery.** If a box answers `401` (its token list had not arrived yet after a start, or the key was deleted), fetch `GET /sandbox/:id` again and retry once. A deleted key fails that fetch itself. If the fetch succeeds and the box still says `401`, the key is live and the box has not received its token yet: retry with backoff. The SDKs re-fetch and retry once for you, then raise that second `401` with `retryable: true`; a terminal keeps reconnecting through it.
+**401 recovery.** If a box answers `401` (its token list had not arrived yet after a resume, or the key was deleted), fetch `GET /sandbox/:id` again and retry once. A deleted key fails that fetch itself. If the fetch succeeds and the box still says `401`, the key is live and the box has not received its token yet: retry with backoff. The SDKs re-fetch and retry once for you, then raise that second `401` with `retryable: true`; a terminal keeps reconnecting through it.
 
-A box that is not `ready` (stopped, starting) has no `baseUrl`; the SDKs raise `box_not_running` without calling it.
+A box that is not `ready` (paused, starting) has no `baseUrl`; the SDKs raise `box_not_running` without calling it.
 
 **Moved origin.** A freshly created box answers first on its machine's boot address, and its `baseUrl` changes once, to `box--<name>`, a few minutes after create; both answer while it changes. If a box call fails before anything was sent (refused connection, DNS, a failed TLS handshake), read `GET /sandbox/:id` again and retry on the `baseUrl` it returns, with backoff. The SDKs do this for you, with no attempt limit: a box that has been paused, failed to start or been deleted ends the call with that error instead.
 

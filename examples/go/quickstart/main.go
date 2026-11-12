@@ -1,5 +1,5 @@
 // Quickstart: create (or reuse) a box, run a command, write and read a file,
-// open a preview, stop the box.
+// open a preview, pause the box.
 //
 //	export ZIPBOX_API_KEY=zb_…
 //	go run .
@@ -48,8 +48,8 @@ func main() {
 	}
 	fmt.Println("preview:", preview.URL)
 
-	if err := c.Sandboxes.Stop(ctx, box.ID); err != nil {
+	if _, err := c.Sandboxes.Pause(ctx, box.ID); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("stopped", box.ID)
+	fmt.Println("paused", box.ID)
 }

@@ -120,6 +120,10 @@ def run_sync_op(zb: Zipbox, op: str, a: dict[str, Any]) -> Any:
             return zb.sandboxes.get_or_create(a["name"], **_create_options(a))
         case "sandboxes.waitReady":
             return zb.sandboxes.wait_ready(a["id"])
+        case "sandboxes.pause":
+            return zb.sandboxes.pause(a["id"])
+        case "sandboxes.resume":
+            return zb.sandboxes.resume(a["id"])
         case "sandboxes.start":
             return zb.sandboxes.start(a["id"])
         case "sandboxes.stop":
@@ -196,6 +200,10 @@ async def run_async_op(zb: AsyncZipbox, op: str, a: dict[str, Any]) -> Any:
             return await zb.sandboxes.get_or_create(a["name"], **_create_options(a))
         case "sandboxes.waitReady":
             return await zb.sandboxes.wait_ready(a["id"])
+        case "sandboxes.pause":
+            return await zb.sandboxes.pause(a["id"])
+        case "sandboxes.resume":
+            return await zb.sandboxes.resume(a["id"])
         case "sandboxes.start":
             return await zb.sandboxes.start(a["id"])
         case "sandboxes.stop":
@@ -366,4 +374,4 @@ async def test_async(server: MockServer, path: Path) -> None:
 
 
 def test_every_fixture_is_loaded() -> None:
-    assert len(_fixtures()) >= 88
+    assert len(_fixtures()) >= 94

@@ -1,7 +1,7 @@
 # Zipbox SDKs
 
 Drive [Zipbox](https://zipbox.ai) boxes from code: create a box, run commands, move
-files, open a terminal, publish a port, stop it when you are done. Nothing on a box
+files, open a terminal, publish a port, pause it when you are done. Nothing on a box
 stops on a clock.
 
 | Language   | Package                                | Path            | Docs                                                           |
@@ -44,7 +44,7 @@ one SDK's surface lands in all four, the docs and the conformance fixtures toget
 | Get or create by name          | `zb.sandboxes.getOrCreate(name, { tier })`                                               | `zb.sandboxes.get_or_create(name, tier=)`                                                | `c.Sandboxes.GetOrCreate(ctx, name, zipbox.CreateOptions{Tier})`                                                | `zb.sandboxes().get_or_create_with(name, opts)`                                                           |
 | Wait until ready               | `zb.sandboxes.waitReady(id)`                                                             | `zb.sandboxes.wait_ready(id)`                                                            | `c.Sandboxes.WaitReady(ctx, id)`                                                                                | `zb.sandboxes().wait_ready(id)`                                                                           |
 | List / get                     | `list()` / `get(id)`                                                                     | `list()` / `get(id)`                                                                     | `List(ctx)` / `Get(ctx, id)`                                                                                    | `list()` / `get(id)`                                                                                      |
-| Start / stop / restart         | `start(id)` …                                                                            | `start(id)` …                                                                            | `Start(ctx, id)` …                                                                                              | `start(id)` …                                                                                             |
+| Pause / resume / restart       | `pause(id)` / `resume(id)` (aliases `stop` / `start`) …                                  | `pause(id)` / `resume(id)` (aliases `stop` / `start`) …                                  | `Pause(ctx, id)` / `Resume(ctx, id)` (aliases `Stop` / `Start`) …                                               | `pause(id)` / `resume(id)` (aliases `stop` / `start`) …                                                   |
 | Cancel a change in flight      | `cancelTransition(id)`                                                                   | `cancel_transition(id)`                                                                  | `CancelTransition(ctx, id)`                                                                                     | `cancel_transition(id)`                                                                                   |
 | Fork a box (new identity)      | `fork(id, { name, sourcePolicy, private, tailscaleAuthKey, wait })` / `getFork(id)`      | `fork(id, name=, source_policy=, private=, tailscale_auth_key=, wait=)` / `get_fork(id)` | `Fork(ctx, id, zipbox.ForkOptions{Name, SourcePolicy, Private, TailscaleAuthKey, NoWait})` / `GetFork(ctx, id)` | `fork(id, ForkOptions { private: Some(true), ..ForkOptions::new(name, source_policy) })` / `get_fork(id)` |
 | Delete (optionally no archive) | `delete(id, { archive })`                                                                | `delete(id, archive=)`                                                                   | `Delete(ctx, id, zipbox.DeleteOptions{Archive})`                                                                | `delete_with(id, DeleteOptions { archive })`                                                              |
@@ -72,9 +72,13 @@ resized). An account holds 250 machine names and a deleted box keeps its name, s
 fixed pool of names with get-or-create rather than a fresh name per job; a new name past the
 limit raises `machine_limit_reached` ([zipbox.ai/docs/machine-limit](https://zipbox.ai/docs/machine-limit)).
 
-Every wait (`create`, `getOrCreate`, `waitReady`, `fork`) reads the box's `readiness`: it keeps reading
-while the box is `settling`, with backoff and no deadline (a retryable failed read stays on
-the same ladder), returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
+`pause` returns the box once it reads `paused` and `resume` once it is ready: at once when the
+server answers with that final state (`200`), else after a wait. Every wait (`create`,
+`getOrCreate`, `waitReady`, `resume`, `fork`, and `pause` for `paused`) is
+`GET /sandbox/:id/wait?until=ready|paused`, which the server answers when the box gets there; a
+held answer that is still `settling` is asked again at once, with no deadline (a retryable
+failed read waits on the poll backoff; an API older than `/wait` is polled on
+`GET /sandbox/:id`). A wait for `ready` returns on `ready` or, for a private box, `awaits_tailnet`, and raises on
 the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting
 or gone `conflict`. Rows carry `phase` and `allowedActions`; a detail also carries `readiness`.
 One retry rule: an error is retried when its `retryable` is true. The one exception is a box

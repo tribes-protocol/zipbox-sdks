@@ -1,0 +1,49 @@
+{
+  "name": "sandboxes_create_ready_returns_at_once",
+  "description": "A create the server answered with the box already bound (ready: true with its baseUrl and box token) returns at once: no wait, and the box token in the answer is the one box calls use.",
+  "call": {
+    "op": "sandboxes.create",
+    "args": {
+      "name": "worker-1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "worker-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "sandboxId": "sbx_1",
+          "name": "worker-1",
+          "status": "running",
+          "created": true,
+          "ready": true,
+          "readiness": "ready",
+          "httpsReady": true,
+          "baseUrl": "{{BASE}}",
+          "boxToken": "bt_test_token",
+          "phase": "running",
+          "allowedActions": ["pause", "restart", "delete", "fork"]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true,
+      "baseUrl": "{{BASE}}"
+    }
+  }
+}

@@ -38,19 +38,20 @@ zipbox login
 
 ## Boxes
 
-| Command                                                                                    | Does                                                            |
-| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]`   | Create a box and wait until it is ready                         |
-| `zipbox sandbox create --private [--tailscale-auth-key-file <file>]`                       | Create a box that is never public, then join it to your tailnet |
-| `zipbox sandbox list`                                                                      | Your boxes                                                      |
-| `zipbox sandbox get <box>`                                                                 | One box                                                         |
-| `zipbox sandbox start <box>`                                                               | Start a stopped box; one still stopping, once its stop lands    |
-| `zipbox sandbox stop <box>`                                                                | Stop (disk archived, nothing billed)                            |
-| `zipbox sandbox restart <box>`                                                             | Hard restart; files survive                                     |
-| `zipbox sandbox cancel <box>`                                                              | Cancel the stop, start, restart, resize or fork in flight       |
-| `zipbox fork <box> --name <name> [--pause] [--tailscale-auth-key-file <file>] [--no-wait]` | Fork a box into a new box with its files and a fresh identity   |
-| `zipbox sandbox tier <box> <tier>`                                                         | Resize                                                          |
-| `zipbox sandbox delete <box> [--yes]`                                                      | Delete (30-day recoverable copy by default)                     |
+| Command                                                                                    | Does                                                                                      |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `zipbox sandbox create [--name <name>] [--tier s] [--ssh-public-key <line>] [--mailbox]`   | Create a box and wait until it is ready                                                   |
+| `zipbox sandbox create --private [--tailscale-auth-key-file <file>]`                       | Create a box that is never public, then join it to your tailnet                           |
+| `zipbox sandbox list`                                                                      | Your boxes                                                                                |
+| `zipbox sandbox get <box>`                                                                 | One box                                                                                   |
+| `zipbox sandbox pause <box>`                                                               | Pause the box (nothing billed) and wait until it reads paused                             |
+| `zipbox sandbox resume <box>`                                                              | Resume a paused box (one still stopping, once its pause lands) and wait until it is ready |
+| `zipbox sandbox stop <box>` / `start <box>`                                                | Aliases of `pause` / `resume`                                                             |
+| `zipbox sandbox restart <box>`                                                             | Hard restart; files survive                                                               |
+| `zipbox sandbox cancel <box>`                                                              | Cancel the pause, resume, restart, resize or fork in flight                               |
+| `zipbox fork <box> --name <name> [--pause] [--tailscale-auth-key-file <file>] [--no-wait]` | Fork a box into a new box with its files and a fresh identity                             |
+| `zipbox sandbox tier <box> <tier>`                                                         | Resize                                                                                    |
+| `zipbox sandbox delete <box> [--yes]`                                                      | Delete (30-day recoverable copy by default)                                               |
 
 `<box>` is a box id or its name. `sandbox` also answers to `box`; `sandbox list` to `sandbox ls`. `delete` asks for confirmation unless you pass `--yes` (`-y`).
 

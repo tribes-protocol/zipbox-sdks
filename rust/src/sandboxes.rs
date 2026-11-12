@@ -1,10 +1,13 @@
 //! Box lifecycle.
 
-use reqwest::header::{HeaderMap, HeaderValue};
+use std::time::Duration;
+
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
 use reqwest::Method;
 use serde::Deserialize;
 
 use crate::backoff::Backoff;
+use crate::claimstream::CLAIM_STREAM_ACCEPT;
 use crate::client::{decode_json, encode, json_body, Body, Zipbox};
 use crate::error::{Error, ErrorCode, Result};
 use crate::sandbox::Sandbox;
@@ -24,8 +27,8 @@ const READINESS: [&str; 7] = [
 ];
 
 /// The rule before `readiness`, for a control plane that does not send it: ready,
-/// private and waiting for a tailnet, ended (`destroyed`, `stopped`, `deleting`), or
-/// still settling. Remove once every control plane sends `readiness`.
+/// private and waiting for a tailnet, ended (`destroyed`, `deleting`), or still
+/// settling. Remove once every control plane sends `readiness`.
 fn fallback_readiness(detail: &SandboxDetail) -> &'static str {
     if detail.ready {
         return "ready";
@@ -47,7 +50,8 @@ fn fallback_readiness(detail: &SandboxDetail) -> &'static str {
         return "awaits_tailnet";
     }
     match detail.info.status.as_str() {
-        "destroyed" | "stopped" => "gone",
+        "destroyed" => "gone",
+        "paused" => "paused",
         "deleting" => "deleting",
         _ => "settling",
     }
@@ -66,34 +70,32 @@ pub(crate) fn readiness_of(detail: &SandboxDetail) -> &str {
     stated_readiness(detail).unwrap_or_else(|| fallback_readiness(detail))
 }
 
+/// The remedy for a paused box: resume it, unless the server says it cannot resume now.
+fn paused_remedy(detail: &SandboxDetail) -> &'static str {
+    match &detail.info.allowed_actions {
+        Some(actions) if !actions.iter().any(|action| action == "resume") => {
+            "it cannot be resumed now; see its allowed_actions"
+        }
+        _ => "resume it with sandboxes().resume",
+    }
+}
+
 /// The error a wait returns for a box that will not become ready by itself, or
-/// `None` while it may. Each is an answered verdict, never retryable.
+/// `None` while it may. Each is an answered verdict, never retryable: nothing but
+/// the caller resumes the box.
 fn ended_error(id: &str, detail: &SandboxDetail) -> Option<Error> {
     let mut err = match readiness_of(detail) {
-        "paused" => {
-            // Start it, unless the server says it cannot start now.
-            let remedy = match &detail.info.allowed_actions {
-                Some(actions) if !actions.iter().any(|action| action == "start") => {
-                    "it cannot be started now; see its allowed_actions"
-                }
-                _ => "start it first",
-            };
-            Error::new(
-                ErrorCode::BoxNotRunning,
-                format!("box {id} is paused and nothing will start it; {remedy}"),
-            )
-        }
-        "start_failed" => {
-            let remedy = if detail.info.status == "stopped" {
-                "its name was released; create it again"
-            } else {
-                "start it again"
-            };
-            Error::new(
-                ErrorCode::StartFailed,
-                format!("box {id} failed to start; {remedy}"),
-            )
-        }
+        "paused" => Error::new(
+            ErrorCode::BoxNotRunning,
+            format!(
+                "box {id} is paused and nothing will resume it; {}",
+                paused_remedy(detail)
+            ),
+        ),
+        "start_failed" => Error::new(
+            ErrorCode::StartFailed,
+            format!("box {id} failed to start; {}", paused_remedy(detail)),
+        ),
         "deleting" | "gone" => Error::new(
             ErrorCode::Conflict,
             format!(
@@ -105,6 +107,61 @@ fn ended_error(id: &str, detail: &SandboxDetail) -> Option<Error> {
     };
     err.retryable = false;
     Some(err)
+}
+
+/// The error a wait for a Pause returns for a box that will not reach `paused` by
+/// itself, or `None` while it may (`paused`, `settling`). A box that reads ready
+/// again had its Pause cancelled or refused; a failed, deleting or gone box will not
+/// pause. Each is an answered verdict, never retryable.
+fn pause_ended_error(id: &str, detail: &SandboxDetail) -> Option<Error> {
+    let mut err = match readiness_of(detail) {
+        "paused" | "settling" => return None,
+        "ready" | "awaits_tailnet" => Error::new(
+            ErrorCode::Conflict,
+            format!("box {id} is running: its pause was cancelled or did not take effect"),
+        ),
+        other => Error::new(
+            ErrorCode::Conflict,
+            format!("box {id} is {other} and will not pause"),
+        ),
+    };
+    err.retryable = false;
+    Some(err)
+}
+
+/// What a wait waits for: the box answering (`ready`), or its Pause taking effect
+/// (`paused`). It is the `until` of `GET /sandbox/:id/wait`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitTarget {
+    Ready,
+    Paused,
+}
+
+impl WaitTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            WaitTarget::Ready => "ready",
+            WaitTarget::Paused => "paused",
+        }
+    }
+}
+
+/// One read inside a wait: `Ok(true)` once the wait is over, `Ok(false)` while the
+/// box may still get there, and the answered verdict of a box that will not get
+/// there by itself. A wait for `ready` also ends on `awaits_tailnet` (a private box
+/// running with its key: the caller seals an auth key to it).
+fn settled(id: &str, detail: &SandboxDetail, until: WaitTarget) -> Result<bool> {
+    let ended = match until {
+        WaitTarget::Ready => ended_error(id, detail),
+        WaitTarget::Paused => pause_ended_error(id, detail),
+    };
+    if let Some(err) = ended {
+        return Err(err);
+    }
+    Ok(match until {
+        WaitTarget::Ready => readiness_of(detail) != "settling",
+        WaitTarget::Paused => readiness_of(detail) == "paused",
+    })
 }
 
 /// The error a box call returns on a detail it cannot call: a private box that has
@@ -127,7 +184,7 @@ pub(crate) fn box_not_ready_error(id: &str, detail: &SandboxDetail) -> Error {
     let mut err = Error::new(
         ErrorCode::BoxNotRunning,
         format!(
-            "box {id} is not running (status {}); start it and wait until it is ready",
+            "box {id} is not running (status {}); resume it with sandboxes().resume",
             detail.info.status
         ),
     );
@@ -206,10 +263,11 @@ impl Sandboxes {
         ))
     }
 
-    /// Creates a box and waits until it answers requests. Safe to retry: the
-    /// claim carries an `Idempotency-Key`. Waits with backoff and no deadline. A
-    /// box created with `private: Some(true)` returns once it is running with its
-    /// key (see [`Sandboxes::wait_ready`]).
+    /// Creates a box and returns it once it answers requests: at once when the
+    /// server bound a booted machine inside the request (`ready` in its answer),
+    /// else after waiting as [`Sandboxes::wait_ready`] does, with no deadline. Safe
+    /// to retry: the claim carries an `Idempotency-Key`. A box created with
+    /// `private: Some(true)` returns once it is running with its key.
     pub async fn create(&self, options: CreateOptions) -> Result<Sandbox> {
         let mut headers = HeaderMap::new();
         let key = uuid::Uuid::new_v4().to_string();
@@ -217,22 +275,33 @@ impl Sandboxes {
             "idempotency-key",
             HeaderValue::from_str(&key).expect("uuid is a valid header"),
         );
-        let resp = self
-            .client
-            .api(
-                Method::POST,
-                "/sandbox/identity/claim",
-                json_body(&options),
-                headers,
-                true,
-            )
-            .await?;
-        let claim: ClaimResponse = decode_json(resp).await?;
+        headers.insert(ACCEPT, HeaderValue::from_static(CLAIM_STREAM_ACCEPT));
+        // The answer streamed (conformance README, streamed create); its placed line is
+        // never dialled. An unstreamed answer reads as before.
+        let resp = self.client.api_claim(json_body(&options), headers).await?;
+        let mut answer: serde_json::Value = decode_json(resp).await?;
+        let claim: ClaimResponse = serde_json::from_value(answer.clone()).map_err(Error::decode)?;
+        // The answer carries the box's detail once the server bound it in the request.
+        if let Some(fields) = answer.as_object_mut() {
+            fields
+                .entry("id")
+                .or_insert_with(|| serde_json::Value::String(claim.sandbox_id.clone()));
+        }
+        if let Ok(detail) = serde_json::from_value::<SandboxDetail>(answer) {
+            if readiness_of(&detail) == "ready" && detail.base_url.is_some() {
+                self.client.adopt(&claim.sandbox_id, &detail);
+                return Ok(Sandbox::new(
+                    self.client.clone(),
+                    claim.sandbox_id,
+                    Some(detail),
+                ));
+            }
+        }
         self.wait_ready(&claim.sandbox_id).await
     }
 
     /// The running box named `name`, creating it with the default options if the
-    /// account has none. A stopped box of that name is started. See
+    /// account has none. A paused box of that name is resumed. See
     /// [`Sandboxes::get_or_create_with`] to create it with a tier, SSH key, mailbox
     /// or private mode.
     pub async fn get_or_create(&self, name: &str) -> Result<Sandbox> {
@@ -260,7 +329,7 @@ impl Sandboxes {
         }
         let existing = self.list().await?.into_iter().find(|b| {
             b.name.as_deref() == Some(name)
-                && !matches!(b.status.as_str(), "destroyed" | "stopped" | "deleting")
+                && !matches!(b.status.as_str(), "destroyed" | "deleting")
         });
         let create = CreateOptions {
             name: Some(name.to_string()),
@@ -269,15 +338,21 @@ impl Sandboxes {
         let Some(info) = existing else {
             return self.create(create).await;
         };
-        // "stopping": a stop is still landing; start waits it out, then starts.
-        // "pausing": paused while its backup uploads; the start boots it at once.
-        if matches!(info.status.as_str(), "archived" | "stopping" | "pausing") {
-            match self.start(&info.id).await {
-                Ok(()) => {}
+        // "stopping": a Pause is still landing; request_resume waits it out, then resumes.
+        if matches!(info.status.as_str(), "paused" | "stopping") {
+            match self.request_resume(&info.id).await {
+                Ok(Some(detail)) if readiness_of(&detail) == "ready" => {
+                    return Ok(Sandbox::new(
+                        self.client.clone(),
+                        info.id.clone(),
+                        Some(detail),
+                    ));
+                }
+                Ok(_) => {}
                 // The name was being deleted: it is gone now, so make it.
                 Err(err) if err.code == ErrorCode::NotFound => return self.create(create).await,
-                // Another caller started it first: the server's idempotent answer to
-                // a second restore. A box now coming up is waited on like any other.
+                // Another caller resumed it first: the server's idempotent answer to
+                // a second resume. A box now coming up is waited on like any other.
                 Err(err) if err.code == ErrorCode::Conflict => {
                     let detail = self.detail_in_wait(&info.id).await?;
                     if !matches!(detail.info.status.as_str(), "provisioning" | "running") {
@@ -290,61 +365,115 @@ impl Sandboxes {
         self.wait_ready(&info.id).await
     }
 
-    /// Starts a stopped box (`POST /sandbox/:id/restore`).
+    /// Pauses a box (`POST /sandbox/:id/pause`) and returns it paused. Nothing is
+    /// billed while it is paused, and [`Sandboxes::resume`] brings it back with its
+    /// files and installed software. Returns at once when the server answers with
+    /// the paused box (200), else waits for the Pause to take effect
+    /// (`GET /sandbox/:id/wait?until=paused`, no deadline). A box that reads running
+    /// again (the Pause was cancelled) is [`ErrorCode::Conflict`].
+    pub async fn pause(&self, id: &str) -> Result<Sandbox> {
+        let accepted = self.lifecycle(id, "pause").await?;
+        self.finish(id, WaitTarget::Paused, accepted).await
+    }
+
+    /// Resumes a paused box (`POST /sandbox/:id/resume`) and returns it ready: at
+    /// once when the server answers with the ready box (200), else after waiting as
+    /// [`Sandboxes::wait_ready`] does. A box still `stopping` is resumed once its
+    /// Pause lands. Credit-gated: [`ErrorCode::InsufficientCredits`] when the
+    /// balance is dry.
+    pub async fn resume(&self, id: &str) -> Result<Sandbox> {
+        let accepted = self.request_resume(id).await?;
+        self.finish(id, WaitTarget::Ready, accepted).await
+    }
+
+    /// Alias of [`Sandboxes::pause`]: the same request and the same result.
+    pub async fn stop(&self, id: &str) -> Result<Sandbox> {
+        self.pause(id).await
+    }
+
+    /// Alias of [`Sandboxes::resume`]: the same request and the same result.
+    pub async fn start(&self, id: &str) -> Result<Sandbox> {
+        self.resume(id).await
+    }
+
+    /// Sends Resume, and returns the detail it answered with (`None` when the box
+    /// came back by itself, or the answer carried no detail).
     ///
-    /// A stop is accepted at once but its disk takes seconds to minutes to land;
-    /// meanwhile the box reads `stopping` and the restore answers `conflict`. This
-    /// waits that out with backoff and starts the box once it reads `archived`. A
-    /// box that comes out of the wait already starting or running (a resize
-    /// restores itself, a failed archive leaves it running) is started. Any other
-    /// `conflict` is returned as it came.
-    pub async fn start(&self, id: &str) -> Result<()> {
-        self.forget(id);
+    /// A Pause the host has not answered yet leaves the box `stopping`, and Resume
+    /// answers `conflict` meanwhile. This waits that out with backoff and resumes
+    /// the box once it reads `paused`. A box that comes out of the wait already
+    /// starting or running (a resize restores itself, a failed pause leaves it
+    /// running) is not resumed again. Any other `conflict` is returned as it came.
+    ///
+    /// In parallel with the resume, never waited for, the box's last known origin is
+    /// pre-connected, so the first call after it skips TCP and TLS.
+    async fn request_resume(&self, id: &str) -> Result<Option<SandboxDetail>> {
+        let preconnect = self.client.preconnect(id);
+        let accepted = self.send_resume(id).await;
+        if let Some(preconnect) = preconnect {
+            match &accepted {
+                Ok(detail) => preconnect.settle(detail.as_ref()),
+                Err(_) => preconnect.task.abort(),
+            }
+        }
+        accepted
+    }
+
+    /// Sends Resume, waiting out a Pause still landing (see `request_resume`).
+    async fn send_resume(&self, id: &str) -> Result<Option<SandboxDetail>> {
         let mut waited = false;
         loop {
-            let err = match self.post(id, "restore").await {
+            let err = match self.lifecycle(id, "resume").await {
                 Err(err) if err.code == ErrorCode::Conflict => err,
                 other => return other,
             };
             let mut detail = self.detail_in_wait(id).await?;
             if detail.info.status != "stopping" {
-                // A second conflict after a stop was waited out: the box restored
-                // itself, or it is archived and will not restore (that is final).
+                // A second conflict after a pause was waited out: the box came back by
+                // itself, or it is paused and will not resume (that is final).
                 if waited && matches!(detail.info.status.as_str(), "provisioning" | "running") {
-                    return Ok(());
+                    return Ok(None);
                 }
                 return Err(err);
             }
-            let mut backoff = Backoff::poll(
-                self.client.inner.poll_interval,
-                self.client.inner.poll_max_interval,
-            );
+            let mut backoff = self.poll_backoff();
             while detail.info.status == "stopping" {
                 tokio::time::sleep(backoff.next_delay()).await;
                 detail = self.detail_in_wait(id).await?;
             }
             waited = true;
             match detail.info.status.as_str() {
-                "archived" => {}
-                "provisioning" | "running" => return Ok(()),
+                "paused" => {}
+                "provisioning" | "running" => return Ok(None),
                 _ => return Err(err),
             }
         }
     }
 
-    /// Stops a box: its disk is archived and nothing is billed while stopped.
-    pub async fn stop(&self, id: &str) -> Result<()> {
-        self.forget(id);
-        self.post(id, "pause").await
+    /// The accepted detail when it already shows `until`, else the wait for it.
+    async fn finish(
+        &self,
+        id: &str,
+        until: WaitTarget,
+        accepted: Option<SandboxDetail>,
+    ) -> Result<Sandbox> {
+        let detail = match accepted {
+            Some(detail) if readiness_of(&detail) == until.as_str() => detail,
+            _ => self.wait_until(id, until).await?,
+        };
+        Ok(Sandbox::new(
+            self.client.clone(),
+            id.to_string(),
+            Some(detail),
+        ))
     }
 
     /// Hard-restarts a running box. Files survive; running processes do not.
     pub async fn restart(&self, id: &str) -> Result<()> {
-        self.forget(id);
-        self.post(id, "reset").await
+        self.lifecycle(id, "reset").await.map(|_| ())
     }
 
-    /// Cancels the box's state change in flight (a stop, a start, a restart, a tier
+    /// Cancels the box's state change in flight (a pause, a resume, a restart, a tier
     /// change) and returns it to where it was. Past the point of no return this fails
     /// with [`ErrorCode::Conflict`] carrying the server's reason. Not retried.
     pub async fn cancel_transition(&self, id: &str) -> Result<TransitionCancelOutcome> {
@@ -482,7 +611,7 @@ impl Sandboxes {
             };
             return Ok(Sandbox::new(self.client.clone(), child_id, Some(detail)));
         }
-        let child = match self.settle(&child_id).await {
+        let child = match self.wait_ready(&child_id).await {
             Ok(child) => child,
             // A cancelled or failed fork removes its box: the box reads not_found
             // while the fork still says why.
@@ -522,7 +651,9 @@ impl Sandboxes {
         }
     }
 
-    /// Re-reads the box with backoff until it is ready.
+    /// Waits until the box is ready, on `GET /sandbox/:id/wait?until=ready`: the
+    /// server answers when it is (an older API is polled with backoff instead). No
+    /// deadline; dropping the future stops the wait.
     ///
     /// A private box that has not joined a tailnet (no tailnet IPv4 yet) cannot be
     /// ready, so for one this returns as soon as it is running with its
@@ -532,32 +663,68 @@ impl Sandboxes {
     /// [`ErrorCode::BoxNotRunning`], a failed start [`ErrorCode::StartFailed`],
     /// deleting or gone [`ErrorCode::Conflict`], none of them retryable.
     pub async fn wait_ready(&self, id: &str) -> Result<Sandbox> {
-        self.settle(id).await
+        let detail = self.wait_until(id, WaitTarget::Ready).await?;
+        Ok(Sandbox::new(
+            self.client.clone(),
+            id.to_string(),
+            Some(detail),
+        ))
     }
 
-    /// The wait behind [`Sandboxes::wait_ready`] and [`Sandboxes::fork`]: re-reads
-    /// the box with backoff, and no deadline, until it is ready or awaits its
-    /// tailnet. The server's `readiness` decides: `settling` keeps reading. A read
-    /// that fails with a retryable error goes on the same ladder, never sooner than
-    /// its `retry_after`.
-    async fn settle(&self, id: &str) -> Result<Sandbox> {
-        let mut backoff = Backoff::poll(
-            self.client.inner.poll_interval,
-            self.client.inner.poll_max_interval,
-        );
+    /// Waits until the box reaches `until`, on `GET /sandbox/:id/wait`: the server
+    /// holds the request until the box gets there (pushed when the host answers, no
+    /// polling), until it cannot get there by itself, or until its hold limit
+    /// passes. A held answer that is still settling is asked again at once: the
+    /// server did the waiting. A read that fails with a retryable error goes on the
+    /// poll ladder, never sooner than its `retry_after`. An API that predates
+    /// `/wait` answers it 404 on a box that exists: then this is the poll on
+    /// `GET /sandbox/:id` it replaced, whose 404 is the box's own.
+    async fn wait_until(&self, id: &str, until: WaitTarget) -> Result<SandboxDetail> {
+        let mut backoff = self.poll_backoff();
         loop {
-            let mut retry_after = std::time::Duration::ZERO;
+            let retry_after = match self.wait_read(id, until).await {
+                Ok(detail) => {
+                    if settled(id, &detail, until)? {
+                        return Ok(detail);
+                    }
+                    backoff.reset();
+                    continue;
+                }
+                Err(err) if err.code == ErrorCode::NotFound => {
+                    return self.poll_until(id, until).await;
+                }
+                Err(err) if err.retryable => err.retry_after.unwrap_or_default(),
+                Err(err) => return Err(err),
+            };
+            tokio::time::sleep(backoff.next_delay().max(retry_after)).await;
+        }
+    }
+
+    async fn wait_read(&self, id: &str, until: WaitTarget) -> Result<SandboxDetail> {
+        let detail: SandboxDetail = self
+            .client
+            .api_json(
+                Method::GET,
+                &format!("/sandbox/{}/wait?until={}", encode(id), until.as_str()),
+                Body::None,
+            )
+            .await?;
+        self.client.adopt(id, &detail);
+        Ok(detail)
+    }
+
+    /// The wait for an API without `/wait`: re-reads `GET /sandbox/:id` with
+    /// backoff, and no deadline, until the box reaches `until` or will not get there
+    /// by itself. A read that fails with a retryable error goes on the same ladder,
+    /// never sooner than its `retry_after`.
+    async fn poll_until(&self, id: &str, until: WaitTarget) -> Result<SandboxDetail> {
+        let mut backoff = self.poll_backoff();
+        loop {
+            let mut retry_after = Duration::ZERO;
             match self.client.detail(id).await {
                 Ok(detail) => {
-                    if let Some(err) = ended_error(id, &detail) {
-                        return Err(err);
-                    }
-                    if readiness_of(&detail) != "settling" {
-                        return Ok(Sandbox::new(
-                            self.client.clone(),
-                            id.to_string(),
-                            Some(detail),
-                        ));
+                    if settled(id, &detail, until)? {
+                        return Ok(detail);
                     }
                 }
                 Err(err) if err.retryable => retry_after = err.retry_after.unwrap_or_default(),
@@ -567,14 +734,18 @@ impl Sandboxes {
         }
     }
 
+    fn poll_backoff(&self) -> Backoff {
+        Backoff::poll(
+            self.client.inner.poll_interval,
+            self.client.inner.poll_max_interval,
+        )
+    }
+
     /// One read of the box inside a wait. A read that fails with a retryable error
     /// (a control-plane deploy) is read again on the poll ladder, never sooner than
     /// its `retry_after`, with no ceiling; any other error is returned.
     async fn detail_in_wait(&self, id: &str) -> Result<SandboxDetail> {
-        let mut backoff = Backoff::poll(
-            self.client.inner.poll_interval,
-            self.client.inner.poll_max_interval,
-        );
+        let mut backoff = self.poll_backoff();
         loop {
             match self.client.detail(id).await {
                 Ok(detail) => return Ok(detail),
@@ -589,14 +760,27 @@ impl Sandboxes {
         }
     }
 
-    async fn post(&self, id: &str, action: &str) -> Result<()> {
-        self.client
-            .api_unit(
+    /// Sends a lifecycle verb. The answer is the box's detail: its final state
+    /// (200) when the host answered within the server's budget, or its state in
+    /// transition (202). `None` for an answer that carries no detail.
+    async fn lifecycle(&self, id: &str, action: &str) -> Result<Option<SandboxDetail>> {
+        self.forget(id);
+        let resp = self
+            .client
+            .api(
                 Method::POST,
                 &format!("/sandbox/{}/{action}", encode(id)),
                 Body::None,
+                HeaderMap::new(),
+                false,
             )
-            .await
+            .await?;
+        let bytes = resp.bytes().await.map_err(Error::transport)?;
+        let Ok(detail) = serde_json::from_slice::<SandboxDetail>(&bytes) else {
+            return Ok(None);
+        };
+        self.client.adopt(id, &detail);
+        Ok(Some(detail))
     }
 
     fn forget(&self, id: &str) {

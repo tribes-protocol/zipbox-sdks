@@ -1,6 +1,6 @@
 {
-  "name": "sandboxes_wait_ready_settling_archived_keeps_polling",
-  "description": "An upgrade's second leg reads archived with pendingTier and readiness settling: the wait keeps polling until the box is ready. The SDK never decides that archived is paused.",
+  "name": "sandboxes_wait_ready_settling_paused_keeps_waiting",
+  "description": "An upgrade's second leg reads paused with pendingTier and readiness settling: the wait keeps polling until the box is ready. The SDK never decides that paused is paused.",
   "call": {
     "op": "sandboxes.waitReady",
     "args": {
@@ -11,7 +11,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -23,7 +23,7 @@
           "name": "demo",
           "domain": "zbox.sh",
           "ipv6": "2a01::1",
-          "status": "archived",
+          "status": "paused",
           "tier": "s",
           "pendingTier": "m",
           "isArchived": true,
@@ -41,7 +41,7 @@
     {
       "request": {
         "method": "GET",
-        "path": "/sandbox/sbx_1",
+        "path": "/sandbox/sbx_1/wait?until=ready",
         "headers": {
           "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
         }
@@ -63,7 +63,7 @@
           "baseUrl": "{{BASE}}",
           "boxToken": "bt_test_token",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"],
+          "allowedActions": ["pause", "restart", "delete", "fork"],
           "readiness": "ready"
         }
       }

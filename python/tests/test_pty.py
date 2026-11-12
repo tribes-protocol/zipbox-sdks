@@ -210,7 +210,8 @@ def test_a_refused_dial_rereads_the_box_and_redials_its_new_origin() -> None:
     script.fail(WsRefused(None))
     assert isinstance(script.next(), Sleep)
     reread = script.next()
-    assert isinstance(reread, HttpRequest) and reread.url.endswith("/sandbox/sbx")
+    assert isinstance(reread, HttpRequest)
+    assert reread.url.endswith("/sandbox/sbx/wait?until=ready")
     assert "sbx" not in core._targets
     body = {"id": "sbx", "status": "running", "ready": True, "baseUrl": "https://box--demo.zbox.sh"}
     script.reply(HttpResponse(200, {}, json.dumps({**body, "boxToken": "bt_live"}).encode()))
@@ -222,7 +223,7 @@ def test_a_refused_dial_rereads_the_box_and_redials_its_new_origin() -> None:
     script.fail(WsRefused(None))
     assert isinstance(script.next(), Sleep)
     assert isinstance(script.next(), HttpRequest)
-    paused = {"id": "sbx", "status": "archived", "ready": False, "readiness": "paused"}
+    paused = {"id": "sbx", "status": "paused", "ready": False, "readiness": "paused"}
     script.reply(HttpResponse(200, {}, json.dumps(paused).encode()))
     with pytest.raises(ZipboxError) as caught:
         script.next()

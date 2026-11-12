@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -90,12 +93,30 @@ class HttpxSyncTransport:
         state: _StreamState = response.handle
         state.response.close()
 
+    def preconnect(self, request: HttpRequest) -> threading.Thread:
+        """Perform a ``Preconnect`` effect: the request on a daemon thread, on this
+        client's pool (``httpx.Client`` is thread-safe), its answer read and dropped."""
+        thread = threading.Thread(target=self._preconnect, args=(request,), daemon=True)
+        thread.start()
+        return thread
+
+    def _preconnect(self, request: HttpRequest) -> None:
+        with contextlib.suppress(Exception):
+            self._client.request(request.method, request.url, headers=request.headers)
+
+    def drop_preconnect(self, handle: Any) -> None:
+        """Perform a ``DropPreconnect`` effect. A blocking request cannot be stopped
+        from another thread; it is left to finish, and nothing reads it."""
+        return None
+
 
 class HttpxAsyncTransport:
     """Async transport over ``httpx.AsyncClient``."""
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client or httpx.AsyncClient(timeout=_NO_TIMEOUT)
+        # Running pre-connects, held so the event loop does not collect them.
+        self._preconnects: set[asyncio.Task[None]] = set()
 
     async def aclose(self) -> None:
         """Release the connection pool."""
@@ -149,3 +170,20 @@ class HttpxAsyncTransport:
         """Perform a ``CloseStream`` effect."""
         state: _StreamState = response.handle
         await state.response.aclose()
+
+    def preconnect(self, request: HttpRequest) -> asyncio.Task[None]:
+        """Perform a ``Preconnect`` effect: the request as a task on this client's
+        pool, its answer read and dropped. Never awaited by the operation."""
+        task = asyncio.get_running_loop().create_task(self._preconnect(request))
+        self._preconnects.add(task)
+        task.add_done_callback(self._preconnects.discard)
+        return task
+
+    async def _preconnect(self, request: HttpRequest) -> None:
+        with contextlib.suppress(Exception):
+            await self._client.request(request.method, request.url, headers=request.headers)
+
+    def drop_preconnect(self, handle: Any) -> None:
+        """Perform a ``DropPreconnect`` effect: cancel the task if it still runs."""
+        if isinstance(handle, asyncio.Task):
+            handle.cancel()

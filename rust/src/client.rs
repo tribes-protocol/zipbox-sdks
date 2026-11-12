@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::account::Account;
 use crate::backoff::Backoff;
+use crate::claimstream::read_claim_stream;
 use crate::error::{Error, ErrorCode, Result};
 use crate::sandbox::Sandbox;
 use crate::sandboxes::Sandboxes;
@@ -56,11 +57,38 @@ pub(crate) struct Inner {
     pub pty_base_delay: Duration,
     pub pty_max_delay: Duration,
     pub boxes: Mutex<HashMap<String, BoxAccess>>,
+    /// The last access each box answered on, kept when `boxes` drops it: a paused
+    /// box's detail has none, and its resume pre-connects to the one it had.
+    pub last_origins: Mutex<HashMap<String, BoxAccess>>,
 }
 
 /// How long a private box's reachability probe may take before the box counts as
 /// off this device's tailnet. A probe is a one-off check, not a live surface.
 pub(crate) const PRIVATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The box's health route: unauthenticated and cheap. A resume pre-connects with it.
+const PRECONNECT_PATH: &str = "/healthz";
+
+/// A connection being opened to a box's last known origin while its resume is in
+/// flight (see [`Zipbox::preconnect`]).
+pub(crate) struct Preconnect {
+    pub base_url: String,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+impl Preconnect {
+    /// Keeps it only while the resume answered on the same origin: a box that moved
+    /// (a name cutover, private mode) is reached the normal way. An answer that names
+    /// no origin yet leaves it alone.
+    pub(crate) fn settle(self, accepted: Option<&SandboxDetail>) {
+        let moved = accepted
+            .and_then(|detail| detail.base_url.as_deref())
+            .is_some_and(|base| base.trim_end_matches('/') != self.base_url);
+        if moved {
+            self.task.abort();
+        }
+    }
+}
 
 /// What a box needs: its origin and the token it accepts.
 #[derive(Clone)]
@@ -156,6 +184,8 @@ struct SendRequest<'a> {
     extra: HeaderMap,
     retry: bool,
     box_unsent: Option<&'a mut Backoff>,
+    /// A create that asked for its answer streamed (see [`read_claim_stream`]).
+    claim_stream: bool,
 }
 
 /// Configures a [`Zipbox`] client.
@@ -290,6 +320,7 @@ impl ZipboxBuilder {
                 pty_base_delay: self.pty_base_delay,
                 pty_max_delay: self.pty_max_delay,
                 boxes: Mutex::new(HashMap::new()),
+                last_origins: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -311,7 +342,7 @@ impl Zipbox {
         ZipboxBuilder::default()
     }
 
-    /// Box lifecycle: create, list, get, start, stop, restart, delete, tier.
+    /// Box lifecycle: create, list, get, pause, resume, restart, delete, tier.
     pub fn sandboxes(&self) -> Sandboxes {
         Sandboxes {
             client: self.clone(),
@@ -350,6 +381,25 @@ impl Zipbox {
             extra,
             retry,
             box_unsent: None,
+            claim_stream: false,
+        })
+        .await
+    }
+
+    /// POST /sandbox/identity/claim asking for its answer streamed: the answer comes back
+    /// as the response it stands for. Retried like [`Zipbox::api`] with `retry` set.
+    pub(crate) async fn api_claim(&self, body: Body, extra: HeaderMap) -> Result<Response> {
+        let url = format!("{}/sandbox/identity/claim", self.inner.base_url);
+        let auth = format!("Bearer {}", self.inner.api_key);
+        self.send(SendRequest {
+            method: Method::POST,
+            url: &url,
+            auth: &auth,
+            body,
+            extra,
+            retry: true,
+            box_unsent: None,
+            claim_stream: true,
         })
         .await
     }
@@ -378,13 +428,19 @@ impl Zipbox {
         let detail: SandboxDetail = self
             .api_json(Method::GET, &format!("/sandbox/{}", encode(id)), Body::None)
             .await?;
-        // A box that is not ready no longer answers where it did: its cached access
-        // goes, and the next box call reads it afresh.
+        self.adopt(id, &detail);
+        Ok(detail)
+    }
+
+    /// Takes in a detail the control plane answered (a read, a wait, a lifecycle or
+    /// create answer). A box that is not ready no longer answers where it did: its
+    /// cached access goes, and the next box call reads it afresh. A ready one caches
+    /// its origin and token.
+    pub(crate) fn adopt(&self, id: &str, detail: &SandboxDetail) {
         if !detail.ready {
             self.inner.boxes.lock().expect("box cache").remove(id);
         }
-        self.remember(&detail);
-        Ok(detail)
+        self.remember(detail);
     }
 
     pub(crate) fn remember(&self, detail: &SandboxDetail) {
@@ -394,8 +450,49 @@ impl Zipbox {
             access.reachable = boxes.get(&detail.info.id).is_some_and(|previous| {
                 previous.reachable && previous.base_url == access.base_url && access.private
             });
+            self.inner
+                .last_origins
+                .lock()
+                .expect("origin cache")
+                .insert(detail.info.id.clone(), access.clone());
             boxes.insert(detail.info.id.clone(), access);
         }
+    }
+
+    /// Opens a connection to the box's last known origin on the shared pool, in the
+    /// background: one unauthenticated GET of its health route (what its host itself
+    /// probes), its body read so the connection returns to the pool. Never awaited
+    /// and never retried; a failure changes nothing. `None` when this client never
+    /// saw the box ready, or the box is private (off its tailnet the connect would
+    /// hang).
+    ///
+    /// Safe to dial early, unlike a create's placed origin: it is the origin a ready
+    /// answer already named for this box, an existing name whose DNS record is live and
+    /// proven, never a fresh name.
+    pub(crate) fn preconnect(&self, id: &str) -> Option<Preconnect> {
+        let last = self
+            .inner
+            .last_origins
+            .lock()
+            .expect("origin cache")
+            .get(id)
+            .cloned()?;
+        if last.private {
+            return None;
+        }
+        Some(self.preconnect_origin(last.base_url))
+    }
+
+    /// Opens a connection to `base_url` the same way.
+    pub(crate) fn preconnect_origin(&self, base_url: String) -> Preconnect {
+        let http = self.inner.http.clone();
+        let url = format!("{base_url}{PRECONNECT_PATH}");
+        let task = tokio::spawn(async move {
+            if let Ok(response) = http.get(url).send().await {
+                let _ = response.bytes().await;
+            }
+        });
+        Preconnect { base_url, task }
     }
 
     // ---- box data plane ------------------------------------------------
@@ -519,6 +616,7 @@ impl Zipbox {
                     extra: headers.clone(),
                     retry,
                     box_unsent: Some(&mut unsent),
+                    claim_stream: false,
                 })
                 .await;
             match sent {
@@ -560,6 +658,7 @@ impl Zipbox {
             extra,
             retry,
             mut box_unsent,
+            claim_stream,
         } = request;
         let mut backoff = Backoff::new(self.inner.retry_base_delay, self.inner.retry_max_delay);
         let mut unsent_backoff =
@@ -586,18 +685,27 @@ impl Zipbox {
                     if let Some(ladder) = box_unsent.as_deref_mut() {
                         ladder.reset();
                     }
-                    if resp.status().is_success() {
-                        return Ok(resp);
+                    let answered = if claim_stream {
+                        read_claim_stream(resp).await
+                    } else {
+                        Ok(resp)
+                    };
+                    match answered {
+                        // A stream that broke before its answer: retried like a drop.
+                        Err(err) => err,
+                        Ok(resp) if resp.status().is_success() => return Ok(resp),
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let retry_after = resp
+                                .headers()
+                                .get(RETRY_AFTER)
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.trim().parse::<u64>().ok())
+                                .map(Duration::from_secs);
+                            let bytes = resp.bytes().await.map_err(Error::transport)?;
+                            Error::from_response(status, retry_after, &bytes)
+                        }
                     }
-                    let status = resp.status().as_u16();
-                    let retry_after = resp
-                        .headers()
-                        .get(RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.trim().parse::<u64>().ok())
-                        .map(Duration::from_secs);
-                    let bytes = resp.bytes().await.map_err(Error::transport)?;
-                    Error::from_response(status, retry_after, &bytes)
                 }
                 // A failure to connect or to complete the TLS handshake: nothing was
                 // sent. A box call re-reads the box before it retries.

@@ -16,7 +16,7 @@ go get github.com/tribes-protocol/zipbox-go
 
 ## Quickstart
 
-Create a box, run a command, write and read a file, open a preview, stop the box.
+Create a box, run a command, write and read a file, open a preview, pause the box.
 
 ```go
 package main
@@ -52,7 +52,7 @@ func main() {
 	preview, _ := box.Preview.Create(ctx, 8000, "") // "" = label p8000
 	fmt.Println(preview.URL)
 
-	_ = c.Sandboxes.Stop(ctx, box.ID)
+	_, _ = c.Sandboxes.Pause(ctx, box.ID)
 }
 ```
 
@@ -69,7 +69,10 @@ func main() {
 | `c.Sandboxes.WaitReady(ctx, id)`                                                                                               | `*Box`, ready (private and not joined: running)                                                                                                |
 | `c.Sandboxes.List(ctx)`                                                                                                        | `[]Sandbox`                                                                                                                                    |
 | `c.Sandboxes.Get(ctx, id)`                                                                                                     | `*SandboxDetail`                                                                                                                               |
-| `c.Sandboxes.Start(ctx, id)` / `Stop` / `Restart`                                                                              | `error`                                                                                                                                        |
+| `c.Sandboxes.Pause(ctx, id)`                                                                                                   | `*Box`, paused                                                                                                                                 |
+| `c.Sandboxes.Resume(ctx, id)`                                                                                                  | `*Box`, ready                                                                                                                                  |
+| `c.Sandboxes.Stop(ctx, id)` / `Start`                                                                                          | aliases of `Pause` / `Resume`: the same request and result                                                                                     |
+| `c.Sandboxes.Restart(ctx, id)`                                                                                                 | `error`                                                                                                                                        |
 | `c.Sandboxes.CancelTransition(ctx, id)` / `box.CancelTransition(ctx)`                                                          | `TransitionCancelOutcome, error` (`TransitionCleared` / `TransitionCancelling` / `TransitionNone`; `CodeConflict` past the point of no return) |
 | `c.Sandboxes.Fork(ctx, id, zipbox.ForkOptions{Name, SourcePolicy, Private, TailscaleAuthKey, NoWait})` / `box.Fork(ctx, opts)` | `*Box`: the new box, ready (private: running; `NoWait`: as accepted)                                                                           |
 | `c.Sandboxes.GetFork(ctx, id)` / `box.ForkStatus(ctx)`                                                                         | `*SandboxFork` of the new box `id`                                                                                                             |
@@ -77,9 +80,10 @@ func main() {
 | `c.Sandboxes.Delete(ctx, id, zipbox.DeleteOptions{Archive})`                                                                   | `error`                                                                                                                                        |
 | `c.Sandbox(id)`                                                                                                                | `*Box` handle, no network call                                                                                                                 |
 | `box.Refresh(ctx)` / `box.WaitReady(ctx)`                                                                                      | `*SandboxDetail`                                                                                                                               |
-| `box.Start(ctx)` / `Stop` / `Restart` / `SetTier(ctx, tier)` / `Delete(ctx, opts)`                                             | `error`                                                                                                                                        |
+| `box.Pause(ctx)` / `Resume` (aliases `Stop` / `Start`)                                                                         | `*SandboxDetail`, paused / ready                                                                                                               |
+| `box.Restart(ctx)` / `SetTier(ctx, tier)` / `Delete(ctx, opts)`                                                                | `error`                                                                                                                                        |
 
-Every wait (`Create`, `GetOrCreate`, `WaitReady`, `Fork`) reads the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness): it keeps reading while the box is `settling`, with no deadline, and a read that fails with a retryable error stays on the same ladder. It returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `Phase` and `AllowedActions`; a `SandboxDetail` also carries `Readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
+Every wait (`Create`, `GetOrCreate`, `WaitReady`, `Resume`, `Fork`) waits on `GET /sandbox/:id/wait?until=ready`, which the server answers as soon as the box's [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is no longer `settling`, so it returns the moment the box is up; a held answer that is still `settling` is asked again at once, with no deadline, and a read that fails with a retryable error waits on the poll ladder. An API older than `/wait` is polled on `GET /sandbox/:id` instead. `Pause` waits the same way with `until=paused`, and only when the server did not answer with the paused box already; a box that reads running again (its pause was cancelled) raises `conflict`. The wait returns on `ready`, or on `awaits_tailnet` for a private box, and raises on the rest, never retryable: paused `box_not_running`, a failed start `start_failed`, deleting or gone `conflict`. A box call on a private box that has not joined a tailnet raises `tailnet_not_connected`. Every row carries `Phase` and `AllowedActions`; a `SandboxDetail` also carries `Readiness`. Against a control plane that does not send `readiness` yet, the SDK reads `ready` and `status` as before.
 
 A created box's `BaseURL` is not permanent: it answers on its boot address first and moves once, to `box--<name>`, a few minutes after create. The SDK follows it. A box call (or a PTY dial) that fails before anything was sent (a refused connect, DNS, a TLS handshake) waits one rung of the `WithBackoff` ladder, re-reads the box with the same wait `Create` uses, and retries on the `BaseURL` and token that read returned, with no attempt ceiling: `ctx` is the only bound. A box that is paused, failed or deleted meanwhile ends the call with the wait's own error. A request that was sent is never repeated this way.
 

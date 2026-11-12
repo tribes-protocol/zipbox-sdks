@@ -10,7 +10,7 @@ Every error a public caller sees - control plane, box, SDK, CLI or MCP - resolve
 
 ## Nothing times out on a clock
 
-No box, command, PTY, preview or token ends because time passed. There is no idle timeout, no auto-stop, no maximum session length, and no default command deadline. A box runs until you stop or delete it; a command runs until it exits or you signal it (or until the `timeoutMs` you chose). If something ends, a person or the box ended it.
+No box, command, PTY, preview or token ends because time passed. There is no idle timeout, no auto-pause, no maximum session length, and no default command deadline. A box runs until you pause or delete it; a command runs until it exits or you signal it (or until the `timeoutMs` you chose). If something ends, a person or the box ended it.
 
 ## HTTP statuses
 
@@ -27,7 +27,7 @@ No box, command, PTY, preview or token ends because time passed. There is no idl
 | 409    | `name_taken`                            | No - pick another name                                      |
 | 409    | `source_unsupported`                    | No - this box cannot be forked                              |
 | 409    | `source_busy`                           | Later - once the source's change in flight has settled      |
-| 409    | `pause_required`                        | No - send `pause_and_resume`, or stop the source first      |
+| 409    | `pause_required`                        | No - send `pause_and_resume`, or pause the source first     |
 | 409    | `idempotency_mismatch`                  | No - use a new `Idempotency-Key` for a different request    |
 | 409    | `box_key_changed`                       | Once - re-read `agentPublicKey`, re-seal, send again        |
 | 409    | `tailnet_not_connected`                 | No - connect the box to your tailnet first                  |
@@ -68,7 +68,7 @@ The credential is missing, malformed or deleted. On the control plane: check `ZI
 
 ## insufficient_credits
 
-Creating, starting or resizing a box needs a credit balance above $0. Add credit at zipbox.ai/billing (a key cannot buy credit), then retry. Running boxes are not stopped by this error.
+Creating, resuming or resizing a box needs a credit balance above $0. Add credit at zipbox.ai/billing (a key cannot buy credit), then retry. Running boxes are not paused by this error.
 
 ## forbidden
 
@@ -76,7 +76,7 @@ The key is not allowed to do this: key management, OAuth consent, buying credit,
 
 ## machine_limit_reached
 
-A create with a **new** name was refused because the account already holds 250 machine names. A name is permanent: its subdomain, mailbox address and wallets are reserved to your account the first time it is created, and deleting the box keeps them. Nothing was created or charged.
+A create with a **new** name was refused because the account already holds 250 machine names. A name is permanent: its subdomain and mailbox address are reserved to your account the first time it is created, its mailbox and wallets once they are first used, and deleting the box keeps them. Nothing was created or charged.
 
 Creating, starting or rebooting any name you already own keeps working, so the fix is to reuse names: keep a fixed pool (`worker-00` … `worker-49`) and call get-or-create with one of them instead of a fresh name per job. How, in every SDK, the CLI and MCP: [Machine limit and reusing names](https://zipbox.ai/docs/machine-limit.md). Need more than 250? Email support@tribes.xyz with your account email and what the fleet does.
 
@@ -86,7 +86,7 @@ No such box (or it is not yours), no such command id, or no such file. Box ids c
 
 ## conflict
 
-The box or resource is in a state that does not allow this: starting a box that is already running, restarting one that is stopped, resizing during a resize, a file operation whose destination exists. Read the box (`GET /sandbox/:id`) and act on its `status`.
+The box or resource is in a state that does not allow this: resuming a box that is already running, restarting one that is paused, resizing during a resize, a file operation whose destination exists. Read the box (`GET /sandbox/:id`) and act on its `status`. An SDK `pause` that is waiting for the box to read paused raises `conflict`, not retryable, when the box reads running again: its pause was cancelled (`cancelTransition`) or did not take effect.
 
 ## rate_limited
 
@@ -94,7 +94,7 @@ More than 600 requests a minute with one key, or a box past 32 running commands 
 
 ## box_not_running
 
-The box is stopped, starting or restarting, so it has nothing to answer with. `retryable` says which: true while its [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is `settling` (it comes back by itself), false when it is paused or its start failed (nothing will start it but you). Start it (`start(id)`), or wait until `GET /sandbox/:id` reports `ready: true`, then retry. An SDK wait on a paused box raises this, not retryable, instead of waiting.
+The box is paused, starting or restarting, so it has nothing to answer with. `retryable` says which: true while its [`readiness`](https://zipbox.ai/docs/http-api.md#status-phase-and-readiness) is `settling` (it comes back by itself), false when it is paused or its start failed (nothing will resume it but you). Resume it (`resume(id)`), or wait with `GET /sandbox/:id/wait?until=ready`, then retry. An SDK wait on a paused box raises this, not retryable, instead of waiting.
 
 ## box_key_changed
 
@@ -128,11 +128,11 @@ The source is a kind of box a [fork](https://zipbox.ai/docs/fork.md) does not su
 
 ## source_busy
 
-The [fork](https://zipbox.ai/docs/fork.md) source is in another change: a stop, start, restart, resize, software update or another fork. Nothing was reserved and the source was not touched. Wait until `GET /sandbox/:id` shows the change settled, then fork again; the SDKs do not retry it for you.
+The [fork](https://zipbox.ai/docs/fork.md) source is in another change: a pause, resume, restart, resize, software update or another fork. Nothing was reserved and the source was not touched. Wait until `GET /sandbox/:id` shows the change settled, then fork again; the SDKs do not retry it for you.
 
 ## pause_required
 
-The [fork](https://zipbox.ai/docs/fork.md) source is running and the request said `sourcePolicy: require_paused`. A running box must stop writing to be captured consistently, which disconnects its sessions. Fork with `pause_and_resume` (the CLI's `--pause`, MCP's `pause: true`) to let it pause for the capture and resume right after, or stop it yourself first. Nothing was touched.
+The [fork](https://zipbox.ai/docs/fork.md) source is running and the request said `sourcePolicy: require_paused`. A running box must stop writing to be captured consistently, which disconnects its sessions. Fork with `pause_and_resume` (the CLI's `--pause`, MCP's `pause: true`) to let it pause for the capture and resume right after, or pause it yourself first. Nothing was touched.
 
 ## requires_interactive
 
@@ -215,7 +215,6 @@ Documented gaps, not hidden stubs:
 - **LSP** language-server endpoints.
 - **Outbound network policy.** Metered-provider egress exists; it is not user-configurable.
 - **Per-key scopes.** Every key has full access to the account's boxes.
-- **Memory pause and resume.** Stop archives the disk; restart reboots. Files survive both; running processes do not.
 - **File watch** events.
 - **Signed previews.** A preview is public on a public box, and tailnet-only on a [private box](https://zipbox.ai/docs/tailscale.md).
 - **Tailscale exit nodes, Funnel and `tailscale serve`.** See [what is not supported](https://zipbox.ai/docs/tailscale.md#what-is-not-supported).
@@ -225,15 +224,15 @@ Documented gaps, not hidden stubs:
 
 ### "box_not_running" right after create
 
-`create` returns once the box is ready, but a box you got from `get` or `list` may still be starting or may be stopped. Read `get(id)`: start it if `status` is `archived` or `pausing`, or wait until `ready` is true.
+`create` returns once the box is ready, but a box you got from `get` or `list` may still be starting or may be paused. Read `get(id)`: resume it if `status` is `paused`, or wait until it is ready (`waitReady`).
 
 ### "unauthorized" from the box but not from the control plane
 
-The box has not yet received the key's token (a key created moments ago, or a box just started), or the key was deleted. Fetch `GET /sandbox/:id` again: a deleted key fails that fetch at the control plane. If it succeeds, retry the box with backoff until it accepts the key.
+The box has not yet received the key's token (a key created moments ago, or a box just resumed), or the key was deleted. Fetch `GET /sandbox/:id` again: a deleted key fails that fetch at the control plane. If it succeeds, retry the box with backoff until it accepts the key.
 
 ### "Your balance is at or below $0 — top up to a positive balance to boot a machine."
 
-`insufficient_credits` (402) from `create`; `start` and `setTier` say the same with "unarchive this sandbox" or "upgrade this sandbox". Top up in the dashboard; running boxes keep running.
+`insufficient_credits` (402) from `create`; `resume` and `setTier` say the same with "unarchive this sandbox" or "upgrade this sandbox". Top up in the dashboard; running boxes keep running.
 
 ### "You've reached this account's limit of 250 machines."
 

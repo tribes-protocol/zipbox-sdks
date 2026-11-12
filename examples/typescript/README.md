@@ -10,7 +10,7 @@ npx tsx <file>.ts
 
 | Example                                            | What it shows                                                             |
 | -------------------------------------------------- | ------------------------------------------------------------------------- |
-| [quickstart](quickstart)                           | Create a box, run a command, write and read a file, preview, stop         |
+| [quickstart](quickstart)                           | Create a box, run a command, write and read a file, preview, pause        |
 | [long-running-dev-server](long-running-dev-server) | A background dev server, a public preview URL, re-attaching to its output |
 | [vercel-ai-sdk](vercel-ai-sdk)                     | A box as a tool for the Vercel AI SDK                                     |
 | [openai-agents-sdk](openai-agents-sdk)             | A box as a tool for the OpenAI Agents SDK                                 |

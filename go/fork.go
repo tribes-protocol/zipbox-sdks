@@ -28,7 +28,7 @@ type ForkPhase string
 
 // Fork phases.
 const (
-	// ForkPreparingIdentity: the new box's name, mailbox and wallets are being minted.
+	// ForkPreparingIdentity: the new box's name and mailbox address are being reserved.
 	ForkPreparingIdentity ForkPhase = "preparing_identity"
 	// ForkQueued: the new box exists; the capture waits its turn on the source.
 	ForkQueued ForkPhase = "queued"

@@ -12,9 +12,13 @@ use zipbox::{ErrorCode, Zipbox};
 
 use common::MockServer;
 
-fn detail(base_url: &str) -> Value {
+const DETAIL: &str = "/sandbox/sbx_1";
+// The re-read after a request nobody answered is the readiness wait.
+const WAIT: &str = "/sandbox/sbx_1/wait?until=ready";
+
+fn detail(path: &str, base_url: &str) -> Value {
     json!({
-        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+        "request": { "method": "GET", "path": path },
         "response": { "status": 200, "body": {
             "id": "sbx_1", "status": "running", "ready": true, "readiness": "ready",
             "baseUrl": base_url, "boxToken": "bt_test"
@@ -24,9 +28,9 @@ fn detail(base_url: &str) -> Value {
 
 fn paused() -> Value {
     json!({
-        "request": { "method": "GET", "path": "/sandbox/sbx_1" },
+        "request": { "method": "GET", "path": WAIT },
         "response": { "status": 200, "body": {
-            "id": "sbx_1", "status": "archived", "ready": false, "readiness": "paused"
+            "id": "sbx_1", "status": "paused", "ready": false, "readiness": "paused"
         }}
     })
 }
@@ -71,8 +75,10 @@ async fn a_tls_handshake_the_box_ends_is_unsent() {
         }
     });
     let (api, api_listener) = MockServer::bind().await;
-    api.state.lock().unwrap().exchanges =
-        vec![detail(&format!("https://127.0.0.1:{port}")), paused()];
+    api.state.lock().unwrap().exchanges = vec![
+        detail(DETAIL, &format!("https://127.0.0.1:{port}")),
+        paused(),
+    ];
     api.serve(api_listener);
 
     let err = tokio::time::timeout(
@@ -105,8 +111,9 @@ async fn the_unsent_ladder_grows_across_rereads() {
     dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let dead_origin = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
     let (api, api_listener) = MockServer::bind().await;
-    let mut exchanges: Vec<Value> = (0..4).map(|_| detail(&dead_origin)).collect();
-    exchanges.push(detail(&api.base));
+    let mut exchanges = vec![detail(DETAIL, &dead_origin)];
+    exchanges.extend((0..3).map(|_| detail(WAIT, &dead_origin)));
+    exchanges.push(detail(WAIT, &api.base));
     exchanges.push(exec());
     api.state.lock().unwrap().exchanges = exchanges;
     api.serve(api_listener);

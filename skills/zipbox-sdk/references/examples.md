@@ -249,10 +249,10 @@ The [Go SDK quickstart](https://zipbox.ai/docs/sdk-go.md#quickstart) is a comple
 
 ## Claude Code inside a box, driving another box
 
-Every box already runs a coding agent and carries the Zipbox skill, so an agent on box A can create, use and stop box B.
+Every box already runs a coding agent and carries the Zipbox skill, so an agent on box A can create, use and pause box B.
 
 1. On box A, make a key available to the agent: create one in Settings → API keys and add it to the box as a variable named `ZIPBOX_API_KEY` (box **Settings → Provider keys → Key = value**).
 2. Install the CLI on box A: `curl -fsSL https://zipbox.ai/install.sh | sh`.
-3. Ask the agent on box A: _"Use the zipbox-sdk skill. Create a box called worker, clone our repo there, run the full test suite, and summarise the failures. Stop worker when you are done."_
+3. Ask the agent on box A: _"Use the zipbox-sdk skill. Create a box called worker, clone our repo there, run the full test suite, and summarise the failures. Pause worker when you are done."_
 
-The agent reads the skill, runs `zipbox sandbox create --name worker`, `zipbox exec worker -- …` and `zipbox sandbox stop worker`, and box A's own terminal stays free. Delete the key when you no longer want box A to drive others.
+The agent reads the skill, runs `zipbox sandbox create --name worker`, `zipbox exec worker -- …` and `zipbox sandbox pause worker`, and box A's own terminal stays free. Delete the key when you no longer want box A to drive others.

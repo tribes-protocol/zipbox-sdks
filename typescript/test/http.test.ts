@@ -223,7 +223,8 @@ describe('BoxTransport unsent failure', () => {
     let reads = 0
     const sends: BoxSend[] = []
     const fetch: FetchLike = (url, init) => {
-      if (url === 'https://api.test/sandbox/sbx_1') {
+      // The first read and every readiness wait after it (GET /sandbox/sbx_1/wait).
+      if (url.startsWith('https://api.test/sandbox/sbx_1')) {
         reads++
         return Promise.resolve(
           new Response(
@@ -274,7 +275,7 @@ describe('BoxTransport unsent failure', () => {
   it('ends the call with the wait verdict when the re-read box is paused', async () => {
     let reads = 0
     const fetch: FetchLike = (url) => {
-      if (url !== 'https://api.test/sandbox/sbx_1') {
+      if (!url.startsWith('https://api.test/sandbox/sbx_1')) {
         return Promise.reject(fetchFailed('ECONNREFUSED'))
       }
       reads++
@@ -290,7 +291,7 @@ describe('BoxTransport unsent failure', () => {
                   baseUrl: 'https://box-1.test',
                   boxToken: 'bt_1'
                 }
-              : { id: 'sbx_1', status: 'archived', ready: false, readiness: 'paused' }
+              : { id: 'sbx_1', status: 'paused', ready: false, readiness: 'paused' }
           )
         )
       )
@@ -307,5 +308,139 @@ describe('BoxTransport unsent failure', () => {
       retryable: false
     })
     expect(reads).toBe(2)
+  })
+})
+
+// A server that closes the connection must end the call with the usual retryable
+// network error, never leave it pending. No timeout makes this true: the close itself
+// does (AGENTS.md §0.0 forbids a request deadline on these calls).
+describe('a server that closes the connection', () => {
+  interface ClosingServer {
+    url: string
+    requests: string[]
+    close: () => Promise<void>
+  }
+
+  // Accepts, reads the request head, writes `reply` (if any) and destroys the socket.
+  // Records each request line it read.
+  async function closingServer(reply: string): Promise<ClosingServer> {
+    const requests: string[] = []
+    const server = createServer((socket) => {
+      let head = ''
+      socket.on('data', (chunk) => {
+        if (head.includes('\r\n\r\n')) return
+        head += chunk.toString()
+        if (!head.includes('\r\n\r\n')) return
+        requests.push(head.split('\r\n')[0] ?? '')
+        if (reply === '') {
+          socket.destroy()
+          return
+        }
+        socket.write(reply, () => {
+          socket.destroy()
+        })
+      })
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no address')
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      requests,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve()
+          })
+        })
+    }
+  }
+
+  async function listAgainst(server: ClosingServer): Promise<unknown> {
+    const zb = new Zipbox({ apiKey: `zb_${'T'.repeat(43)}`, baseUrl: server.url, maxRetries: 0 })
+    return zb.sandboxes.list().catch((caught: unknown) => caught)
+  }
+
+  it('rejects a request whose connection closed with no response', async () => {
+    const server = await closingServer('')
+    try {
+      const error = await listAgainst(server)
+      expect(error).toBeInstanceOf(ZipboxError)
+      expect(error).toMatchObject({ code: 'unavailable', retryable: true })
+    } finally {
+      await server.close()
+    }
+  })
+
+  // An exec that may have reached the box is never sent again: running a command twice
+  // is worse than an error. The control plane is mocked; the box is a real socket.
+  async function execAgainst(box: ClosingServer): Promise<unknown> {
+    const detail = {
+      id: 'sbx_1',
+      sandboxId: 'sbx_1',
+      name: 'demo',
+      status: 'running',
+      ready: true,
+      readiness: 'ready',
+      httpsReady: true,
+      baseUrl: box.url,
+      boxToken: 'bt_test'
+    }
+    const zb = new Zipbox({
+      apiKey: `zb_${'T'.repeat(43)}`,
+      baseUrl: 'https://api.test',
+      maxRetries: 3,
+      retryBaseDelayMs: 1,
+      fetch: (url, init) =>
+        url.startsWith('https://api.test')
+          ? Promise.resolve(new Response(JSON.stringify(detail), { status: 200 }))
+          : fetch(url, init)
+    })
+    return zb
+      .sandbox('sbx_1')
+      .exec('true')
+      .catch((caught: unknown) => caught)
+  }
+
+  it('rejects an exec whose connection closed with no response, and sends it once', async () => {
+    const box = await closingServer('')
+    try {
+      const error = await execAgainst(box)
+      expect(error).toBeInstanceOf(ZipboxError)
+      expect(error).toMatchObject({ code: 'unavailable' })
+      expect(box.requests).toEqual(['POST /exec HTTP/1.1'])
+    } finally {
+      await box.close()
+    }
+  })
+
+  it('rejects an exec whose event stream closed before its start, and sends it once', async () => {
+    const box = await closingServer(
+      'HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n' +
+        '40\r\nevent: sta'
+    )
+    try {
+      const error = await execAgainst(box)
+      expect(error).toBeInstanceOf(ZipboxError)
+      expect(error).toMatchObject({ code: 'unavailable' })
+      expect(box.requests).toEqual(['POST /exec HTTP/1.1'])
+    } finally {
+      await box.close()
+    }
+  })
+
+  it('rejects a request whose connection closed mid-body', async () => {
+    const server = await closingServer(
+      'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 400\r\n\r\n[{"id":'
+    )
+    try {
+      const error = await listAgainst(server)
+      expect(error).toBeInstanceOf(ZipboxError)
+      expect(error).toMatchObject({ code: 'unavailable', retryable: true })
+    } finally {
+      await server.close()
+    }
   })
 })

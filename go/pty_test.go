@@ -29,13 +29,16 @@ func (b *ptyBox) start(t *testing.T) *httptest.Server {
 	var base string
 	mux := http.NewServeMux()
 	ready := detailHandler(&base, "bt_pty")
-	mux.HandleFunc("/sandbox/sbx_1", func(w http.ResponseWriter, r *http.Request) {
+	// A detail read and a readiness wait answer the same row.
+	read := func(w http.ResponseWriter, r *http.Request) {
 		n := b.reads.Add(1)
 		if b.detail != nil && b.detail(n, w) {
 			return
 		}
 		ready(w, r)
-	})
+	}
+	mux.HandleFunc("/sandbox/sbx_1", read)
+	mux.HandleFunc("/sandbox/sbx_1/wait", read)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		n := b.upgrades.Add(1)
 		if status := b.refuse(n); status != 0 {

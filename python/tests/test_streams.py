@@ -32,6 +32,12 @@ class FakeTransport:
     def close_stream(self, response: HttpResponse) -> None:
         self.closed.append(response)
 
+    def preconnect(self, request: HttpRequest) -> None:
+        return None
+
+    def drop_preconnect(self, handle: Any) -> None:
+        return None
+
 
 def test_leaving_an_iteration_early_closes_its_stream() -> None:
     def op() -> Generator[Any, Any, None]:

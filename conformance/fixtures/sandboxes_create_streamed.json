@@ -1,0 +1,41 @@
+{
+  "name": "sandboxes_create_streamed",
+  "description": "create asks for its answer streamed (Accept: application/x-ndjson). The server sends the box's origin the moment it is placed, then the answer it would have given unstreamed. The last line reads exactly like an unstreamed answer: the box returns at once with the answer's baseUrl and token. The placed line is informational: the SDK never connects to its origin (here {{DEAD}}, which answers nothing).",
+  "call": {
+    "op": "sandboxes.create",
+    "args": {
+      "name": "worker-1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "accept": "application/x-ndjson, application/json",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "worker-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-ndjson; charset=utf-8"
+        },
+        "bodyText": "{\"type\":\"placed\",\"sandboxId\":\"sbx_1\",\"baseUrl\":\"{{DEAD}}\"}\n{\"type\":\"answer\",\"status\":200,\"headers\":{\"server-timing\":\"total;dur=480\"},\"body\":{\"sandboxId\":\"sbx_1\",\"name\":\"worker-1\",\"status\":\"running\",\"created\":true,\"ready\":true,\"readiness\":\"ready\",\"httpsReady\":true,\"baseUrl\":\"{{BASE}}\",\"boxToken\":\"bt_test_token\",\"phase\":\"running\",\"allowedActions\":[\"pause\",\"restart\",\"delete\",\"fork\"]}}\n"
+      }
+    }
+  ],
+  "expect": {
+    "result": {
+      "id": "sbx_1",
+      "ready": true,
+      "baseUrl": "{{BASE}}"
+    }
+  }
+}

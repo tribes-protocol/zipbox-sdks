@@ -1,7 +1,7 @@
 //! `ZIPBOX_API_KEY=zb_… cargo run --example quickstart`
 //!
 //! Creates (or reuses) a box, runs a command, writes and reads a file, opens a
-//! preview, and stops the box.
+//! preview, and pauses the box.
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> zipbox::Result<()> {
@@ -11,7 +11,7 @@ async fn main() -> zipbox::Result<()> {
         tier: Some("s".into()),
         ..Default::default()
     };
-    let sandbox = zb
+    let mut sandbox = zb
         .sandboxes()
         .get_or_create_with("quickstart", options)
         .await?;
@@ -28,6 +28,6 @@ async fn main() -> zipbox::Result<()> {
     let preview = sandbox.preview().create(8000, Some("files")).await?;
     println!("serving at {}", preview.url);
 
-    sandbox.stop().await?;
+    sandbox.pause().await?;
     Ok(())
 }

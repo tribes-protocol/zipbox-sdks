@@ -208,7 +208,7 @@ describe('pty', () => {
         const body =
           served === 1
             ? detail
-            : { ...detail, status: 'archived', ready: false, readiness: 'paused', baseUrl: null }
+            : { ...detail, status: 'paused', ready: false, readiness: 'paused', baseUrl: null }
         return Promise.resolve(new Response(JSON.stringify(body)))
       },
       WebSocket: FakeSocket

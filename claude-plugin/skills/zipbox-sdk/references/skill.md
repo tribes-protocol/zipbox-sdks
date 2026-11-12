@@ -26,7 +26,7 @@ Every Zipbox box already has it, so an agent on one box can drive another withou
 ## What it covers
 
 - **Preflight**: is an SDK or the CLI installed, is `ZIPBOX_API_KEY` set, and where the user gets a key.
-- **SDK essentials**: create or reuse a box, exec, files, background commands, previews and stop - Python first, with the TypeScript, Go and Rust differences.
+- **SDK essentials**: create or reuse a box, exec, files, background commands, previews and pause - Python first, with the TypeScript, Go and Rust differences.
 - **Common patterns**: a long-running job with re-attach, previewing a dev server, an agent on one box driving another.
 - **Limits**: spool caps, concurrency, the rate limit, and what is not in this version.
 - **"I need to… → read this"**: a table that sends the agent to the right reference page.

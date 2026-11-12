@@ -28,7 +28,7 @@ const (
 // TailscaleStatus is a box's tailnet status: the live state merged with the
 // last known identity.
 type TailscaleStatus struct {
-	// State is nil when only the last known identity is known (the box is stopped).
+	// State is nil when only the last known identity is known (the box is paused).
 	State *TailscaleState `json:"state,omitempty"`
 	// Tailnet is the tailnet's name, e.g. "example.com".
 	Tailnet *string `json:"tailnet,omitempty"`

@@ -96,7 +96,16 @@ export async function readJson<T>(
   guard: (value: unknown) => value is T,
   what: string
 ): Promise<T> {
-  const text = await response.text()
+  // A connection the server closed mid-body rejects the read (undici: "terminated"):
+  // that is the usual retryable network error, never a raw TypeError.
+  const text = await response.text().catch((caught: unknown) => {
+    throw new ZipboxError({
+      code: 'unavailable',
+      message: caught instanceof Error ? caught.message : 'network error',
+      status: response.status,
+      retryable: true
+    })
+  })
   let parsed: unknown
   try {
     parsed = JSON.parse(text)

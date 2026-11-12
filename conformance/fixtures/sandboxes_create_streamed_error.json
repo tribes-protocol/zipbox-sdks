@@ -1,0 +1,42 @@
+{
+  "name": "sandboxes_create_streamed_error",
+  "description": "A streamed create whose last line carries an error raises it exactly as the unstreamed answer would: a 409 conflict, not retried.",
+  "call": {
+    "op": "sandboxes.create",
+    "args": {
+      "name": "worker-1"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/sandbox/identity/claim",
+        "headers": {
+          "authorization": "Bearer zb_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+          "idempotency-key": "{{ANY}}",
+          "accept": "application/x-ndjson, application/json",
+          "content-type": "application/json"
+        },
+        "body": {
+          "name": "worker-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-ndjson"
+        },
+        "bodyText": "{\"type\":\"placed\",\"sandboxId\":\"sbx_1\",\"baseUrl\":\"{{DEAD}}\"}\n{\"type\":\"answer\",\"status\":409,\"headers\":{},\"body\":{\"error\":{\"code\":\"conflict\",\"message\":\"Sandbox name is already taken\",\"requestId\":\"req_test\",\"retryable\":false,\"retryAfterMs\":null,\"docsUrl\":\"https://zipbox.ai/docs/errors#conflict\"}}}\n"
+      }
+    }
+  ],
+  "expect": {
+    "error": {
+      "code": "conflict",
+      "status": 409,
+      "retryable": false,
+      "requestId": "req_test"
+    }
+  }
+}

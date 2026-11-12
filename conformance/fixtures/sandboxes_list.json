@@ -32,7 +32,7 @@
             "createdAt": "2026-10-19T00:00:00.000Z",
             "updatedAt": "2026-10-19T00:00:00.000Z",
             "phase": "running",
-            "allowedActions": ["stop", "restart", "delete", "fork"]
+            "allowedActions": ["pause", "restart", "delete", "fork"]
           }
         ]
       }
@@ -47,7 +47,7 @@
           "name": "demo",
           "status": "running",
           "phase": "running",
-          "allowedActions": ["stop", "restart", "delete", "fork"]
+          "allowedActions": ["pause", "restart", "delete", "fork"]
         }
       ]
     }

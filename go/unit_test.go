@@ -328,7 +328,7 @@ func TestSandboxDetailJSONOmitsBoxToken(t *testing.T) {
 	}
 }
 
-func TestGetOrCreateStartsAnArchivingBox(t *testing.T) {
+func TestGetOrCreateResumesAStoppingBox(t *testing.T) {
 	var base string
 	var calls []string
 	var mu sync.Mutex
@@ -336,13 +336,13 @@ func TestGetOrCreateStartsAnArchivingBox(t *testing.T) {
 	mux.HandleFunc("/sandbox", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `[{"id":"sbx_1","name":"demo","status":"stopping","isArchived":true,"createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}]`)
 	})
-	mux.HandleFunc("/sandbox/sbx_1/restore", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/sandbox/sbx_1/resume", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		mu.Unlock()
 		io.WriteString(w, `{"success":true}`)
 	})
-	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	mux.HandleFunc("/sandbox/sbx_1/wait", detailHandler(&base, "bt"))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	base = server.URL
@@ -350,7 +350,7 @@ func TestGetOrCreateStartsAnArchivingBox(t *testing.T) {
 	if err != nil || box.ID != "sbx_1" {
 		t.Fatalf("%v %v", box, err)
 	}
-	if len(calls) != 1 || calls[0] != "POST /sandbox/sbx_1/restore" {
+	if len(calls) != 1 || calls[0] != "POST /sandbox/sbx_1/resume" {
 		t.Fatalf("calls %v", calls)
 	}
 }
@@ -397,7 +397,7 @@ func TestGetOrCreateReturnsAnExistingBoxAsItIs(t *testing.T) {
 	mux.HandleFunc("/sandbox", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `[{"id":"sbx_1","name":"ci-runner","status":"running","tier":"s","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}]`)
 	})
-	mux.HandleFunc("/sandbox/sbx_1", detailHandler(&base, "bt"))
+	mux.HandleFunc("/sandbox/sbx_1/wait", detailHandler(&base, "bt"))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	base = server.URL
@@ -672,8 +672,9 @@ func TestForkWaitEndsWithCtxAndLeavesTheForkRunning(t *testing.T) {
 		case "POST /sandbox/sbx_1/fork":
 			w.WriteHeader(202)
 			io.WriteString(w, `{"operationId":"fork_1","sandbox":{"id":"sbx_2","name":"demo-2","status":"provisioning","createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"},"fork":{"operationId":"fork_1","sourceSandboxId":"sbx_1","childSandboxId":"sbx_2","sourcePolicy":"require_paused","phase":"queued","sourceRecovery":"not_needed","attempt":0,"createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z"}}`)
-		case "GET /sandbox/sbx_2":
-			io.WriteString(w, `{"id":"sbx_2","name":"demo-2","status":"provisioning","createdAt":"2026-11-05T00:00:00Z","updatedAt":"2026-11-05T00:00:00Z","ready":false}`)
+		case "GET /sandbox/sbx_2/wait":
+			// The server holds the wait until the box is ready; it never is here.
+			<-r.Context().Done()
 		default:
 			w.WriteHeader(500)
 		}
@@ -692,7 +693,7 @@ func TestForkWaitEndsWithCtxAndLeavesTheForkRunning(t *testing.T) {
 		t.Fatalf("requests %v", seen)
 	}
 	for _, s := range seen[1:] {
-		if s != "GET /sandbox/sbx_2" {
+		if s != "GET /sandbox/sbx_2/wait" {
 			t.Fatalf("the wait sent %s", s)
 		}
 	}
@@ -725,9 +726,9 @@ func TestBoxNotReadyFollowsReadiness(t *testing.T) {
 		code              ErrorCode
 		retryable         bool
 	}{
-		{"settling", "archived", CodeBoxNotRunning, true},
-		{"paused", "archived", CodeBoxNotRunning, false},
-		{"start_failed", "archived", CodeBoxNotRunning, false},
+		{"settling", "paused", CodeBoxNotRunning, true},
+		{"paused", "paused", CodeBoxNotRunning, false},
+		{"start_failed", "paused", CodeBoxNotRunning, false},
 		{"awaits_tailnet", "running", CodeTailnetNotConnected, false},
 	}
 	for _, tc := range cases {
@@ -775,9 +776,9 @@ func TestNotReadyReadAndLifecycleCallsDropCachedCredentials(t *testing.T) {
 			detailHandler(&base, "bt")(w, r)
 			return
 		}
-		io.WriteString(w, `{"id":"sbx_1","status":"archived","readiness":"paused","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":false}`)
+		io.WriteString(w, `{"id":"sbx_1","status":"paused","readiness":"paused","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z","ready":false}`)
 	})
-	for _, action := range []string{"/restore", "/reset", "/tier"} {
+	for _, action := range []string{"/pause", "/reset", "/tier"} {
 		mux.HandleFunc("/sandbox/sbx_1"+action, func(w http.ResponseWriter, r *http.Request) {})
 	}
 	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
@@ -801,7 +802,7 @@ func TestNotReadyReadAndLifecycleCallsDropCachedCredentials(t *testing.T) {
 		run  func() error
 	}{
 		{"Refresh", func() error { _, err := box.Refresh(ctx); return err }},
-		{"Start", func() error { return box.Start(ctx) }},
+		{"Pause", func() error { _, err := box.Pause(ctx); return err }},
 		{"Restart", func() error { return box.Restart(ctx) }},
 		{"SetTier", func() error { return box.SetTier(ctx, "m") }},
 	} {
@@ -883,5 +884,230 @@ func TestOneRetryRule(t *testing.T) {
 	zerr := errorFromResponse(resp, []byte(`{"error":{"code":"a_code_from_later","message":"m"}}`))
 	if zerr.Code != CodeConflict || zerr.DocsURL != "https://zipbox.ai/docs/errors#conflict" {
 		t.Fatalf("%+v", zerr)
+	}
+}
+
+const (
+	settlingDetail = `{"id":"sbx_1","status":"provisioning","readiness":"settling","createdAt":"2026-11-11T00:00:00Z","updatedAt":"2026-11-11T00:00:00Z","ready":false}`
+	pausedDetail   = `{"id":"sbx_1","status":"paused","phase":"paused","readiness":"paused","createdAt":"2026-11-11T00:00:00Z","updatedAt":"2026-11-11T00:00:00Z","ready":false}`
+)
+
+// recorder serves answer(n, r, w) for the n-th request (from 1) and records every
+// request as "METHOD /path?query".
+type recorder struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (rec *recorder) serve(t *testing.T, answer func(n int, r *http.Request, w http.ResponseWriter)) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.mu.Lock()
+		rec.seen = append(rec.seen, r.Method+" "+r.URL.RequestURI())
+		n := len(rec.seen)
+		rec.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		answer(n, r, w)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func (rec *recorder) requests() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]string(nil), rec.seen...)
+}
+
+// A held /wait answer that is still settling means the server's hold limit passed:
+// the wait asks again at once, with no poll delay in between.
+func TestWaitReadyAsksAgainAtOnceAfterASettlingAnswer(t *testing.T) {
+	var base string
+	rec := &recorder{}
+	server := rec.serve(t, func(n int, r *http.Request, w http.ResponseWriter) {
+		if n == 1 {
+			io.WriteString(w, settlingDetail)
+			return
+		}
+		detailHandler(&base, "bt")(w, r)
+	})
+	base = server.URL
+	// A poll delay this long would outlast the test's own deadline.
+	c := New("zb_x", WithBaseURL(server.URL), WithPollInterval(time.Minute, time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	box, err := c.Sandboxes.WaitReady(ctx, "sbx_1")
+	if err != nil || !box.Detail.Ready {
+		t.Fatalf("%v %v", box, err)
+	}
+	want := []string{"GET /sandbox/sbx_1/wait?until=ready", "GET /sandbox/sbx_1/wait?until=ready"}
+	if got := rec.requests(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+}
+
+// An API that predates /wait answers it 404; the box still reads 200, so the wait
+// falls back to polling GET /sandbox/{id} with the same verdicts.
+func TestWaitReadyFallsBackToPollingWhenWaitIs404(t *testing.T) {
+	var base string
+	rec := &recorder{}
+	server := rec.serve(t, func(n int, r *http.Request, w http.ResponseWriter) {
+		switch n {
+		case 1:
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":"Route not found"}`)
+		case 2:
+			io.WriteString(w, settlingDetail)
+		default:
+			detailHandler(&base, "bt")(w, r)
+		}
+	})
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL), WithPollInterval(time.Millisecond, time.Millisecond))
+	box, err := c.Sandboxes.WaitReady(context.Background(), "sbx_1")
+	if err != nil || !box.Detail.Ready {
+		t.Fatalf("%v %v", box, err)
+	}
+	want := []string{"GET /sandbox/sbx_1/wait?until=ready", "GET /sandbox/sbx_1", "GET /sandbox/sbx_1"}
+	if got := rec.requests(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+}
+
+// A create the server answered with the box already bound returns at once, and the
+// box token in that answer is the one box calls use: no detail read, no wait.
+func TestCreateWithAReadyClaimMakesNoFurtherRequest(t *testing.T) {
+	var base string
+	var auth string
+	rec := &recorder{}
+	server := rec.serve(t, func(n int, r *http.Request, w http.ResponseWriter) {
+		switch r.URL.Path {
+		case "/sandbox/identity/claim":
+			fmt.Fprintf(w, `{"sandboxId":"sbx_1","name":"demo","status":"running","created":true,"ready":true,"readiness":"ready","httpsReady":true,"baseUrl":%q,"boxToken":"bt_claim","phase":"running","allowedActions":["pause","restart","delete","fork"]}`, base)
+		case "/exec":
+			auth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "id: 0-0\nevent: start\ndata: {\"id\":\"c\"}\n\nid: 1-0\nevent: exit\ndata: {\"state\":\"exited\",\"exitCode\":0}\n\n")
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL))
+	box, err := c.Sandboxes.Create(context.Background(), CreateOptions{Name: "demo"})
+	if err != nil || box.ID != "sbx_1" || box.Detail == nil || !box.Detail.Ready {
+		t.Fatalf("%v %v", box, err)
+	}
+	if _, err := box.Exec(context.Background(), "true"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"POST /sandbox/identity/claim", "POST /exec"}
+	if got := rec.requests(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+	if auth != "Bearer bt_claim" {
+		t.Fatalf("authorization %q, want the claim's box token", auth)
+	}
+}
+
+// Stop and Start are aliases: they send exactly the requests Pause and Resume send,
+// on the service and on the box handle, and return the same rows.
+func TestStopAndStartSendTheRequestsOfPauseAndResume(t *testing.T) {
+	var base string
+	rec := &recorder{}
+	server := rec.serve(t, func(n int, r *http.Request, w http.ResponseWriter) {
+		switch r.URL.Path {
+		case "/sandbox/sbx_1/pause":
+			io.WriteString(w, pausedDetail)
+		case "/sandbox/sbx_1/resume":
+			detailHandler(&base, "bt")(w, r)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	base = server.URL
+	c := New("zb_x", WithBaseURL(server.URL))
+	ctx := context.Background()
+	box := c.Sandbox("sbx_1")
+	rows := func(steps ...func() (*SandboxDetail, error)) []string {
+		var out []string
+		for _, step := range steps {
+			detail, err := step()
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, string(detail.Status)+"/"+string(detail.readiness()))
+		}
+		return out
+	}
+	viaService := func(call func(context.Context, string) (*Box, error)) func() (*SandboxDetail, error) {
+		return func() (*SandboxDetail, error) {
+			b, err := call(ctx, "sbx_1")
+			if err != nil {
+				return nil, err
+			}
+			return b.Detail, nil
+		}
+	}
+	canonical := rows(viaService(c.Sandboxes.Pause), viaService(c.Sandboxes.Resume),
+		func() (*SandboxDetail, error) { return box.Pause(ctx) }, func() (*SandboxDetail, error) { return box.Resume(ctx) })
+	// The box answers on this server too, so a resume's background pre-connect of its
+	// last origin (GET /healthz, preconnect_test.go) lands here at no fixed point.
+	sent := func() []string {
+		var out []string
+		for _, request := range rec.requests() {
+			if request != "GET "+preconnectPath {
+				out = append(out, request)
+			}
+		}
+		return out
+	}
+	sentCanonical := sent()
+	aliases := rows(viaService(c.Sandboxes.Stop), viaService(c.Sandboxes.Start),
+		func() (*SandboxDetail, error) { return box.Stop(ctx) }, func() (*SandboxDetail, error) { return box.Start(ctx) })
+	sentAliases := sent()[len(sentCanonical):]
+	want := []string{"POST /sandbox/sbx_1/pause", "POST /sandbox/sbx_1/resume", "POST /sandbox/sbx_1/pause", "POST /sandbox/sbx_1/resume"}
+	if fmt.Sprint(sentCanonical) != fmt.Sprint(want) || fmt.Sprint(sentAliases) != fmt.Sprint(want) {
+		t.Fatalf("pause/resume sent %v, stop/start sent %v, want %v each", sentCanonical, sentAliases, want)
+	}
+	if fmt.Sprint(canonical) != fmt.Sprint(aliases) || canonical[0] != "paused/paused" || canonical[1] != "running/ready" {
+		t.Fatalf("pause/resume returned %v, stop/start %v", canonical, aliases)
+	}
+}
+
+// A pause the host has not answered within the server's budget (202) waits on
+// /wait?until=paused; a box that reads running again had its pause cancelled.
+func TestPauseAcceptedWaitsForPausedAndACancelledPauseIsConflict(t *testing.T) {
+	stopping := `{"id":"sbx_1","status":"stopping","phase":"stopping","readiness":"settling","createdAt":"2026-11-11T00:00:00Z","updatedAt":"2026-11-11T00:00:00Z","ready":false}`
+	for _, cancelled := range []bool{false, true} {
+		var base string
+		rec := &recorder{}
+		server := rec.serve(t, func(n int, r *http.Request, w http.ResponseWriter) {
+			switch {
+			case n == 1:
+				w.WriteHeader(http.StatusAccepted)
+				io.WriteString(w, stopping)
+			case cancelled:
+				detailHandler(&base, "bt")(w, r)
+			default:
+				io.WriteString(w, pausedDetail)
+			}
+		})
+		base = server.URL
+		box, err := New("zb_x", WithBaseURL(server.URL)).Sandboxes.Pause(context.Background(), "sbx_1")
+		want := []string{"POST /sandbox/sbx_1/pause", "GET /sandbox/sbx_1/wait?until=paused"}
+		if got := rec.requests(); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("cancelled=%t: requests %v, want %v", cancelled, got, want)
+		}
+		if !cancelled {
+			if err != nil || box.Detail.Status != StatusPaused {
+				t.Fatalf("%v %v", box, err)
+			}
+			continue
+		}
+		var zerr *Error
+		if !errors.As(err, &zerr) || zerr.Code != CodeConflict || zerr.Retryable {
+			t.Fatalf("err %v, want a non-retryable conflict", err)
+		}
 	}
 }
